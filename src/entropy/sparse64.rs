@@ -40,6 +40,15 @@ impl Encoder for SparseBlock64Encoder {
         if k == 0 || k == n {
             return Vec::new(); // ZERO / RAW territory
         }
+        // Density pre-gate: the raw streams cost at least `k` literal
+        // bytes plus `8 × nonzero` rank bytes (nonzero >= k/8), so once
+        // k >= n/2 the streams cannot beat raw regardless of rANS
+        // compression. Skipping early keeps the write path from paying
+        // for doomed stream construction on dense/random chunks (the
+        // campaign caught a ~3x write-throughput regression here).
+        if k as u64 * 2 >= n as u64 {
+            return Vec::new();
+        }
         // When the whole-chunk rank fits, the plain SPARSE family is
         // cheaper (no model/stream overhead); only propose here when the
         // u128 cliff applies or the streams can plausibly win. The cost
@@ -216,6 +225,18 @@ mod tests {
         assert!(
             SparseBlock64Encoder
                 .encode(&dense, &ctx_for(&dense, &limits, &policy))
+                .is_empty()
+        );
+        // Half-dense (k >= n/2): the raw streams cannot beat raw; the
+        // density pre-gate must skip without building streams (the
+        // campaign caught a ~3x write-throughput regression here).
+        let mut half = vec![0u8; 65536];
+        for p in 0..32768usize {
+            half[p * 2] = 7;
+        }
+        assert!(
+            SparseBlock64Encoder
+                .encode(&half, &ctx_for(&half, &limits, &policy))
                 .is_empty()
         );
     }
