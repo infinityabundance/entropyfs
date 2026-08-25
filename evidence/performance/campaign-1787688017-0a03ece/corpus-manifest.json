@@ -1,0 +1,88 @@
+[
+  {
+    "content_hash": "f88a4673a086990cc279e79430680b569025cdf4887605dbb2a216b155205c1e",
+    "description": "docs + src + evidence + manifests, length-prefixed; deterministic per revision",
+    "logical_bytes": 3217274,
+    "name": "src",
+    "source": "EntropyFS source tree pack (revision /mnt/1tb_kingston/entropyfs)",
+    "version_count": 1,
+    "version_hashes": [
+      "f88a4673a086990cc279e79430680b569025cdf4887605dbb2a216b155205c1e"
+    ],
+    "written_bytes": 3217274
+  },
+  {
+    "content_hash": "1ef906e8054d94123fd0ed5e775743b22b5f4083fe86228a2e977ba51ba2b268",
+    "description": "structured, low-cardinality, periodic and random-looking 64 KiB chunks; identical to the Phase-4 ablation corpus generator",
+    "logical_bytes": 67108864,
+    "name": "structured",
+    "source": "synthetic: 4 MiB zones of text/zeros/low-cardinality/random (Phase-4 ablation corpus, byte-identical)",
+    "version_count": 1,
+    "version_hashes": [
+      "1ef906e8054d94123fd0ed5e775743b22b5f4083fe86228a2e977ba51ba2b268"
+    ],
+    "written_bytes": 67108864
+  },
+  {
+    "content_hash": "52755c6a695ae50351c33c5c6345bc78c4a4bf04763d9270b2238ff8f626ec92",
+    "description": "H2 base+residual test: P0 previous-version bases should capture small residuals on early versions",
+    "logical_bytes": 4194304,
+    "name": "versioned",
+    "source": "synthetic: 8 drift versions of a 4 MiB structured file (deterministic per-chunk mutations)",
+    "version_count": 8,
+    "version_hashes": [
+      "bb9f018ede521f6ec0a9e8dc8a50876ac36f8c18dbdd66ca59cac4cded1ac7ab",
+      "c17f14ce95ffa291e45b1a461466fc3867c5efe2c6c6aab299433902d04dc92a",
+      "f083730982e977205dfbd7976e82a943924b31ca22642af1d98bab85daecd49f",
+      "2791071e75fb81e5326af8866084844a8ae07a6d09c38283f15b6755beb83a30",
+      "c9a2f445e88b1c7464c43f527043e717196bc69ecf4c909413362f76d1f4efb5",
+      "8c9d2b4f811c90e646462786477619afe4b0895700552a2b092622281d399645",
+      "6368fb5c4c2324ca9d12c0201cff571589723834a38aa398bad9e8976ff65119",
+      "52755c6a695ae50351c33c5c6345bc78c4a4bf04763d9270b2238ff8f626ec92"
+    ],
+    "written_bytes": 33554432
+  },
+  {
+    "content_hash": "e9304c30daddc9e80c3b8d57483c518ea5637c6241ca02d835618299e3d194ac",
+    "description": "methodology §5 negative control: shuffled temporal history must eliminate base+residual gains",
+    "logical_bytes": 4194304,
+    "name": "shuffled",
+    "source": "synthetic: versioned stream with per-version chunk permutation (temporal adjacency destroyed)",
+    "version_count": 8,
+    "version_hashes": [
+      "0772740004c66d10fd80f029fa04999e40e24adffb3bd694ba020def59a5c723",
+      "3afdbd1301c67fd7e1db3745450dbeefcce21e74ca1f62f0217f22c8590f05c4",
+      "bb803487ba27861b70996211fc7a54b3434ab47e305a458f19c8bdb47050b4dd",
+      "63f342f943cb3fa7867912b9c98b94dda2627725651db06128818fcb4ced9c16",
+      "a09b18123dc2dcc06eb4cb7afd39f194d63f1b7561fc73d9462f116a9156f547",
+      "4c862231677e65fc96d9f2eccc917e6a5dc0973ea6718eba486ba575d7522874",
+      "5327ab61baf3ebe53c015c80d1c557df49421dd112e7a8bc134aff7213c0a21d",
+      "e9304c30daddc9e80c3b8d57483c518ea5637c6241ca02d835618299e3d194ac"
+    ],
+    "written_bytes": 33554432
+  },
+  {
+    "content_hash": "d914eb810a1d6d56dfca06a43276f047f67d43fe6407ce577108c95c8f64a4f8",
+    "description": "methodology §5 negative control: random input must fall back toward RAW",
+    "logical_bytes": 33554432,
+    "name": "urandom",
+    "source": "synthetic: splitmix64 stream, fixed seed (incompressible control)",
+    "version_count": 1,
+    "version_hashes": [
+      "d914eb810a1d6d56dfca06a43276f047f67d43fe6407ce577108c95c8f64a4f8"
+    ],
+    "written_bytes": 33554432
+  },
+  {
+    "content_hash": "a80a87fd99f6dab65839051551da9081cb179ede3dff30b76bf366c4859340ad",
+    "description": "methodology §5 negative control: already-compressed data must show little or no additional gain",
+    "logical_bytes": 414638,
+    "name": "compressed-z19",
+    "source": "zstd -19 of the source pack (already-compressed control)",
+    "version_count": 1,
+    "version_hashes": [
+      "a80a87fd99f6dab65839051551da9081cb179ede3dff30b76bf366c4859340ad"
+    ],
+    "written_bytes": 414638
+  }
+]

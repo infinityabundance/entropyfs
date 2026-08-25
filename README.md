@@ -67,6 +67,7 @@ physical storage (RAW fallback) — that is a success condition, not a failure.
 | 9 (9F) | **Gap decomposition sealed** — the remaining gap to per-file zstd is measured, not asserted: zstd with the same per-directory anchor (`-D`, self-excluded) gains only ~8.5% (the anchor policy is NOT the cap); the residual gap is ~2/3 **per-extent persistence overhead** (multi-stream rANS models + descriptors on small files, ~26.5% of footprint) and ~1/3 coder quality. Also falsified: `scale_bits` does not shrink models (symbol-count-dominated encoding). Sets the 9G direction: amortized model sharing | ✅ sealed (`campaign-1787683904-da26c75/`) |
 | 9 (9G0) | **Model-cost-aware stream selection** — the stream-level RAW/rANS gate now includes the persisted model bytes (`enc + model < raw`), so a stream whose rANS gain is smaller than its model is stored RAW. The biggest single measured win since 9F: sequence model objects on the real tree 277.6 KB → 74.3 KB (per-extent overhead 26.5% → 11.1% of footprint); tree court 2.388× → 2.775× post shared-dict; src corpus 4.327×. Plus the model-sharing **oracle** (diagnostic): intra-extent partition sharing falsified (−125 KB), directory aggregate bundle validated (+49.6 KB), pools lose to the single aggregate | ✅ implemented + evidence-sealed (`campaign-1787684918-80e36c8/`) |
 | 9 (9G) | **Amortized entropy models** — `model_bundle_pass` (background): one aggregate model per stream type per directory cohort, trained on the cohort's summed histograms; each member's streams are re-encoded against it (per-stream RAW fallback) and rewritten only when the cohort's total persisted bytes strictly fall. **No format change**: the model object is content-addressed, the descriptor references it by ChunkId, CAS amortizes it. The oracle's S2 is implemented; S1 (intra-extent bundle format) and S3/S4 (pools) are rejected on measured evidence. Tree court: shared-dict 2.813× → **2.881×** (25.7 KiB real post-GC reachable reduction); byte-exact, idempotent, fsck-clean, noise control never rewritten | ✅ implemented + evidence-sealed (`campaign-1787685723-60ecaf2/`) |
+| 9 (9H) | **Physical convergence** — the derived index can diverge from what is actually on disk. The physical scanner reconciles every segment byte (`live / dead-indexed / index-hidden / unindexed / torn / padding / format`), GC victim selection uses scanned physical occupancy, the chunk-index rebuild bulk-loads the tree staging each final node exactly once (the old COW rebuild physically wrote every intermediate — 2.66 MB of dead BtreeNodes on the real tree), and `entropyfs gc --compact` converges the backing to reachable + bounded overhead (idempotent). Tree court: backing **9.13 MB → 1.10 MB**; post-GC = reachable + 0 B dead + 4 B format; full compact = reachable + 4 B (0.00% of logical). The 2.88× representation win is now a real **~2.9× filesystem capacity win** | ✅ implemented + evidence-sealed (`campaign-1787688017-0a03ece/`) |
 
 ## Measured results
 
@@ -160,6 +161,23 @@ oversized-descriptor fix (Phase 6) eliminated.
   reclaims the superseded per-extent models). The win is better-trained
   aggregate models (the enc side), not model dedup — the model-bytes
   metric is flat, recorded as-is.
+- **Phase-9H (sealed `0a03ece`) — physical convergence**: the 9G tree
+  court exposed that the optimized tree occupied 3.66 MB of backing for
+  1.07 MB reachable (0.84× logical). The physical scanner
+  (`store/physical.rs`) reconciled every segment byte and falsified the
+  index-hidden-duplicate hypothesis on that workload (index-hidden = 0):
+  the dead bytes were 2.66 MB of `BtreeNode` records staged by the GC
+  chunk-index REBUILD, which rebuilt the tree with repeated COW inserts
+  — every intermediate path version written and indexed. Fixes: GC
+  victim selection now uses scanned physical occupancy; the rebuild
+  bulk-loads the tree bottom-up (each final node staged exactly once);
+  `entropyfs gc --compact` (`compact_full`) converges the backing and is
+  idempotent. Tree court: backing **9,129,988 B → 1,100,161 B**;
+  post-GC reconciliation = reachable 1,100,157 B + 0 B dead + 0 B
+  index-hidden + 0 B unindexed + 4 B format; full compaction = reachable
+  + 4 B (0.00% of logical); second compaction reclaims 0. The 2.88×
+  representation win is now a real ~2.9× capacity win — the physical
+  floor no longer eats the representation state.
 - The campaign's H2 experiment (synthetic drift corpus) is now a sealed
   **controlled series**: `67d977a` +7.2% (RANS-era floor), `a6641d1`
   −24% (SequenceRans floor, positional residuals only), `43bf17e`
