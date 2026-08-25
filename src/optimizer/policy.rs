@@ -51,6 +51,12 @@ pub struct OptimizeOptions {
     /// residuals so the temporal (BaseSequence) and contextual (Sequence-
     /// Dict) attribution boundaries stay clean.
     pub allow_sequence_dict: bool,
+    /// SequenceSharedDict — the post-registration shared amortized
+    /// dictionary family (`SequenceSharedDictEncoder`, ladder step E3,
+    /// Phase-9C): local-history + optional same-file dictionary + a
+    /// cross-file shared dictionary chosen by the background optimizer,
+    /// counted as persistent state.
+    pub allow_shared_dict: bool,
     /// Base+residual coding against the in-hand previous version (P0): the
     /// "base residuals" step of the cumulative ladder (methodology §4 A3).
     pub allow_bases: bool,
@@ -71,6 +77,7 @@ impl Default for OptimizeOptions {
             allow_byte_rans: true,
             allow_sequence_rans: true,
             allow_sequence_dict: true,
+            allow_shared_dict: true,
             allow_bases: true,
             allow_temporal_bases: true,
             allow_universe: true,
@@ -88,6 +95,7 @@ impl OptimizeOptions {
             allow_byte_rans: false,
             allow_sequence_rans: false,
             allow_sequence_dict: false,
+            allow_shared_dict: false,
             allow_bases: false,
             allow_temporal_bases: false,
             allow_universe: false,
@@ -104,6 +112,7 @@ impl OptimizeOptions {
             allow_byte_rans: true,
             allow_sequence_rans: false,
             allow_sequence_dict: false,
+            allow_shared_dict: false,
             allow_bases: false,
             allow_temporal_bases: false,
             allow_universe: false,
@@ -120,6 +129,7 @@ impl OptimizeOptions {
             allow_byte_rans: false,
             allow_sequence_rans: true,
             allow_sequence_dict: false,
+            allow_shared_dict: false,
             allow_bases: false,
             allow_temporal_bases: false,
             allow_universe: false,
@@ -138,6 +148,7 @@ impl OptimizeOptions {
             Channel::Universe => self.allow_universe,
             Channel::Rans => self.allow_byte_rans || self.allow_sequence_rans,
             Channel::Raw => true,
+            Channel::SharedDict => self.allow_shared_dict,
         }
     }
 
@@ -157,6 +168,7 @@ impl OptimizeOptions {
             Representation::Rans { .. } => self.allow_byte_rans,
             Representation::SequenceRans { .. } => self.allow_sequence_rans,
             Representation::SequenceDict { .. } => self.allow_sequence_dict,
+            Representation::SequenceSharedDict { .. } => self.allow_shared_dict,
             Representation::ExactRef { .. } => self.allow_exact_ref,
             Representation::BaseResidual { .. } => self.allow_bases,
             Representation::EntropyRef { .. } => self.allow_universe,
@@ -237,6 +249,13 @@ impl OptimizeOptions {
                 },
             ),
             (
+                "no-shared-dict",
+                OptimizeOptions {
+                    allow_shared_dict: false,
+                    ..Default::default()
+                },
+            ),
+            (
                 "no-universe",
                 OptimizeOptions {
                     allow_universe: false,
@@ -277,6 +296,7 @@ impl OptimizeOptions {
                     allow_byte_rans: true,
                     allow_sequence_rans: false,
                     allow_sequence_dict: false,
+                    allow_shared_dict: false,
                     allow_bases: false,
                     allow_temporal_bases: false,
                     allow_universe: false,
@@ -293,6 +313,7 @@ impl OptimizeOptions {
                     allow_byte_rans: true,
                     allow_sequence_rans: false,
                     allow_sequence_dict: false,
+                    allow_shared_dict: false,
                     allow_bases: true,
                     allow_temporal_bases: false,
                     allow_universe: false,
@@ -309,6 +330,7 @@ impl OptimizeOptions {
                     allow_byte_rans: true,
                     allow_sequence_rans: false,
                     allow_sequence_dict: false,
+                    allow_shared_dict: false,
                     allow_bases: true,
                     allow_temporal_bases: false,
                     allow_universe: false,
@@ -325,6 +347,7 @@ impl OptimizeOptions {
                     allow_byte_rans: true,
                     allow_sequence_rans: false,
                     allow_sequence_dict: false,
+                    allow_shared_dict: false,
                     allow_bases: true,
                     allow_temporal_bases: true,
                     allow_universe: false,
@@ -341,6 +364,7 @@ impl OptimizeOptions {
                     allow_byte_rans: true,
                     allow_sequence_rans: false,
                     allow_sequence_dict: false,
+                    allow_shared_dict: false,
                     allow_bases: true,
                     allow_temporal_bases: true,
                     allow_universe: true,
@@ -357,6 +381,7 @@ impl OptimizeOptions {
                     allow_byte_rans: true,
                     allow_sequence_rans: false,
                     allow_sequence_dict: false,
+                    allow_shared_dict: false,
                     allow_bases: true,
                     allow_temporal_bases: true,
                     allow_universe: true,
@@ -373,6 +398,7 @@ impl OptimizeOptions {
                     allow_byte_rans: true,
                     allow_sequence_rans: false,
                     allow_sequence_dict: false,
+                    allow_shared_dict: false,
                     allow_bases: true,
                     allow_temporal_bases: true,
                     allow_universe: true,
@@ -385,8 +411,21 @@ impl OptimizeOptions {
             ("E1-sequence-rans", OptimizeOptions::default(), true),
             // E2 = E1 + the cross-chunk dictionary family (SequenceDict,
             // Phase-9B): local-history + external same-file dictionary in
-            // one stream, depth-capped.
-            ("E2-sequence-dict", OptimizeOptions::default(), true),
+            // one stream, depth-capped. The shared-dictionary family is
+            // excluded so the E2 boundary stays the same-file dictionary.
+            (
+                "E2-sequence-dict",
+                OptimizeOptions {
+                    allow_shared_dict: false,
+                    ..Default::default()
+                },
+                true,
+            ),
+            // E3 = E2 + the shared amortized dictionary family
+            // (SequenceSharedDict, Phase-9C): a cross-file shared
+            // dictionary chosen by the background optimizer, counted as
+            // persistent state. The current production pipeline.
+            ("E3-shared-dict", OptimizeOptions::default(), true),
         ]
     }
 }

@@ -57,5 +57,14 @@ pub fn run(args: &OptimizeArgs) -> Result<(), String> {
         stats.no_gain,
         stats.errors
     );
+    // Phase-9C: the shared amortized dictionary pass (directory anchors).
+    let shared = crate::optimizer::background::shared_dict_pass(&store, options, None)
+        .map_err(|e| e.to_string())?;
+    if shared.rewritten > 0 || shared.scanned > 0 {
+        println!(
+            "optimize: shared-dict pass scanned {} extents, rewrote {}, saved ~{} persisted bytes (no-gain {}, errors {})",
+            shared.scanned, shared.rewritten, shared.saved_bytes, shared.no_gain, shared.errors
+        );
+    }
     Ok(())
 }

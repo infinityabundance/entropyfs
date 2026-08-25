@@ -76,6 +76,9 @@ pub const SRC_LOCAL: u8 = 0x00;
 /// Copy-source symbol: the u16 value is an absolute offset into the
 /// dictionary chunk.
 pub const SRC_DICT: u8 = 0x01;
+/// Copy-source symbol (Phase-9C): the u16 value is an absolute offset into
+/// the shared cross-file dictionary chunk.
+pub const SRC_SHARED: u8 = 0x02;
 /// Maximum dictionary size: DICT offsets are u16 LE, so a dictionary can
 /// be at most 64 KiB (offsets 0..=65535).
 pub const MAX_DICT: usize = 65536;
@@ -384,6 +387,177 @@ pub fn encode_sequence_dict(input: &[u8], dict: &[u8]) -> Option<DictStreams> {
         offsets,
         sources,
     })
+}
+
+/// The raw LZ77 streams for `input` against the local history, the
+/// previous same-file chunk (`file_dict`, may be empty = absent), and a
+/// shared cross-file dictionary (`shared`, required; Phase-9C).
+///
+/// Three match sources, one copy-source symbol per copy: `SRC_LOCAL`
+/// (backward distance), `SRC_DICT` (absolute file-dictionary offset),
+/// `SRC_SHARED` (absolute shared-dictionary offset). At every position the
+/// longest match wins; equal lengths deterministically prefer LOCAL, then
+/// DICT, then SHARED (identical stream cost, cheapest decoder state).
+/// Deterministic and bounded: all chain walks are depth-capped, offsets are
+/// u16, every loop is length-bounded by `input.len()`. Returns `None` for
+/// an empty input or an unusable shared dictionary.
+pub fn encode_sequence_shared(
+    input: &[u8],
+    file_dict: &[u8],
+    shared: &[u8],
+) -> Option<DictStreams> {
+    let n = input.len();
+    if n == 0 || shared.is_empty() || shared.len() > MAX_DICT || file_dict.len() > MAX_DICT {
+        return None;
+    }
+    let mut commands = Vec::new();
+    let mut literals = Vec::new();
+    let mut offsets = Vec::new();
+    let mut sources = Vec::new();
+    let hsize = 1usize << 16;
+    // Local hash chains over the input (as consumed).
+    let mut head = vec![u32::MAX; hsize];
+    let mut chain = vec![u32::MAX; n];
+    // File-dictionary hash chains (built once when present).
+    let mut f_head = vec![u32::MAX; hsize];
+    let mut f_chain = vec![u32::MAX; file_dict.len()];
+    let f_limit = file_dict.len().saturating_sub(MIN_MATCH - 1);
+    for (p, slot) in f_chain.iter_mut().enumerate().take(f_limit) {
+        let h = hash_at(file_dict, p);
+        *slot = f_head[h];
+        f_head[h] = p as u32;
+    }
+    // Shared-dictionary hash chains (built once; immutable for the parse).
+    let mut s_head = vec![u32::MAX; hsize];
+    let mut s_chain = vec![u32::MAX; shared.len()];
+    let s_limit = shared.len().saturating_sub(MIN_MATCH - 1);
+    for (p, slot) in s_chain.iter_mut().enumerate().take(s_limit) {
+        let h = hash_at(shared, p);
+        *slot = s_head[h];
+        s_head[h] = p as u32;
+    }
+    let mut pos = 0usize;
+    while pos < n {
+        if pos + MIN_MATCH <= n {
+            if let Some((dist, len, source)) = best_match_shared(
+                input, pos, file_dict, shared, &head, &chain, &f_head, &f_chain, &s_head, &s_chain,
+            ) {
+                // Same copy-clipping contract as SequenceRans: a tail
+                // remainder of 1..=3 bytes would decode as a 128-byte
+                // literal run — clip it so the remainder lands in the
+                // literal path (byte-exactness preserved).
+                let mut len = len;
+                let rem = len % MAX_COPY;
+                if rem > 0 && rem < MIN_MATCH {
+                    len -= rem;
+                }
+                let mut remaining = len;
+                // A LOCAL copy is byte-progressive (continuation commands
+                // repeat the same distance over the growing output); a
+                // DICT/SHARED copy reads a contiguous dict range, so each
+                // continuation command must carry the ADVANCED absolute
+                // offset (dict[off + i*131 ..]) — the decoder reads every
+                // command's u16 independently.
+                let mut cur_off = dist;
+                while remaining > 0 {
+                    let take = remaining.min(MAX_COPY);
+                    debug_assert!((MIN_MATCH..=MAX_COPY).contains(&take));
+                    commands.push((0x80 + take - MIN_MATCH) as u8);
+                    offsets.extend_from_slice(&(cur_off as u16).to_le_bytes());
+                    sources.push(source);
+                    if source == SRC_DICT || source == SRC_SHARED {
+                        cur_off = cur_off.saturating_add(take);
+                    }
+                    remaining -= take;
+                }
+                let end = pos + len;
+                while pos < end {
+                    if pos + MIN_MATCH <= n {
+                        let h = hash_at(input, pos);
+                        chain[pos] = head[h];
+                        head[h] = pos as u32;
+                    }
+                    pos += 1;
+                }
+                continue;
+            }
+        }
+        // Literal run: consume positions with no match, capped at 128.
+        let start = pos;
+        let mut run = 0usize;
+        while pos < n && run < MAX_LIT_RUN {
+            let has_match = pos + MIN_MATCH <= n
+                && best_match_shared(
+                    input, pos, file_dict, shared, &head, &chain, &f_head, &f_chain, &s_head,
+                    &s_chain,
+                )
+                .is_some();
+            if has_match {
+                break;
+            }
+            if pos + MIN_MATCH <= n {
+                let h = hash_at(input, pos);
+                chain[pos] = head[h];
+                head[h] = pos as u32;
+            }
+            pos += 1;
+            run += 1;
+        }
+        if run > 0 {
+            commands.push((run - 1) as u8);
+            literals.extend_from_slice(&input[start..pos]);
+        }
+    }
+    Some(DictStreams {
+        commands,
+        literals,
+        offsets,
+        sources,
+    })
+}
+
+/// The longest of the local, file-dictionary, and shared-dictionary matches
+/// at `pos` (deterministic: equal lengths prefer LOCAL, then DICT).
+#[allow(clippy::too_many_arguments)]
+fn best_match_shared(
+    input: &[u8],
+    pos: usize,
+    file_dict: &[u8],
+    shared: &[u8],
+    head: &[u32],
+    chain: &[u32],
+    f_head: &[u32],
+    f_chain: &[u32],
+    s_head: &[u32],
+    s_chain: &[u32],
+) -> Option<(usize, usize, u8)> {
+    let local = find_match(input, pos, head, chain);
+    let f = if file_dict.is_empty() {
+        None
+    } else {
+        find_dict_match(input, pos, file_dict, f_head, f_chain)
+    };
+    let s = find_dict_match(input, pos, shared, s_head, s_chain);
+    let mut best: Option<(usize, usize, u8)> = local.map(|(d, l)| (d, l, SRC_LOCAL));
+    if let Some((od, ol)) = f {
+        let better = match best {
+            Some((_, bl, _)) => ol > bl,
+            None => true,
+        };
+        if better {
+            best = Some((od, ol, SRC_DICT));
+        }
+    }
+    if let Some((od, ol)) = s {
+        let better = match best {
+            Some((_, bl, _)) => ol > bl,
+            None => true,
+        };
+        if better {
+            best = Some((od, ol, SRC_SHARED));
+        }
+    }
+    best
 }
 
 /// The longer of the local match and the dictionary match at `pos`
@@ -1154,6 +1328,132 @@ impl Encoder for SequenceDictEncoder {
     }
 }
 
+/// The SequenceSharedDict candidate family (Phase-9C): local-history +
+/// optional previous-file-chunk dictionary + a shared cross-file dictionary
+/// in one stream, with a fourth copy-source stream whose per-copy byte
+/// selects LOCAL / DICT / SHARED. The shared dictionary is chosen by the
+/// background optimizer to amortize structure common to a file family; it
+/// is a content-addressed chunk reference, so its own persisted state is
+/// accounted where it is materialized, and the reference depth
+/// (max(file-dict depth, shared depth) + 1) is capped by
+/// `max_reference_depth`.
+#[derive(Debug, Clone)]
+pub struct SequenceSharedDictEncoder {
+    /// Content id of the previous same-file chunk (ZERO = absent).
+    pub dictionary: crate::core::extent::ChunkId,
+    /// Materialized file-dictionary bytes (empty = absent).
+    pub dict_bytes: Vec<u8>,
+    /// Reference depth of the file dictionary chunk.
+    pub dict_depth: u8,
+    /// Content id of the shared dictionary chunk.
+    pub shared: crate::core::extent::ChunkId,
+    /// Materialized shared dictionary bytes (≤ 64 KiB).
+    pub shared_bytes: Vec<u8>,
+    /// Reference depth of the shared dictionary chunk.
+    pub shared_depth: u8,
+}
+
+impl Encoder for SequenceSharedDictEncoder {
+    fn name(&self) -> &'static str {
+        "SEQUENCE_SHARED_DICT"
+    }
+
+    fn encode(&self, input: &[u8], ctx: &CandidateContext<'_>) -> Vec<Candidate> {
+        if input.is_empty() || input.len() as u64 > ctx.limits.max_chunk_size {
+            return Vec::new();
+        }
+        // Depth cap: a dictionary chain must never defeat bounded random
+        // access (Phase-9C constraint, §51). The decode-time cap would
+        // catch it, but refusing at encode time avoids wasted validation.
+        let dict_depth = self.dict_depth.max(self.shared_depth);
+        if dict_depth.saturating_add(1) > ctx.limits.max_reference_depth {
+            return Vec::new();
+        }
+        // LZ overhead (four models + four streams + two references) cannot
+        // win on tiny inputs; skip the CPU.
+        if input.len() < 128 {
+            return Vec::new();
+        }
+        if self.shared_bytes.is_empty()
+            || self.shared_bytes.len() > MAX_DICT
+            || self.dict_bytes.len() > MAX_DICT
+        {
+            return Vec::new();
+        }
+        let streams = match encode_sequence_shared(input, &self.dict_bytes, &self.shared_bytes) {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+        // When the shared dictionary contributed nothing (no SHARED
+        // copies), the parse is at best a SequenceDict/SequenceRans parse
+        // with an extra 32-byte reference and fourth-stream entropy: skip
+        // it so the cheaper family wins on cost without the wasted
+        // descriptor.
+        if !streams.sources.contains(&SRC_SHARED) {
+            return Vec::new();
+        }
+        let cmds = streams.commands.len() as u32;
+        let lit_out = streams.literals.len() as u32;
+        let enc = match encode_streams_n(&[
+            streams.commands,
+            streams.literals,
+            streams.offsets,
+            streams.sources,
+        ]) {
+            Some(e) => e,
+            None => return Vec::new(),
+        };
+        let model_obj = ObjectRecord::model(enc.model_obj);
+        let enc_obj = ObjectRecord::data(enc.enc_obj);
+        let rep = Representation::SequenceSharedDict {
+            dictionary: self.dictionary,
+            dictionary_len: self.dict_bytes.len() as u32,
+            shared: self.shared,
+            shared_len: self.shared_bytes.len() as u32,
+            model: model_obj.id,
+            enc_obj: enc_obj.id,
+            scale_bits: SCALE_BITS,
+            codec: CODEC,
+            seq_len: enc.lens[0],
+            lit_len: enc.lens[1],
+            off_len: enc.lens[2],
+            src_len: enc.lens[3],
+            cmds,
+            lit_out,
+            len: input.len() as u64,
+        };
+        // Honest gate: descriptor + model object + enc object (the
+        // dictionary chunks themselves are references; their persisted
+        // state is accounted where they are materialized) must beat the
+        // raw bytes, else RAW/SequenceRans wins on cost.
+        let total = rep
+            .encoded_size()
+            .saturating_add(model_obj.payload.len() as u64)
+            .saturating_add(enc_obj.payload.len() as u64);
+        if total >= input.len() as u64 {
+            return Vec::new();
+        }
+        let split = ByteSplit {
+            // file dict + shared + model + enc content ids.
+            reference: 128,
+            ..Default::default()
+        };
+        let mut cost = crate::core::candidate::account_objects(
+            crate::core::cost::estimate(&rep, &split, model_obj.payload.len() as u64),
+            &[enc_obj.clone(), model_obj.clone()],
+        );
+        // The candidate's reference depth includes the deeper of the two
+        // dictionary chunks' own chain depths (§15).
+        cost.depth = cost.depth.saturating_add(dict_depth);
+        vec![Candidate {
+            representation: rep,
+            objects: vec![enc_obj, model_obj],
+            cost,
+            content_id: ctx.content_id,
+        }]
+    }
+}
+
 /// The SequenceDict candidate family (Phase-9B): local-history + external
 #[cfg(test)]
 mod tests {
@@ -1763,6 +2063,301 @@ mod tests {
             dictionary: crate::core::extent::ChunkId::of(&dict),
             dict_bytes: dict,
             dict_depth: 0,
+        };
+        let input = text_chunk();
+        assert!(
+            enc.encode(&input, &ctx_for(&input, &limits, &policy))
+                .is_empty()
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Phase-9C: SequenceSharedDict (local + optional file dict + shared
+    // dict, SRC_SHARED copy source).
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn shared_parse_uses_shared_dictionary_and_roundtrips_exactly() {
+        // Input = the SHARED dictionary pattern with a light edit: most of
+        // the input is SHARED-copyable, so the parse must use SRC_SHARED
+        // and the manual walk must reproduce the input byte-exactly.
+        let shared = dict_chunk();
+        let mut input = shared.clone();
+        input[100] ^= 0x5A;
+        input[65535] ^= 0x01;
+        let streams = encode_sequence_shared(&input, &[], &shared).unwrap();
+        assert!(
+            streams.sources.contains(&SRC_SHARED),
+            "expected SHARED copies on a shared-dict-correlated input"
+        );
+        // Manual decoder walk (mirrors the materialize path).
+        let mut lits = 0usize;
+        let mut offs = 0usize;
+        let mut srcs = 0usize;
+        let mut out = Vec::with_capacity(input.len());
+        for (i, &cmd) in streams.commands.iter().enumerate() {
+            if cmd < 0x80 {
+                let run = cmd as usize + 1;
+                out.extend_from_slice(&streams.literals[lits..lits + run]);
+                lits += run;
+            } else {
+                let clen = cmd as usize - 0x80 + 4;
+                let source = streams.sources[srcs];
+                srcs += 1;
+                let v =
+                    u16::from_le_bytes([streams.offsets[offs], streams.offsets[offs + 1]]) as usize;
+                offs += 2;
+                match source {
+                    SRC_LOCAL => {
+                        assert!(v > 0 && v <= out.len(), "bad dist {v} at {i}");
+                        for _ in 0..clen {
+                            let b = out[out.len() - v];
+                            out.push(b);
+                        }
+                    }
+                    SRC_SHARED => {
+                        assert!(v + clen <= shared.len(), "shared copy out of bounds at {i}");
+                        out.extend_from_slice(&shared[v..v + clen]);
+                    }
+                    other => panic!("unknown source {other} at {i}"),
+                }
+            }
+        }
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn shared_long_match_continuation_advances_offset() {
+        // Regression (Phase-9C, same class as the Phase-9B DICT bug): a
+        // SHARED match longer than MAX_COPY is split into continuation
+        // commands whose absolute offsets must ADVANCE, or the decoder
+        // re-reads the same shared-dict bytes.
+        let seq: Vec<u8> = (0..25536u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 16) as u8)
+            .collect();
+        let mut shared = seq.clone();
+        shared.extend_from_slice(&seq);
+        shared.extend_from_slice(&seq[..65536 - 2 * seq.len()]);
+        assert_eq!(shared.len(), MAX_DICT);
+        let input: Vec<u8> = shared[25536..].to_vec(); // 40000 bytes
+        let streams = encode_sequence_shared(&input, &[], &shared).unwrap();
+        assert!(streams.sources.contains(&SRC_SHARED));
+        let mut lits = 0usize;
+        let mut offs = 0usize;
+        let mut srcs = 0usize;
+        let mut out = Vec::with_capacity(input.len());
+        let mut shared_copies = 0usize;
+        for &cmd in &streams.commands {
+            if cmd < 0x80 {
+                let run = cmd as usize + 1;
+                out.extend_from_slice(&streams.literals[lits..lits + run]);
+                lits += run;
+            } else {
+                let clen = cmd as usize - 0x80 + 4;
+                let source = streams.sources[srcs];
+                srcs += 1;
+                let v =
+                    u16::from_le_bytes([streams.offsets[offs], streams.offsets[offs + 1]]) as usize;
+                offs += 2;
+                match source {
+                    SRC_LOCAL => {
+                        for _ in 0..clen {
+                            let b = out[out.len() - v];
+                            out.push(b);
+                        }
+                    }
+                    SRC_SHARED => {
+                        out.extend_from_slice(&shared[v..v + clen]);
+                        shared_copies += 1;
+                    }
+                    other => panic!("unknown source {other}"),
+                }
+            }
+        }
+        assert!(
+            shared_copies >= 2,
+            "expected a continuation chain (got {shared_copies} SHARED copies)"
+        );
+        assert_eq!(out, input, "long SHARED continuation must advance offsets");
+    }
+
+    #[test]
+    fn shared_three_way_parse_uses_all_sources() {
+        // Input with BOTH local repetition and shared-dictionary structure:
+        // the 3-way parse must produce LOCAL and SHARED copies together.
+        let shared = dict_chunk();
+        // input = shared[:20000] ++ 500-byte repeated pattern ++ shared[20000..]
+        let mut input = Vec::new();
+        input.extend_from_slice(&shared[..20000]);
+        let pattern: Vec<u8> = (0..500u32).map(|i| i as u8).collect();
+        for _ in 0..20 {
+            input.extend_from_slice(&pattern);
+        }
+        input.extend_from_slice(&shared[20000..]);
+        let streams = encode_sequence_shared(&input, &[], &shared).unwrap();
+        assert!(streams.sources.contains(&SRC_SHARED));
+        assert!(streams.sources.contains(&SRC_LOCAL));
+        // Manual walk reproduces the input exactly (the interesting case
+        // where both copy sources are live).
+        let mut lits = 0usize;
+        let mut offs = 0usize;
+        let mut srcs = 0usize;
+        let mut out = Vec::with_capacity(input.len());
+        for &cmd in &streams.commands {
+            if cmd < 0x80 {
+                let run = cmd as usize + 1;
+                out.extend_from_slice(&streams.literals[lits..lits + run]);
+                lits += run;
+            } else {
+                let clen = cmd as usize - 0x80 + 4;
+                let source = streams.sources[srcs];
+                srcs += 1;
+                let v =
+                    u16::from_le_bytes([streams.offsets[offs], streams.offsets[offs + 1]]) as usize;
+                offs += 2;
+                match source {
+                    SRC_LOCAL => {
+                        assert!(v > 0 && v <= out.len());
+                        for _ in 0..clen {
+                            let b = out[out.len() - v];
+                            out.push(b);
+                        }
+                    }
+                    SRC_SHARED => {
+                        assert!(v + clen <= shared.len());
+                        out.extend_from_slice(&shared[v..v + clen]);
+                    }
+                    other => panic!("unknown source {other}"),
+                }
+            }
+        }
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn shared_encoder_wins_and_validates() {
+        let limits = Limits::default();
+        let policy = Policy::default();
+        let shared = dict_chunk();
+        let mut input = shared.clone();
+        for i in (0..65536).step_by(17) {
+            input[i] ^= 0x03;
+        }
+        let shared_id = crate::core::extent::ChunkId::of(&shared);
+        let enc = SequenceSharedDictEncoder {
+            dictionary: crate::core::extent::ChunkId::ZERO,
+            dict_bytes: Vec::new(),
+            dict_depth: 0,
+            shared: shared_id,
+            shared_bytes: shared.clone(),
+            shared_depth: 0,
+        };
+        let ctx = ctx_for(&input, &limits, &policy);
+        let cands = enc.encode(&input, &ctx);
+        assert_eq!(cands.len(), 1);
+        let cand = &cands[0];
+        assert!(matches!(
+            cand.representation,
+            Representation::SequenceSharedDict { .. }
+        ));
+        assert_eq!(cand.cost.depth, 1);
+        let mut resolver = MemResolver::from_map(
+            cand.objects
+                .iter()
+                .map(|o| (o.id, o.payload.clone()))
+                .collect(),
+        );
+        resolver.put_chunk(
+            shared_id,
+            Representation::Raw {
+                obj: shared_id,
+                len: shared.len() as u64,
+            },
+        );
+        resolver.put_object(shared_id, shared);
+        validate_candidate(cand, &input, &resolver, &limits).unwrap();
+        assert!(
+            cand.cost.persisted_bytes() < input.len() as u64 / 4,
+            "persisted {} >= raw/4",
+            cand.cost.persisted_bytes()
+        );
+    }
+
+    #[test]
+    fn shared_skips_unrelated_dictionary() {
+        let limits = Limits::default();
+        let policy = Policy::default();
+        let shared = vec![0xFFu8; 65536];
+        let mut input = text_chunk();
+        input.resize(65536, b' ');
+        let enc = SequenceSharedDictEncoder {
+            dictionary: crate::core::extent::ChunkId::ZERO,
+            dict_bytes: Vec::new(),
+            dict_depth: 0,
+            shared: crate::core::extent::ChunkId::of(&shared),
+            shared_bytes: shared,
+            shared_depth: 0,
+        };
+        let cands = enc.encode(&input, &ctx_for(&input, &limits, &policy));
+        assert!(cands.is_empty());
+    }
+
+    #[test]
+    fn shared_depth_cap_refuses_candidate() {
+        let limits = Limits::default();
+        let policy = Policy::default();
+        let shared = dict_chunk();
+        let input = text_chunk();
+        let enc = SequenceSharedDictEncoder {
+            dictionary: crate::core::extent::ChunkId::ZERO,
+            dict_bytes: Vec::new(),
+            dict_depth: 0,
+            shared: crate::core::extent::ChunkId::of(&shared),
+            shared_bytes: shared,
+            shared_depth: limits.max_reference_depth, // already at the cap
+        };
+        let cands = enc.encode(&input, &ctx_for(&input, &limits, &policy));
+        assert!(cands.is_empty());
+    }
+
+    #[test]
+    fn shared_urandom_has_no_fake_density() {
+        // Negative control: urandom input against a DIFFERENT urandom
+        // shared dictionary must not produce a candidate — no free
+        // compression from an unrelated dictionary.
+        let limits = Limits::default();
+        let policy = Policy::default();
+        let shared = noise(65536);
+        let mut input = noise(65536);
+        for b in &mut input {
+            *b ^= 0xAA;
+        }
+        let enc = SequenceSharedDictEncoder {
+            dictionary: crate::core::extent::ChunkId::ZERO,
+            dict_bytes: Vec::new(),
+            dict_depth: 0,
+            shared: crate::core::extent::ChunkId::of(&shared),
+            shared_bytes: shared,
+            shared_depth: 0,
+        };
+        assert!(
+            enc.encode(&input, &ctx_for(&input, &limits, &policy))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn shared_dictionary_must_be_bounded() {
+        let limits = Limits::default();
+        let policy = Policy::default();
+        let shared = vec![0u8; MAX_DICT + 1];
+        let enc = SequenceSharedDictEncoder {
+            dictionary: crate::core::extent::ChunkId::ZERO,
+            dict_bytes: Vec::new(),
+            dict_depth: 0,
+            shared: crate::core::extent::ChunkId::of(&shared),
+            shared_bytes: shared,
+            shared_depth: 0,
         };
         let input = text_chunk();
         assert!(

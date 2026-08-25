@@ -195,6 +195,8 @@ pub fn estimated_read_cycles(rep: &Representation) -> u64 {
         // materialization (the dictionary's own decode is accounted in its
         // extent's cost; this adds the reference indirection).
         Representation::SequenceDict { .. } => len * 5 + 64,
+        // As SequenceDict plus a second dictionary chunk materialization.
+        Representation::SequenceSharedDict { .. } => len * 5 + 128,
     }
 }
 
@@ -218,6 +220,8 @@ pub fn estimated_write_cycles(rep: &Representation) -> u64 {
         // LZ search over input + dictionary, four histograms, four rANS
         // encodes.
         Representation::SequenceDict { .. } => len * 10,
+        // LZ search over input + up to two dictionaries.
+        Representation::SequenceSharedDict { .. } => len * 11,
     }
 }
 
@@ -247,6 +251,8 @@ pub fn dependent_reads(rep: &Representation) -> u32 {
         Representation::SparseBlock64 { .. } => 2,
         // Model object + enc object + the dictionary chunk materialization.
         Representation::SequenceDict { .. } => 3,
+        // Model + enc + file dictionary + shared dictionary.
+        Representation::SequenceSharedDict { .. } => 4,
     }
 }
 
@@ -256,7 +262,8 @@ pub fn reference_depth(rep: &Representation) -> u8 {
     match rep {
         Representation::ExactRef { .. }
         | Representation::BaseResidual { .. }
-        | Representation::SequenceDict { .. } => 1,
+        | Representation::SequenceDict { .. }
+        | Representation::SequenceSharedDict { .. } => 1,
         _ => 0,
     }
 }

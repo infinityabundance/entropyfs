@@ -77,11 +77,11 @@ struct ChunkObserver {
     tracker: MeasurementTracker,
     /// Per-channel EMA of `|1 − y|` (the evidence error). Initialized to 1
     /// (max distrust): channels earn trust by being evaluated.
-    ema: [f64; 8],
+    ema: [f64; Channel::ALL.len()],
     /// Normalized trust weights (via `dsfb::trust::calculate_trust_weights`).
-    weights: [f64; 8],
+    weights: [f64; Channel::ALL.len()],
     /// Last known measurement per channel.
-    last_y: [f64; 8],
+    last_y: [f64; Channel::ALL.len()],
     /// Last classification.
     regime: Regime,
     /// Samples seen.
@@ -158,17 +158,17 @@ impl StorageObserver {
         outcome_quality: f64,
     ) -> Regime {
         self.stats.steps += 1;
-        let mut m = [0.0f64; 8];
+        let mut m = [0.0f64; Channel::ALL.len()];
         for &(c, v) in measurements {
             m[c as usize] = v.clamp(0.0, 1.0);
         }
         let winner_measurement = outcome_quality.clamp(0.0, 1.0);
         let entry = self.chunks.entry(key).or_insert_with(|| ChunkObserver {
-            inner: dsfb::DsfbObserver::new(self.params.dsfb_params(), 8),
+            inner: dsfb::DsfbObserver::new(self.params.dsfb_params(), Channel::ALL.len()),
             tracker: MeasurementTracker::default(),
-            ema: [1.0; 8],
-            weights: [0.125; 8],
-            last_y: [0.0; 8],
+            ema: [1.0; Channel::ALL.len()],
+            weights: [0.125; Channel::ALL.len()],
+            last_y: [0.0; Channel::ALL.len()],
             regime: Regime::Unknown,
             samples: 0,
             winner: Channel::Raw,
@@ -195,7 +195,7 @@ impl StorageObserver {
         // maintained EMAs as residuals with rho = 0 so the update is an
         // identity and only the normalization runs.
         let residuals = entry.ema;
-        let mut scratch = [0.0f64; 8];
+        let mut scratch = [0.0f64; Channel::ALL.len()];
         let w =
             dsfb::trust::calculate_trust_weights(&residuals, &mut scratch, 0.0, self.params.sigma0);
         for (k, &wk) in w.iter().enumerate() {

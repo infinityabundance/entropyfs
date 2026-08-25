@@ -41,6 +41,8 @@ pub const TAG_SEQUENCE_RANS: u8 = 0x0D;
 pub const TAG_SPARSE_BLOCK64: u8 = 0x0E;
 /// Tag: cross-chunk dictionary match coding (Phase-9B).
 pub const TAG_SEQUENCE_DICT: u8 = 0x0F;
+/// Tag: shared amortized dictionary match coding (Phase-9C).
+pub const TAG_SEQUENCE_SHARED_DICT: u8 = 0x10;
 
 /// Residual kinds.
 pub const RESIDUAL_XOR_SPARSE: u8 = 0x01;
@@ -247,6 +249,40 @@ pub fn encode(rep: &Representation) -> Result<Vec<u8>, CodecError> {
             w.u32(*len as u32);
             w.bytes(dictionary.as_bytes());
             w.u32(*dictionary_len);
+            w.bytes(model.as_bytes());
+            w.bytes(enc_obj.as_bytes());
+            w.u8(*scale_bits);
+            w.u8(codec.tag());
+            w.u32(*seq_len);
+            w.u32(*lit_len);
+            w.u32(*off_len);
+            w.u32(*src_len);
+            w.u32(*cmds);
+            w.u32(*lit_out);
+        }
+        Representation::SequenceSharedDict {
+            dictionary,
+            dictionary_len,
+            shared,
+            shared_len,
+            model,
+            enc_obj,
+            scale_bits,
+            codec,
+            seq_len,
+            lit_len,
+            off_len,
+            src_len,
+            cmds,
+            lit_out,
+            len,
+        } => {
+            w.u8(TAG_SEQUENCE_SHARED_DICT);
+            w.u32(*len as u32);
+            w.bytes(dictionary.as_bytes());
+            w.u32(*dictionary_len);
+            w.bytes(shared.as_bytes());
+            w.u32(*shared_len);
             w.bytes(model.as_bytes());
             w.bytes(enc_obj.as_bytes());
             w.u8(*scale_bits);
@@ -532,6 +568,39 @@ pub fn decode(
             Representation::SequenceDict {
                 dictionary,
                 dictionary_len,
+                model,
+                enc_obj,
+                scale_bits,
+                codec,
+                seq_len,
+                lit_len,
+                off_len,
+                src_len,
+                cmds,
+                lit_out,
+                len,
+            }
+        }
+        TAG_SEQUENCE_SHARED_DICT => {
+            let dictionary = read_id(&mut r)?;
+            let dictionary_len = r.u32()?;
+            let shared = read_id(&mut r)?;
+            let shared_len = r.u32()?;
+            let model = read_id(&mut r)?;
+            let enc_obj = read_id(&mut r)?;
+            let scale_bits = r.u8()?;
+            let codec = RansCodec::from_u8(r.u8()?).ok_or(CodecError::Malformed)?;
+            let seq_len = r.u32()?;
+            let lit_len = r.u32()?;
+            let off_len = r.u32()?;
+            let src_len = r.u32()?;
+            let cmds = r.u32()?;
+            let lit_out = r.u32()?;
+            Representation::SequenceSharedDict {
+                dictionary,
+                dictionary_len,
+                shared,
+                shared_len,
                 model,
                 enc_obj,
                 scale_bits,

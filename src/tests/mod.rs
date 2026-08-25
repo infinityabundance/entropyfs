@@ -20,5 +20,7 @@ pub mod rank_roundtrip;
 pub mod representation_roundtrip;
 pub mod seqdict;
 pub mod seqrans_versioned_repro;
+pub mod shared_dict;
 pub mod snapshots;
 pub mod sparse_block64;
+pub mod srctree_diag;

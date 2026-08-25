@@ -61,6 +61,7 @@ physical storage (RAW fallback) — that is a success condition, not a failure.
 | 8 (8H) | Competitive filesystem court: `tools/fs-court.sh` measures the same corpora across ext4, zstd -1/-3/-19, and mounted EntropyFS; XFS/Btrfs±zstd/EROFS/SquashFS recorded as explicit waivers with the exact root-capable-VM commands. First run `fs-court-1787669946-b165d60`: EntropyFS effective density 1.488× incl. a 64 MiB incompressible control; zeros 453/4374 MiB/s write/read, random 85/3532 MiB/s, fsck clean | ✅ tooling + first run sealed (VM run clears the loop-mount waivers) |
 | 9 (9A) | Physical floor: transaction-local COW-intermediate pruning — the incompressible backing floor collapses to ~1.00× (urandom reachable 33,652,515 / total backing 33,658,070 / allocated 33,665,024 B); `unreachable_bytes_by_record_tag` evidence identifies the pruned record class; ENOSPC guard on the pruned footprint | ✅ implemented + evidence-sealed (`campaign-1787674068-4892644/`) |
 | 9 (9B) | **SequenceDict** — cross-chunk dictionary match coding (tag 0x0F, feature bit 12): the previous same-file chunk as an external ≤64 KiB dictionary beside local history, with a fourth copy-source stream (LOCAL backward distance vs DICT absolute offset; DICT continuation advances the offset). Reference depth accounted like a base chain (`dictionary chain + 1 ≤ max_reference_depth`), so cross-chunk references can never defeat bounded random access; terminal anchors emerge automatically at the depth cap. src corpus **4.070×** — beats standalone SequenceRans (3.627×) and zstd-per-64KiB -1 (3.848×). Also fixed three latent defects it surfaced: `flatten_if_deep` staged-object resolution (`MissingObject`), `current_persisted_bytes` object accounting (object-backed incumbents looked free), background full-byte candidate ordering | ✅ implemented + evidence-sealed (`campaign-1787676607-8250f6b/`) |
+| 9 (9C) | **SequenceSharedDict** — shared amortized dictionary match coding (tag 0x10, feature bit 13): local history + optional previous same-file chunk + a **shared cross-file dictionary** in one stream (third copy-source symbol `SRC_SHARED`). The background `shared_dict_pass` picks a per-directory anchor — an existing terminal chunk that maximizes savings against member incumbents — and rewrites strictly-cheaper extents through the same CAS-gated, byte-validated commit path. GC pins the anchor through the reference closure (survives owner deletion). Sealed by the campaign's **tree court**: 271/274 real-tree files are single-chunk (previous-chunk dictionaries get ~no opportunity on a real tree — the packed-stream density is cross-FILE structure); per-file writes **2.167× → 2.307× post-GC** (101 extents, ~80.5 KiB saved) vs zstd per-file 3.518× / per-64KiB 3.982× (-1). The modest real-text gain and the strong synthetic-family mechanism are both recorded as-is | ✅ implemented + evidence-sealed (`campaign-1787679034-ab8d7ec/`) |
 
 ## Measured results
 
@@ -110,16 +111,20 @@ oversized-descriptor fix (Phase 6) eliminated.
   its marginal value now is small on this tiny synthetic corpus and its
   proper counters are deferred. Historical numbers are preserved in
   `evidence/performance/INDEX.md`; the 2.29× is not a current claim.
-- The source-corpus progression is now sealed across three eras:
-  `923df7b` pure byte rANS 1.633× / standalone SequenceRans 3.556× (with
+- The source-corpus progression is now sealed across eras: `923df7b` pure
+  byte rANS 1.633× / standalone SequenceRans 3.556× (with
   zstd-per-64KiB -1 at 3.739× — the per-extent floor was within 5%, and
-  the gap to whole-file zstd was cross-chunk context), and `8250f6b`
-  **EntropyFS full 4.070× with SequenceDict** — beating standalone
-  SequenceRans (3.627×) and zstd-per-64KiB -1 (3.848×). The remaining
-  ~12% to whole-file zstd -1 (4.636×) is the packed-stream caveat
-  (`source_tree_pack` concatenates files, so whole-file zstd crosses
-  original file boundaries); whether it persists on a real mounted tree
-  is an open mount-level question (`fs-court.sh` corpus).
+  the gap to whole-file zstd was cross-chunk context), `8250f6b`
+  **EntropyFS full 4.070× with SequenceDict** on the packed stream, and
+  the Phase-9C **tree court** answering the open mount-level question:
+  on a real tree of separately-written files (271/274 single-chunk),
+  per-file zstd -1 is 3.518× and EntropyFS per-file writes are **2.167×,
+  rising to 2.307× after the shared-dict pass** — so most of the
+  packed-stream density was indeed cross-FILE structure, and the shared
+  dictionary recovers a measured part of it. The rest of the gap to
+  per-file zstd is the fixed single-anchor-per-directory v1 policy plus
+  the greedy chain-16 matcher; both are recorded as the current state,
+  not claims.
 - The campaign's H2 experiment (synthetic drift corpus) is now a sealed
   **controlled series**: `67d977a` +7.2% (RANS-era floor), `a6641d1`
   −24% (SequenceRans floor, positional residuals only), `43bf17e`

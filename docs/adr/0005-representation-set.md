@@ -29,6 +29,8 @@ Phase-1 representation set (stable numeric tags, see
 | 0x0C | `PERMUTATION` — factoradic rank over distinct symbols (len ≤ 34) |
 | 0x0D | `SEQUENCE_RANS` — local-match (LZ77) commands/literals/offsets, each rANS-coded or raw |
 | 0x0E | `SPARSE_BLOCK64` — blockwise-64 enumerative sparse coding (per-word popcount + C(64,k) rank, rANS/raw streams) |
+| 0x0F | `SEQUENCE_DICT` — SEQUENCE_RANS + a fourth copy-source stream over an external ≤64 KiB same-file dictionary (Phase-9B) |
+| 0x10 | `SEQUENCE_SHARED_DICT` — SEQUENCE_DICT + a shared cross-file dictionary selected by the background optimizer (Phase-9C) |
 
 `SEQUENCE_RANS` (0x0D) is the general-purpose compression floor added in
 Phase 8: pure rANS is an entropy coder, not a match finder, so the family
@@ -53,6 +55,27 @@ positional XOR residual. It shares the three-stream rANS/raw codec with
 `u128` combination-rank limit of `SPARSE`: blockwise-64 enumerative
 coding keeps every rank within a `u64` (`C(64,32)` < 2^63), so sparse
 chunks with any marked-byte count are representable (Phase-8 §6).
+
+`SEQUENCE_DICT` (0x0F, Phase-9B) and `SEQUENCE_SHARED_DICT` (0x10,
+Phase-9C) extend the general-purpose floor with *cross-chunk* dictionary
+context. The former uses the previous same-file chunk as an external
+≤64 KiB dictionary beside local history; the latter adds a shared
+cross-file dictionary (a per-directory anchor chunk chosen by the
+background `shared_dict_pass` because it maximizes savings against
+member incumbents — an existing terminal chunk, so its persisted state
+is accounted where it is materialized and the group pays only reference
++ read cost). A fourth copy-source stream selects LOCAL (byte-
+progressive backward distance), DICT, or SHARED (absolute offset) per
+copy; both dictionaries are content-addressed chunk references, both are
+depth-capped like base chains, and GC pins them through the reference
+closure so reads stay byte-exact after the owning file is deleted.
+
+The tree-court evidence gate that motivated 0x10 is sealed in
+`campaign-1787679034-ab8d7ec`: on a real tree of separately-written
+small files the previous-chunk dictionary gets almost no opportunity
+(271/274 files are single-chunk), and the shared dictionary recovers a
+measured part of the cross-file structure the packed stream exploits
+(2.167× → 2.307× post-GC).
 
 Hard rules:
 

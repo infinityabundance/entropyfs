@@ -175,6 +175,7 @@ Representation tags and payloads:
 | 0x0D | SEQUENCE_RANS | model `[u8;32]`, enc_obj `[u8;32]`, scale_bits u8, codec u8, seq_len u32, lit_len u32, off_len u32, cmds u32, lit_out u32 |
 | 0x0E | SPARSE_BLOCK64 | model `[u8;32]`, enc_obj `[u8;32]`, scale_bits u8, codec u8, pc_len u32, rank_len u32, lit_len u32, words u32, nonzero u32, lit_out u32 |
 | 0x0F | SEQUENCE_DICT | dictionary `[u8;32]`, dictionary_len u32, model `[u8;32]`, enc_obj `[u8;32]`, scale_bits u8, codec u8, seq_len u32, lit_len u32, off_len u32, src_len u32, cmds u32, lit_out u32 |
+| 0x10 | SEQUENCE_SHARED_DICT | dictionary `[u8;32]` (ZERO = absent), dictionary_len u32, shared `[u8;32]`, shared_len u32, model `[u8;32]`, enc_obj `[u8;32]`, scale_bits u8, codec u8, seq_len u32, lit_len u32, off_len u32, src_len u32, cmds u32, lit_out u32 |
 
 SEQUENCE_RANS (0x0D) is the local-match + entropy floor: an LZ77-style
 hash-chain matcher turns the extent into three byte streams — *commands*,
@@ -226,6 +227,22 @@ DICT offsets (u16 → ≤ 65536) and the reference depth is accounted like a
 base chain: the dictionary's own chain depth plus 1 must not exceed
 `max_reference_depth`, so cross-chunk dictionary chains can never defeat
 bounded random access.
+
+SEQUENCE_SHARED_DICT (0x10, Phase-9C) is shared amortized dictionary match
+coding: the SEQUENCE_DICT command semantics with a third copy-source,
+`0x02` = SHARED (absolute offset into a *shared cross-file dictionary*
+chunk). The optional `dictionary` field is the previous same-file chunk
+(ZERO id + zero length = absent); `shared` is required (≤ 64 KiB). The
+shared dictionary is a content-addressed chunk chosen by the background
+optimizer (`shared_dict_pass`) to amortize structure common to a file
+family/directory: the anchor is an existing terminal chunk, so its own
+persisted state is accounted where it is materialized, and the group pays
+only the per-extent reference + read cost (enforced by the strict-cheaper
+commit gate). Copy semantics match SEQUENCE_DICT exactly (LOCAL
+byte-progressive; DICT/SHARED contiguous with advancing continuation
+offsets). Reference depth = max(file-dict depth, shared depth) + 1, capped
+by `max_reference_depth`; v1 anchors are terminal (depth 0), so rewritten
+extents carry depth ≤ 1.
 
 Residual (for BASE_RESIDUAL / ENTROPY_REF), kinds:
 

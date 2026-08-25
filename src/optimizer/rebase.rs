@@ -29,37 +29,74 @@ pub const fn depth_of(desc: &Representation) -> u8 {
 
 /// Resolve the full reference-chain depth of a descriptor by walking its
 /// base/target through the chunk index. Bounded by the store's depth cap.
+/// Phase-9C: SEQUENCE_SHARED_DICT references two dictionary chunks, so the
+/// depth is the deeper of the two chains plus one.
 pub fn chain_depth(store: &Store, desc: &Representation) -> u8 {
     let limits = *store.limits();
-    let mut depth = 0u8;
-    // Owned descriptors along the chain (each references the next).
-    let mut chain: Vec<Representation> = vec![desc.clone()];
-    while depth < limits.max_reference_depth {
-        let cur = &chain[chain.len() - 1];
-        let next_id = match cur {
-            Representation::ExactRef { target, .. } => Some(*target),
-            Representation::BaseResidual { base, .. } => Some(*base),
-            Representation::SequenceDict { dictionary, .. } => Some(*dictionary),
-            _ => None,
-        };
-        let Some(id) = next_id else { break };
-        let Some(desc_bytes) = store.chunk_descriptor(&id).ok().flatten() else {
-            break; // unresolvable: the extent is corrupt; not our call here
-        };
-        let Ok(next) = crate::format::descriptor::decode(
-            &desc_bytes,
-            limits.max_descriptor_bytes,
-            limits.max_inline_bytes,
-            limits.max_palette,
-            limits.max_period,
-            limits.max_chunk_size,
-        ) else {
-            break;
-        };
-        depth = depth.saturating_add(1);
-        chain.push(next);
+    // Depth of one reference id from the chunk index (capped walk over
+    // every branch; returns the deepest chain length).
+    fn walk(store: &Store, limits: &crate::core::limits::Limits, id: ChunkId) -> u8 {
+        let mut max_depth = 0u8;
+        let mut stack: Vec<(ChunkId, u8)> = vec![(id, 0u8)];
+        let mut visited: std::collections::HashSet<ChunkId> = std::collections::HashSet::new();
+        while let Some((cur, d)) = stack.pop() {
+            if d >= limits.max_reference_depth || !visited.insert(cur) {
+                continue;
+            }
+            let Some(desc_bytes) = store.chunk_descriptor(&cur).ok().flatten() else {
+                continue;
+            };
+            let Ok(next_desc) = crate::format::descriptor::decode(
+                &desc_bytes,
+                limits.max_descriptor_bytes,
+                limits.max_inline_bytes,
+                limits.max_palette,
+                limits.max_period,
+                limits.max_chunk_size,
+            ) else {
+                continue;
+            };
+            let mut nexts: Vec<ChunkId> = Vec::new();
+            match &next_desc {
+                Representation::ExactRef { target, .. } => nexts.push(*target),
+                Representation::BaseResidual { base, .. } => nexts.push(*base),
+                Representation::SequenceDict { dictionary, .. } => nexts.push(*dictionary),
+                Representation::SequenceSharedDict {
+                    dictionary, shared, ..
+                } => {
+                    if !dictionary.is_zero() {
+                        nexts.push(*dictionary);
+                    }
+                    nexts.push(*shared);
+                }
+                _ => {}
+            }
+            for n in nexts {
+                stack.push((n, d.saturating_add(1)));
+                max_depth = max_depth.max(d.saturating_add(1));
+            }
+        }
+        max_depth
     }
-    depth
+    match desc {
+        Representation::ExactRef { target, .. } => walk(store, &limits, *target).saturating_add(1),
+        Representation::BaseResidual { base, .. } => walk(store, &limits, *base).saturating_add(1),
+        Representation::SequenceDict { dictionary, .. } => {
+            walk(store, &limits, *dictionary).saturating_add(1)
+        }
+        Representation::SequenceSharedDict {
+            dictionary, shared, ..
+        } => {
+            let d = if dictionary.is_zero() {
+                0
+            } else {
+                walk(store, &limits, *dictionary)
+            };
+            let s = walk(store, &limits, *shared);
+            d.max(s).saturating_add(1)
+        }
+        _ => 0,
+    }
 }
 
 /// Whether the reference chain of `base` transitively references `target`
@@ -74,18 +111,21 @@ pub fn chain_contains(
     target: &ChunkId,
 ) -> bool {
     let limits = *store.limits();
-    let mut visited: Vec<ChunkId> = Vec::new();
-    let mut cur_id = base.id;
-    for _ in 0..limits.max_reference_depth {
+    // Bounded worklist: `base` may reference several chunks (Phase-9C
+    // SequenceSharedDict references both a file dictionary and a shared
+    // dictionary), so every chain branch is walked, each capped by the
+    // depth bound and a visited set.
+    let mut stack: Vec<(ChunkId, u8)> = vec![(base.id, 0)];
+    let mut visited: std::collections::HashSet<ChunkId> = std::collections::HashSet::new();
+    while let Some((cur_id, depth)) = stack.pop() {
         if &cur_id == target {
             return true;
         }
-        if visited.contains(&cur_id) {
-            return false; // cycle without the target: decodable (capped)
+        if depth >= limits.max_reference_depth || !visited.insert(cur_id) {
+            continue;
         }
-        visited.push(cur_id);
         let Some(desc_bytes) = store.chunk_descriptor(&cur_id).ok().flatten() else {
-            return false;
+            continue;
         };
         let Ok(desc) = crate::format::descriptor::decode(
             &desc_bytes,
@@ -95,18 +135,26 @@ pub fn chain_contains(
             limits.max_period,
             limits.max_chunk_size,
         ) else {
-            return false;
+            continue;
         };
-        let next = match &desc {
-            Representation::ExactRef { target: t, .. } => Some(*t),
-            Representation::BaseResidual { base: b, .. } => Some(*b),
-            Representation::SequenceDict { dictionary: d, .. } => Some(*d),
-            _ => None,
-        };
-        let Some(next) = next else {
-            return false;
-        };
-        cur_id = next;
+        let mut nexts: Vec<ChunkId> = Vec::new();
+        match &desc {
+            Representation::ExactRef { target: t, .. } => nexts.push(*t),
+            Representation::BaseResidual { base: b, .. } => nexts.push(*b),
+            Representation::SequenceDict { dictionary: d, .. } => nexts.push(*d),
+            Representation::SequenceSharedDict {
+                dictionary, shared, ..
+            } => {
+                if !dictionary.is_zero() {
+                    nexts.push(*dictionary);
+                }
+                nexts.push(*shared);
+            }
+            _ => {}
+        }
+        for n in nexts {
+            stack.push((n, depth.saturating_add(1)));
+        }
     }
     false
 }

@@ -2516,6 +2516,9 @@ impl Store {
                 target: chunk_bytes,
                 prev_version,
                 dictionary,
+                // Phase-9C: the write path has no shared dictionary in
+                // hand; the background shared-dict pass supplies it.
+                shared: None,
                 pending: pending.as_deref(),
                 mode: crate::optimizer::search::SearchMode::Foreground,
             };

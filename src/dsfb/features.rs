@@ -26,11 +26,13 @@ pub enum Channel {
     Rans = 6,
     /// P7: raw (always available).
     Raw = 7,
+    /// P8: cross-file shared dictionary (Phase-9C).
+    SharedDict = 8,
 }
 
 impl Channel {
     /// All channels in order.
-    pub const ALL: [Channel; 8] = [
+    pub const ALL: [Channel; 9] = [
         Channel::PrevVersion,
         Channel::Adjacent,
         Channel::SharedContent,
@@ -39,6 +41,7 @@ impl Channel {
         Channel::Universe,
         Channel::Rans,
         Channel::Raw,
+        Channel::SharedDict,
     ];
 
     /// Channel name (for explain/status output).
@@ -52,6 +55,7 @@ impl Channel {
             Channel::Universe => "universe",
             Channel::Rans => "rans",
             Channel::Raw => "raw",
+            Channel::SharedDict => "shared_dict",
         }
     }
 }

@@ -81,6 +81,10 @@ pub struct CampaignResults {
     /// Post-GC physical footprint per corpus (reachable, total backing,
     /// allocated blocks and their ratios).
     pub post_gc_footprint: std::collections::BTreeMap<String, PostGcFootprint>,
+    /// Phase-9C tree court: the real-tree corpus (one inode per file) with
+    /// per-file / per-64KiB / whole-pack zstd baselines and the EntropyFS
+    /// write → shared-dict pass → GC footprint.
+    pub tree_court: Option<TreeCourt>,
     /// Baselines and waivers (methodology §3).
     pub baselines: Baselines,
     /// Device-level write/read delta over the campaign window.
@@ -323,6 +327,49 @@ pub struct PostGcFootprint {
     pub ratio_allocated: f64,
 }
 
+/// Phase-9C tree court: the real-tree corpus (one inode per file) versus
+/// zstd per-file / per-64KiB / whole-pack, plus the EntropyFS footprint
+/// before and after the shared amortized dictionary pass (§44, Phase-9C
+/// evidence gate).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TreeCourt {
+    /// Number of files in the tree corpus.
+    pub file_count: usize,
+    /// Files whose whole content fits one 64 KiB chunk (no previous-chunk
+    /// dictionary available on the write path).
+    pub single_chunk_files: usize,
+    /// Sum of file lengths (the logical materialized bytes).
+    pub logical_bytes: u64,
+    /// zstd -1 of the concatenated pack (cross-file oracle).
+    pub zstd_whole_l1: Option<CompressionBaseline>,
+    /// zstd -19 of the concatenated pack.
+    pub zstd_whole_l19: Option<CompressionBaseline>,
+    /// zstd -1 per file, summed (the per-file compression floor).
+    pub zstd_per_file_l1: Option<CompressionBaseline>,
+    /// zstd -19 per file, summed.
+    pub zstd_per_file_l19: Option<CompressionBaseline>,
+    /// zstd -1 per 64 KiB chunk of the pack, summed (the chunk horizon).
+    pub zstd_per_64k_l1: Option<CompressionBaseline>,
+    /// zstd -19 per 64 KiB chunk of the pack, summed.
+    pub zstd_per_64k_l19: Option<CompressionBaseline>,
+    /// EntropyFS post-write post-GC reachable bytes (per-file writes).
+    pub efs_tree_reachable: u64,
+    /// EntropyFS post-write post-GC total backing bytes.
+    pub efs_tree_backing: u64,
+    /// EntropyFS post-write post-GC representation families.
+    pub efs_tree_families: BTreeMap<String, u64>,
+    /// EntropyFS after the shared-dict background pass + GC: reachable.
+    pub efs_shared_reachable: u64,
+    /// EntropyFS after the shared-dict background pass + GC: backing.
+    pub efs_shared_backing: u64,
+    /// EntropyFS after the shared-dict background pass + GC: families.
+    pub efs_shared_families: BTreeMap<String, u64>,
+    /// Shared-dict pass rewrites.
+    pub shared_rewrites: u64,
+    /// Shared-dict pass persisted bytes saved (extent-level, pre-GC).
+    pub shared_saved_bytes: u64,
+}
+
 /// GC + background-optimizer traffic (methodology §6 maintenance metrics).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GcTraffic {
@@ -532,6 +579,7 @@ pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
             unreachable_by_tag_after: std::collections::BTreeMap::new(),
         },
         post_gc_footprint: std::collections::BTreeMap::new(),
+        tree_court: None,
         baselines: Baselines::default(),
         device_writes: None,
         admission: Vec::new(),
@@ -607,6 +655,10 @@ pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
         let mut n = store_numbers(&store)?;
         if run_background {
             let opt = crate::optimizer::background::optimize_pass(&store, options, None, None)
+                .map_err(|e| e.to_string())?;
+            // Phase-9C: the shared amortized dictionary pass (self-gates on
+            // `allow_shared_dict`, so only E3 and later include it).
+            let _ = crate::optimizer::background::shared_dict_pass(&store, options, None)
                 .map_err(|e| e.to_string())?;
             n = store_numbers(&store)?;
             let _ = opt;
@@ -834,6 +886,66 @@ pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
         );
         results.post_gc_footprint.insert(fp.corpus.clone(), fp);
     }
+
+    // 6c. Phase-9C tree court: the real-tree corpus (one inode per file).
+    // This is the discriminating evidence for the shared amortized
+    // dictionary: per-file writes give the previous-chunk dictionary
+    // almost no opportunity on a tree of small files, so the gap between
+    // the packed-stream result and the per-file result is cross-FILE
+    // structure — exactly what a shared dictionary must capture.
+    line(&mut log, "\n== Phase-9C tree court ==");
+    let tree_court = run_tree_court(opts)?;
+    results.tree_court = Some(tree_court.clone());
+    line(
+        &mut log,
+        &format!(
+            "  files {} (single-chunk {}), logical {} B",
+            tree_court.file_count, tree_court.single_chunk_files, tree_court.logical_bytes
+        ),
+    );
+    for (label, b) in [
+        ("zstd -1 whole", &tree_court.zstd_whole_l1),
+        ("zstd -19 whole", &tree_court.zstd_whole_l19),
+        ("zstd -1 per-file", &tree_court.zstd_per_file_l1),
+        ("zstd -19 per-file", &tree_court.zstd_per_file_l19),
+        ("zstd -1 per-64KiB", &tree_court.zstd_per_64k_l1),
+        ("zstd -19 per-64KiB", &tree_court.zstd_per_64k_l19),
+    ] {
+        if let Some(b) = b {
+            line(
+                &mut log,
+                &format!("  {label:<22} {:>10} B  ({:.3}x)", b.output_bytes, b.ratio),
+            );
+        }
+    }
+    line(
+        &mut log,
+        &format!(
+            "  efs tree (post-GC):         {:>10} B reachable ({:.3}x) / {} B backing",
+            tree_court.efs_tree_reachable,
+            tree_court.logical_bytes as f64 / tree_court.efs_tree_reachable.max(1) as f64,
+            tree_court.efs_tree_backing
+        ),
+    );
+    line(
+        &mut log,
+        &format!(
+            "  efs tree + shared dict:     {:>10} B reachable ({:.3}x) / {} B backing (rewrote {} extents, saved {} B)",
+            tree_court.efs_shared_reachable,
+            tree_court.logical_bytes as f64 / tree_court.efs_shared_reachable.max(1) as f64,
+            tree_court.efs_shared_backing,
+            tree_court.shared_rewrites,
+            tree_court.shared_saved_bytes
+        ),
+    );
+    line(
+        &mut log,
+        &format!("  families before: {:?}", tree_court.efs_tree_families),
+    );
+    line(
+        &mut log,
+        &format!("  families after:  {:?}", tree_court.efs_shared_families),
+    );
 
     // 7. Baselines.
     line(&mut log, "\n== baselines ==");
@@ -1368,6 +1480,27 @@ fn extent_decomposition(
                 payload_objs.insert(*dictionary);
                 refs.push(*dictionary);
             }
+            // Phase-9C: the shared dictionary is a referenced chunk (like
+            // a base): its persisted state is accounted where IT is
+            // materialized; count both references for CAS attribution.
+            Representation::SequenceSharedDict {
+                dictionary,
+                shared,
+                model,
+                enc_obj,
+                ..
+            } => {
+                model_objs.insert(*model);
+                payload_objs.insert(*enc_obj);
+                refs.push(*model);
+                refs.push(*enc_obj);
+                if !dictionary.is_zero() {
+                    payload_objs.insert(*dictionary);
+                    refs.push(*dictionary);
+                }
+                payload_objs.insert(*shared);
+                refs.push(*shared);
+            }
             Representation::ExactRef { target, len, .. } => {
                 payload_objs.insert(*target);
                 refs.push(*target);
@@ -1617,6 +1750,207 @@ fn zstd_per_64k_baseline(input: &[u8], level: i32) -> Option<CompressionBaseline
         output_bytes: total_out,
         ratio: input.len() as f64 / total_out.max(1) as f64,
         wall_s: wall,
+    })
+}
+
+/// zstd per FILE, summed — the realistic per-file compression floor for a
+/// tree of separate files (each file is an independent zstd stream, so no
+/// cross-file context is available).
+fn zstd_per_file_baseline(files: &[(String, Vec<u8>)], level: i32) -> Option<CompressionBaseline> {
+    let logical: u64 = files.iter().map(|(_, b)| b.len() as u64).sum();
+    let mut total_out = 0u64;
+    let t0 = Instant::now();
+    for (_, bytes) in files {
+        let tmp = tempfile::NamedTempFile::new().ok()?;
+        std::fs::write(tmp.path(), bytes).ok()?;
+        let out = std::process::Command::new("zstd")
+            .args(["-q", &format!("-{level}"), "-c"])
+            .arg(tmp.path())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        total_out = total_out.saturating_add(out.stdout.len() as u64);
+    }
+    let wall = t0.elapsed().as_secs_f64();
+    Some(CompressionBaseline {
+        tool: "zstd".into(),
+        version: "per-file".into(),
+        level: level.to_string(),
+        input_bytes: logical,
+        output_bytes: total_out,
+        ratio: logical as f64 / total_out.max(1) as f64,
+        wall_s: wall,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Phase-9C tree court
+// ---------------------------------------------------------------------------
+
+/// Write every file of the tree corpus as its own inode under its REAL
+/// directory structure (the way a mounted filesystem would see the tree),
+/// 64 KiB chunk batches per file.
+fn write_tree(
+    store: &Store,
+    files: &[(String, Vec<u8>)],
+    options: OptimizeOptions,
+) -> Result<(), String> {
+    let mut dir_cache: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    dir_cache.insert(String::new(), store.current_root().root_dir_ino);
+    for (rel, bytes) in files {
+        let (dir_part, name) = match rel.rsplit_once('/') {
+            Some((d, n)) => (d.to_string(), n.to_string()),
+            None => (String::new(), rel.clone()),
+        };
+        // Ensure the directory chain exists (mkdir -p, one entry at a
+        // time, cached per pass).
+        if !dir_cache.contains_key(&dir_part) {
+            let mut cur = String::new();
+            let mut cur_ino = store.current_root().root_dir_ino;
+            for comp in dir_part.split('/') {
+                if comp.is_empty() {
+                    continue;
+                }
+                let next_path = if cur.is_empty() {
+                    comp.to_string()
+                } else {
+                    format!("{cur}/{comp}")
+                };
+                let ino = match dir_cache.get(&next_path) {
+                    Some(&cached) => cached,
+                    None => {
+                        let existing = store
+                            .dir_lookup(cur_ino, comp.as_bytes())
+                            .map_err(|e| e.to_string())?;
+                        let ino = match existing {
+                            Some(entry) => entry.ino,
+                            None => store
+                                .create_entry(
+                                    cur_ino,
+                                    comp.as_bytes(),
+                                    crate::store::NewEntry::dir(0o755, 1000, 1000),
+                                    &CrashHooks::none(),
+                                )
+                                .map_err(|e| e.to_string())?,
+                        };
+                        dir_cache.insert(next_path.clone(), ino);
+                        ino
+                    }
+                };
+                cur = next_path;
+                cur_ino = ino;
+            }
+            dir_cache.insert(dir_part.clone(), cur_ino);
+        }
+        let dir_ino = *dir_cache.get(&dir_part).expect("dir cached");
+        let ino = store
+            .create_entry(
+                dir_ino,
+                name.as_bytes(),
+                crate::store::NewEntry::file(0o644, 1000, 1000),
+                &CrashHooks::none(),
+            )
+            .map_err(|e| e.to_string())?;
+        let mut writes: Vec<(u64, Vec<u8>)> = Vec::new();
+        let mut off = 0u64;
+        while off < bytes.len() as u64 {
+            let len = 65536u64.min(bytes.len() as u64 - off);
+            writes.push((off, bytes[off as usize..(off + len) as usize].to_vec()));
+            off += len;
+        }
+        store
+            .write_region_batch(ino, &writes, options)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Representation-family histogram over ALL file extents (multi-inode).
+fn tree_families(store: &Store) -> Result<BTreeMap<String, u64>, String> {
+    let limits = *store.limits();
+    let mut families: BTreeMap<String, u64> = BTreeMap::new();
+    for ino in store.all_inodes().map_err(|e| e.to_string())? {
+        let Some(inode) = store.get_inode(ino).map_err(|e| e.to_string())? else {
+            continue;
+        };
+        let root = match inode.data {
+            InodeData::File { extent_root } => extent_root,
+            _ => continue,
+        };
+        if root.is_zero() {
+            continue;
+        }
+        for (_, bytes) in
+            crate::store::extent_tree::scan_all(root, BTREE_ORDER, limits.max_fanout, store)
+                .map_err(|e| e.to_string())?
+        {
+            if let Ok(d) = crate::format::descriptor::decode(
+                &bytes,
+                limits.max_descriptor_bytes,
+                limits.max_inline_bytes,
+                limits.max_palette,
+                limits.max_period,
+                limits.max_chunk_size,
+            ) {
+                *families.entry(d.family().to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+    Ok(families)
+}
+
+/// The Phase-9C tree court measurement (see `TreeCourt`).
+fn run_tree_court(opts: &CampaignOptions) -> Result<TreeCourt, String> {
+    let files = corpus::source_tree_files(&opts.repo_root)?;
+    let pack = corpus::source_tree_pack(&opts.repo_root)?;
+    let logical: u64 = files.iter().map(|(_, b)| b.len() as u64).sum();
+    let single_chunk = files.iter().filter(|(_, b)| b.len() <= 65536).count();
+
+    // zstd baselines: whole-pack (cross-file oracle), per-file (the
+    // realistic floor), per-64KiB (the chunk horizon).
+    let zw1 = zstd_baseline(&pack, 1);
+    let zw19 = zstd_baseline(&pack, 19);
+    let zf1 = zstd_per_file_baseline(&files, 1);
+    let zf19 = zstd_per_file_baseline(&files, 19);
+    let zc1 = zstd_per_64k_baseline(&pack, 1);
+    let zc19 = zstd_per_64k_baseline(&pack, 19);
+
+    // EntropyFS, per-file writes, before the shared-dict pass.
+    let tmp = scratch_tempdir(&opts.scratch_dir, "tree-")?;
+    let store = fresh_store(tmp.path())?;
+    write_tree(&store, &files, OptimizeOptions::default())?;
+    crate::store::gc::collect(&store, &CrashHooks::none()).map_err(|e| e.to_string())?;
+    let n1 = store_numbers(&store)?;
+    let fam1 = tree_families(&store)?;
+
+    // Phase-9C shared amortized dictionary pass, then GC.
+    let shared =
+        crate::optimizer::background::shared_dict_pass(&store, OptimizeOptions::default(), None)
+            .map_err(|e| e.to_string())?;
+    crate::store::gc::collect(&store, &CrashHooks::none()).map_err(|e| e.to_string())?;
+    let n2 = store_numbers(&store)?;
+    let fam2 = tree_families(&store)?;
+
+    Ok(TreeCourt {
+        file_count: files.len(),
+        single_chunk_files: single_chunk,
+        logical_bytes: logical,
+        zstd_whole_l1: zw1,
+        zstd_whole_l19: zw19,
+        zstd_per_file_l1: zf1,
+        zstd_per_file_l19: zf19,
+        zstd_per_64k_l1: zc1,
+        zstd_per_64k_l19: zc19,
+        efs_tree_reachable: n1.reachable,
+        efs_tree_backing: n1.total_backing,
+        efs_tree_families: fam1,
+        efs_shared_reachable: n2.reachable,
+        efs_shared_backing: n2.total_backing,
+        efs_shared_families: fam2,
+        shared_rewrites: shared.rewritten,
+        shared_saved_bytes: shared.saved_bytes,
     })
 }
 

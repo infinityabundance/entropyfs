@@ -30,6 +30,7 @@ Feature bit registry (v1):
 | 10 | incompat | `SEQUENCE_RANS` descriptors present |
 | 11 | incompat | `SPARSE_BLOCK64` descriptors present |
 | 12 | incompat | `SEQUENCE_DICT` descriptors present (Phase-9B) |
+| 13 | incompat | `SEQUENCE_SHARED_DICT` descriptors present (Phase-9C) |
 
 `CHUNK_64K` is the baseline and needs no bit (v1 always supports it).
 

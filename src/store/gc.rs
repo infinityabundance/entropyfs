@@ -345,6 +345,14 @@ fn collect_descriptor_refs(
         Representation::SequenceDict { dictionary, .. } => {
             referenced.insert(*dictionary);
         }
+        Representation::SequenceSharedDict {
+            dictionary, shared, ..
+        } => {
+            if !dictionary.is_zero() {
+                referenced.insert(*dictionary);
+            }
+            referenced.insert(*shared);
+        }
         _ => {}
     }
     Ok(())
@@ -388,6 +396,10 @@ fn mark_descriptor_refs(
             refs.push(*enc_obj);
         }
         Representation::SequenceDict { model, enc_obj, .. } => {
+            refs.push(*model);
+            refs.push(*enc_obj);
+        }
+        Representation::SequenceSharedDict { model, enc_obj, .. } => {
             refs.push(*model);
             refs.push(*enc_obj);
         }

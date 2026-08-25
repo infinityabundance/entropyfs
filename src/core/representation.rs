@@ -426,6 +426,53 @@ pub enum Representation {
         /// Materialized length.
         len: u64,
     },
+    /// Shared amortized dictionary match coding (Phase-9C; ADR-0005): the
+    /// SEQUENCE_RANS command semantics with a fourth *copy-source* stream
+    /// whose per-copy byte selects among `SRC_LOCAL` (the u16 value is a
+    /// backward distance in the already-materialized output), `SRC_DICT`
+    /// (absolute offset into the previous same-file chunk, when present),
+    /// and `SRC_SHARED` (absolute offset into a shared cross-file
+    /// dictionary chunk). The shared dictionary is a content-addressed
+    /// chunk chosen by the background optimizer to amortize structure
+    /// common to a file family/directory; it is persisted state (its own
+    /// object/chunk is accounted where it is materialized) and its
+    /// reference depth is capped by `max_reference_depth` like every other
+    /// reference family. `dictionary` may be ZERO (= no file dictionary;
+    /// the shared dictionary is then the only external source).
+    SequenceSharedDict {
+        /// Content id of the previous same-file chunk (ZERO = absent).
+        dictionary: ChunkId,
+        /// Materialized length of the file dictionary (0 when absent).
+        dictionary_len: u32,
+        /// Content id of the shared cross-file dictionary chunk (never
+        /// ZERO; ≤ 64 KiB so u16 offsets bound it).
+        shared: ChunkId,
+        /// Materialized length of the shared dictionary.
+        shared_len: u32,
+        /// Content id of the model object (4 length-prefixed slots).
+        model: ChunkId,
+        /// Content id of the encoded object (4 concatenated streams:
+        /// commands, literals, offsets, copy sources).
+        enc_obj: ChunkId,
+        /// Model scale bits (shared by all four streams).
+        scale_bits: u8,
+        /// Codec used for the streams.
+        codec: RansCodec,
+        /// Encoded command-stream length (bytes).
+        seq_len: u32,
+        /// Encoded literal-stream length (bytes).
+        lit_len: u32,
+        /// Encoded offset-stream length (bytes).
+        off_len: u32,
+        /// Encoded copy-source-stream length (bytes).
+        src_len: u32,
+        /// Command count (= decoded command-stream length).
+        cmds: u32,
+        /// Decoded literal-stream length (total literal bytes).
+        lit_out: u32,
+        /// Materialized length.
+        len: u64,
+    },
 }
 
 impl Representation {
@@ -445,7 +492,8 @@ impl Representation {
             | Representation::Permutation { len, .. }
             | Representation::SequenceRans { len, .. }
             | Representation::SparseBlock64 { len, .. }
-            | Representation::SequenceDict { len, .. } => *len,
+            | Representation::SequenceDict { len, .. }
+            | Representation::SequenceSharedDict { len, .. } => *len,
             Representation::Inline { data } => data.len() as u64,
         }
     }
@@ -473,6 +521,7 @@ impl Representation {
             Representation::SequenceRans { .. } => 0x0D,
             Representation::SparseBlock64 { .. } => 0x0E,
             Representation::SequenceDict { .. } => 0x0F,
+            Representation::SequenceSharedDict { .. } => 0x10,
         }
     }
 
@@ -494,6 +543,7 @@ impl Representation {
             Representation::SequenceRans { .. } => "SEQUENCE_RANS",
             Representation::SparseBlock64 { .. } => "SPARSE_BLOCK64",
             Representation::SequenceDict { .. } => "SEQUENCE_DICT",
+            Representation::SequenceSharedDict { .. } => "SEQUENCE_SHARED_DICT",
         }
     }
 
@@ -530,6 +580,11 @@ impl Representation {
             // dictionary id + dictionary_len + model + enc + scale + codec
             // + seq/lit/off/src/cmds/lit_out.
             Representation::SequenceDict { .. } => 32 + 4 + 32 + 32 + 1 + 1 + 4 + 4 + 4 + 4 + 4 + 4,
+            // file dict id + file dict len + shared id + shared len + model
+            // + enc + scale + codec + seq/lit/off/src/cmds/lit_out.
+            Representation::SequenceSharedDict { .. } => {
+                32 + 4 + 32 + 4 + 32 + 32 + 1 + 1 + 4 + 4 + 4 + 4 + 4 + 4
+            }
         };
         base + payload
     }
@@ -857,6 +912,63 @@ impl Representation {
                 }
                 // Every command writes at least one byte, so the command
                 // count cannot exceed the output length.
+                if (*cmds as u64) > *len {
+                    return Err(ReprError::SequenceCmdsMismatch);
+                }
+            }
+            Representation::SequenceSharedDict {
+                dictionary,
+                dictionary_len,
+                shared,
+                shared_len,
+                model,
+                enc_obj,
+                scale_bits,
+                seq_len,
+                lit_len,
+                off_len,
+                src_len,
+                cmds,
+                lit_out,
+                len,
+                ..
+            } => {
+                check_len(*len, limits)?;
+                // The shared dictionary is mandatory; the file dictionary
+                // is optional (ZERO id + zero length = absent).
+                if shared.is_zero() || model.is_zero() || enc_obj.is_zero() {
+                    return Err(ReprError::ZeroObjectId);
+                }
+                if !(1..=16).contains(scale_bits) {
+                    return Err(ReprError::BadScaleBits);
+                }
+                if *shared_len == 0
+                    || *shared_len as u64 > crate::rans::sequence::MAX_DICT as u64
+                    || *shared_len as u64 > limits.max_chunk_size
+                {
+                    return Err(ReprError::BadDictionary);
+                }
+                // The optional file dictionary must be self-consistent.
+                let file_absent = dictionary.is_zero() && *dictionary_len == 0;
+                let file_present = !dictionary.is_zero()
+                    && *dictionary_len > 0
+                    && *dictionary_len as u64 <= crate::rans::sequence::MAX_DICT as u64
+                    && *dictionary_len as u64 <= limits.max_chunk_size;
+                if !file_absent && !file_present {
+                    return Err(ReprError::BadDictionary);
+                }
+                let max_stream = limits.max_chunk_size.saturating_add(64);
+                for s in [*seq_len, *lit_len, *off_len, *src_len] {
+                    if s as u64 > max_stream {
+                        return Err(ReprError::SequenceStreamTooLarge);
+                    }
+                }
+                if (*lit_out as u64) > *len {
+                    return Err(ReprError::SequenceLitOutMismatch);
+                }
+                if *cmds == 0 && *len > 0 {
+                    return Err(ReprError::SequenceNoCommands);
+                }
                 if (*cmds as u64) > *len {
                     return Err(ReprError::SequenceCmdsMismatch);
                 }

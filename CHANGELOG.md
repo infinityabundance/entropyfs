@@ -1,5 +1,42 @@
 # EntropyFS changelog
 
+## v0.4.0 (2026-08-25)
+
+**Format note:** v0.4.0 retains **format version v1** (no format-version
+bump) and adds one new **incompat representation feature** as an explicit
+on-disk feature bit — `SEQUENCE_SHARED_DICT` (bit 13). An implementation
+that does not understand that bit must refuse the store. Additive,
+feature-gated, same pattern as v0.2.0 (bits 10/11) and v0.3.0 (bit 12).
+
+Milestone content (Phase 9C):
+
+- Phase 9C — the shared amortized dictionary: `SEQUENCE_SHARED_DICT` (tag
+  0x10, feature bit 13). Local history + optional previous same-file chunk
+  + a *shared cross-file dictionary* in one stream, with a third
+  copy-source symbol (`SRC_SHARED`, absolute offset). The background
+  `shared_dict_pass` selects a per-directory anchor — an existing terminal
+  chunk that maximizes savings against member incumbents (not against raw
+  bytes, which under-measured the fix by 12×) — and rewrites extents
+  strictly-cheaper with the same CAS-gated, byte-validated commit path as
+  `optimize_pass`. Anchors are terminal (v1), so rewritten extents carry
+  depth ≤ 1; GC pins the anchor chunk through the reference closure even
+  after its owning file is deleted (regression-tested).
+- The 9C evidence gate is sealed in the campaign's **tree court**: 271/274
+  real-tree files are single-chunk, so the previous-chunk dictionary gets
+  almost no opportunity on a real tree, and the packed-stream density is
+  mostly cross-FILE structure. Per-file zstd baselines: whole 4.884× /
+  per-file 3.518× / per-64KiB 3.982× (-1). EntropyFS per-file writes
+  **2.167× → 2.307× post-GC** after the shared-dict pass (101 extents,
+  ~80.5 KiB saved). The mechanism is proven by synthetic fixtures
+  (random-looking shared headers → large wins); the modest real-tree gain
+  is recorded as-is.
+- Ablation: `allow_shared_dict` gate, `no-shared-dict` leave-one-out mode,
+  cumulative-ladder step E3 (post-registration extension), DSFB channel
+  P8 (`shared_dict`).
+- Evidence: the sealed Phase-9C campaign (7/7 admission) under
+  `evidence/performance/` (`INDEX.md` is authoritative); the intermediate
+  flat-tree run is amended in its directory, never silently kept.
+
 ## v0.3.0 (2026-08-25)
 
 **Format note:** v0.3.0 retains **format version v1** (no format-version

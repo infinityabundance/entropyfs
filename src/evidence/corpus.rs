@@ -125,6 +125,44 @@ pub fn source_tree_pack(repo_root: &Path) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// The EntropyFS source tree as a deterministic per-file list
+/// `(relative_path, bytes)` — the same files and order as
+/// `source_tree_pack`, but kept separate so a real-tree corpus can write
+/// every file as its own inode (small files → no previous-chunk
+/// dictionary).
+pub fn source_tree_files(repo_root: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for dir in ["docs", "src", "evidence"] {
+        collect_tree(&repo_root.join(dir), &mut files)?;
+    }
+    for name in [
+        "README.md",
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "LICENSE",
+        "LICENSE-MIT",
+        "LICENSE-APACHE",
+    ] {
+        let p = repo_root.join(name);
+        if p.is_file() {
+            files.push(p);
+        }
+    }
+    files.sort();
+    let mut out: Vec<(String, Vec<u8>)> = Vec::with_capacity(files.len());
+    for p in &files {
+        let rel = p
+            .strip_prefix(repo_root)
+            .map_err(|_| "corpus path outside repo".to_string())?
+            .to_string_lossy()
+            .into_owned();
+        let bytes = std::fs::read(p).map_err(|e| format!("{:}: {e}", p.display()))?;
+        out.push((rel, bytes));
+    }
+    Ok(out)
+}
+
 fn collect_tree(dir: &Path, files: &mut Vec<std::path::PathBuf>) -> Result<(), String> {
     let mut entries: Vec<std::path::PathBuf> = Vec::new();
     let rd = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;

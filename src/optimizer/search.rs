@@ -53,6 +53,11 @@ pub struct GuidedContext<'a> {
     /// Phase-9B). Foreground: the batch overlay / RMW bytes (nearly
     /// free); background: the committed previous chunk.
     pub dictionary: Option<crate::core::candidate::BaseChunk>,
+    /// The shared cross-file dictionary (the SequenceSharedDict
+    /// dictionary, Phase-9C). Supplied by the background shared-dict pass
+    /// (a committed chunk chosen to amortize a file family's structure);
+    /// `None` on the ordinary write path.
+    pub shared: Option<crate::core::candidate::BaseChunk>,
     /// The batch's pending state (Phase-8C): chunks already encoded in
     /// this group-commit transaction, so exact dedup can see the batch's
     /// own entries (they are not yet in the committed chunk index).
@@ -306,6 +311,38 @@ pub fn encode_guided(
                 };
                 let cands = enc.encode(ctx.target, &base_ctx);
                 candidates.extend(cands.into_iter().map(|c| (Channel::PrevInFile, c)));
+            }
+        }
+    }
+    if options.allow_shared_dict && !decisive {
+        // E3 (Phase-9C): the shared amortized dictionary family. The
+        // shared dictionary is a committed chunk supplied by the
+        // background shared-dict pass; the previous same-file chunk (when
+        // present) rides along as the second dictionary source. The depth
+        // cap and cycle check apply to both references; DSFB sizes the
+        // rest of the search.
+        if let Some(shared) = &ctx.shared {
+            if shared.depth.saturating_add(1) <= limits.max_reference_depth
+                && !crate::optimizer::rebase::chain_contains(store, shared, &cid)
+            {
+                let enc = crate::rans::sequence::SequenceSharedDictEncoder {
+                    dictionary: ctx
+                        .dictionary
+                        .as_ref()
+                        .map(|d| d.id)
+                        .unwrap_or(crate::core::extent::ChunkId::ZERO),
+                    dict_bytes: ctx
+                        .dictionary
+                        .as_ref()
+                        .map(|d| d.bytes.clone())
+                        .unwrap_or_default(),
+                    dict_depth: ctx.dictionary.as_ref().map(|d| d.depth).unwrap_or(0),
+                    shared: shared.id,
+                    shared_bytes: shared.bytes.clone(),
+                    shared_depth: shared.depth,
+                };
+                let cands = enc.encode(ctx.target, &base_ctx);
+                candidates.extend(cands.into_iter().map(|c| (Channel::SharedDict, c)));
             }
         }
     }
@@ -805,6 +842,7 @@ mod tests {
             target,
             prev_version: prev,
             dictionary: None,
+            shared: None,
             pending: None,
             mode: SearchMode::Foreground,
         };
@@ -952,6 +990,7 @@ mod tests {
             target: &zeros,
             prev_version: None,
             dictionary: None,
+            shared: None,
             pending: None,
             mode: SearchMode::Foreground,
         };
