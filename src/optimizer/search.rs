@@ -162,6 +162,9 @@ pub fn encode_guided(
                 let rans_cands =
                     crate::rans::residual::RansResidualEncoder.encode(ctx.target, &p0_ctx);
                 candidates.extend(rans_cands.into_iter().map(|c| (Channel::PrevVersion, c)));
+                // Shift-aware copy/literal deltas (insertions/deletions).
+                let delta_cands = crate::rans::delta::DeltaEncoder.encode(ctx.target, &p0_ctx);
+                candidates.extend(delta_cands.into_iter().map(|c| (Channel::PrevVersion, c)));
             }
         }
     }
@@ -306,6 +309,10 @@ pub fn encode_guided(
                 crate::rans::residual::RansResidualEncoder.encode(ctx.target, &base_ctx);
             produced += rans_cands.len();
             candidates.extend(rans_cands.into_iter().map(|c| (channel, c)));
+            // Shift-aware copy/literal deltas (insertions/deletions).
+            let delta_cands = crate::rans::delta::DeltaEncoder.encode(ctx.target, &base_ctx);
+            produced += delta_cands.len();
+            candidates.extend(delta_cands.into_iter().map(|c| (channel, c)));
         }
         if channel == Channel::Universe && options.allow_universe {
             let cands = crate::entropy::universe::UniverseEncoder.encode(ctx.target, &base_ctx);

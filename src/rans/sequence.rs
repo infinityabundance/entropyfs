@@ -257,7 +257,7 @@ fn find_match(input: &[u8], pos: usize, head: &[u32], chain: &[u32]) -> Option<(
 }
 
 /// Hash of the 4 bytes at `pos`: a 16-bit key.
-fn hash_at(input: &[u8], pos: usize) -> usize {
+pub(crate) fn hash_at(input: &[u8], pos: usize) -> usize {
     let h = u32::from_le_bytes(input[pos..pos + 4].try_into().expect("4-byte slice"));
     (h.wrapping_mul(0x9E37_79B1) >> 16) as usize
 }
@@ -388,6 +388,174 @@ pub fn parse_model_object(bytes: &[u8], max_bytes: u64) -> Result<[StreamSlot; 3
         return Err(SequenceError::TrailingBytes);
     }
     Ok(out)
+}
+
+/// The descriptor stream-length fields shared by SEQUENCE_RANS and the
+/// BASE_SEQUENCE residual.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThreeStreams {
+    /// Encoded command-stream length.
+    pub seq_len: u32,
+    /// Encoded literal-stream length.
+    pub lit_len: u32,
+    /// Encoded offset-stream length.
+    pub off_len: u32,
+    /// Decoded command count.
+    pub cmds: u32,
+    /// Decoded literal byte count.
+    pub lit_out: u32,
+    /// Offset width in bytes per copy command (2 for SEQUENCE_RANS u16
+    /// output-relative distances, 4 for BASE_SEQUENCE u32 base offsets).
+    pub off_per_copy: u32,
+}
+
+/// The three decoded streams.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedStreams {
+    /// Decoded command bytes.
+    pub commands: Vec<u8>,
+    /// Decoded literal bytes.
+    pub literals: Vec<u8>,
+    /// Decoded offset bytes.
+    pub offsets: Vec<u8>,
+}
+
+/// Decode the three streams (commands, literals, offsets) from the model
+/// and enc objects, validating every length. Shared by the SEQUENCE_RANS
+/// materialize arm and the BASE_SEQUENCE residual arm. The decoded offset
+/// stream length must be exactly `off_per_copy × copy-count`; the caller
+/// validates its own command-walk semantics against this contract.
+pub fn decode_three_streams(
+    ctx: &dyn crate::core::materialize::DecoderContext,
+    limits: &crate::core::limits::Limits,
+    model: &crate::core::extent::ChunkId,
+    enc_obj: &crate::core::extent::ChunkId,
+    scale_bits: u8,
+    codec: RansCodec,
+    lens: ThreeStreams,
+) -> Result<DecodedStreams, crate::core::materialize::MaterializeError> {
+    use crate::core::materialize::MaterializeError;
+    let ThreeStreams {
+        seq_len,
+        lit_len,
+        off_len,
+        cmds,
+        lit_out,
+        off_per_copy,
+    } = lens;
+    // Stream lengths must compose exactly to the enc object.
+    let enc_total = (seq_len as u64)
+        .checked_add(lit_len as u64)
+        .and_then(|v| v.checked_add(off_len as u64))
+        .ok_or(MaterializeError::InvalidDescriptor(
+            "stream lengths overflow".into(),
+        ))?;
+    if enc_total > limits.max_alloc_bytes {
+        return Err(MaterializeError::AllocTooLarge {
+            requested: enc_total,
+            max: limits.max_alloc_bytes,
+        });
+    }
+    let model_bytes = ctx.fetch_object(model)?;
+    let slots = parse_model_object(&model_bytes, max_model_object_bytes(limits.max_model_bytes))
+        .map_err(|e| MaterializeError::Sequence(e.to_string()))?;
+    let enc = ctx.fetch_object(enc_obj)?;
+    if enc.len() as u64 != enc_total {
+        return Err(MaterializeError::InvalidDescriptor(
+            "enc object length mismatch".into(),
+        ));
+    }
+    let seq_slice = &enc[..seq_len as usize];
+    let lit_slice = &enc[seq_len as usize..seq_len as usize + lit_len as usize];
+    let off_slice = &enc[seq_len as usize + lit_len as usize..];
+
+    // Commands.
+    let commands: Vec<u8> = match &slots[0] {
+        StreamSlot::Rans(m) => ctx.decode_rans(m, seq_slice, scale_bits, codec, cmds as u64)?,
+        StreamSlot::Raw => {
+            if seq_len != cmds {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "raw command stream length mismatch".into(),
+                ));
+            }
+            seq_slice.to_vec()
+        }
+        StreamSlot::Empty => {
+            return Err(MaterializeError::InvalidDescriptor(
+                "empty command stream".into(),
+            ));
+        }
+    };
+    if commands.len() as u64 != cmds as u64 {
+        return Err(MaterializeError::InvalidDescriptor(
+            "command stream decoded length mismatch".into(),
+        ));
+    }
+    let copies = commands.iter().filter(|&&b| b >= 0x80).count();
+    let off_out = (copies as u64).checked_mul(off_per_copy as u64).ok_or(
+        MaterializeError::InvalidDescriptor("offset stream length overflow".into()),
+    )?;
+    if off_out > limits.max_alloc_bytes {
+        return Err(MaterializeError::AllocTooLarge {
+            requested: off_out,
+            max: limits.max_alloc_bytes,
+        });
+    }
+    // Literals.
+    let literals: Vec<u8> = match &slots[1] {
+        StreamSlot::Rans(m) => ctx.decode_rans(m, lit_slice, scale_bits, codec, lit_out as u64)?,
+        StreamSlot::Raw => {
+            if lit_len != lit_out {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "raw literal stream length mismatch".into(),
+                ));
+            }
+            lit_slice.to_vec()
+        }
+        StreamSlot::Empty => {
+            if lit_out != 0 || lit_len != 0 {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "non-empty literal stream without a model".into(),
+                ));
+            }
+            Vec::new()
+        }
+    };
+    if literals.len() as u64 != lit_out as u64 {
+        return Err(MaterializeError::InvalidDescriptor(
+            "literal stream decoded length mismatch".into(),
+        ));
+    }
+    // Offsets.
+    let offsets: Vec<u8> = match &slots[2] {
+        StreamSlot::Rans(m) => ctx.decode_rans(m, off_slice, scale_bits, codec, off_out)?,
+        StreamSlot::Raw => {
+            if off_len as u64 != off_out {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "raw offset stream length mismatch".into(),
+                ));
+            }
+            off_slice.to_vec()
+        }
+        StreamSlot::Empty => {
+            if off_out != 0 {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "non-empty offset stream without a model".into(),
+                ));
+            }
+            Vec::new()
+        }
+    };
+    if offsets.len() as u64 != off_out {
+        return Err(MaterializeError::InvalidDescriptor(
+            "offset stream decoded length mismatch".into(),
+        ));
+    }
+    Ok(DecodedStreams {
+        commands,
+        literals,
+        offsets,
+    })
 }
 
 /// Max model-object size for one chunk: three per-stream models plus the

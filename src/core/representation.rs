@@ -117,6 +117,9 @@ pub struct RangeChange {
 ///   `X[i] = B[i]`.
 /// - `RansCoded`: the encoded stream decodes to `decoded_len` bytes `D`;
 ///   `X[i] = B[i] ^ D[i]`.
+/// - `BaseSequence`: the output `X` is built by walking a command stream
+///   — COPY(base_offset, len) copies from the base, LITERAL(run) appends
+///   literal bytes. Shift-aware: inserted/deleted regions do not break it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Residual {
     /// Sparse XOR edit set.
@@ -149,6 +152,37 @@ pub enum Residual {
         codec: RansCodec,
         /// Decoded stream length.
         decoded_len: u64,
+    },
+    /// Shift-aware copy/literal delta against the base (Phase-8 §5).
+    ///
+    /// Command stream (one byte per command): `0x00..=0x7F` is a literal
+    /// run of `b + 1` (1..=128) bytes from the literal stream;
+    /// `0x80..=0xFF` is a copy of `b - 0x80 + 4` (4..=131) bytes from the
+    /// base at a u32 LE base offset (next 4 bytes of the offset stream).
+    /// The output is built by appending: literals verbatim, copies from
+    /// `base[off..off+len]` (validated against the base length).
+    BaseSequence {
+        /// Length of the residual in bytes (== chunk length).
+        len: u64,
+        /// Content id of the encoded object (3 concatenated streams).
+        enc_obj: ChunkId,
+        /// Content id of the model object (3 slots, same codec as
+        /// SEQUENCE_RANS).
+        model: ChunkId,
+        /// Model scale bits.
+        scale_bits: u8,
+        /// Codec used for the streams.
+        codec: RansCodec,
+        /// Encoded command-stream length.
+        seq_len: u32,
+        /// Encoded literal-stream length.
+        lit_len: u32,
+        /// Encoded offset-stream length.
+        off_len: u32,
+        /// Decoded command count.
+        cmds: u32,
+        /// Decoded literal byte count.
+        lit_out: u32,
     },
 }
 
@@ -479,7 +513,10 @@ impl Representation {
                 if base.is_zero() {
                     return Err(ReprError::ZeroObjectId);
                 }
-                if *base_len < *len {
+                // Copy/literal deltas (BaseSequence) may reference a base
+                // shorter or longer than the target (insertions/deletions);
+                // positional residuals require base >= target.
+                if !matches!(residual, Residual::BaseSequence { .. }) && *base_len < *len {
                     return Err(ReprError::BaseTooShort);
                 }
                 residual.validate(*len, limits)?;
@@ -667,7 +704,8 @@ impl Residual {
         match self {
             Residual::XorSparse { len, .. }
             | Residual::RangeReplace { len, .. }
-            | Residual::RansCoded { len, .. } => *len,
+            | Residual::RansCoded { len, .. }
+            | Residual::BaseSequence { len, .. } => *len,
         }
     }
 
@@ -684,6 +722,7 @@ impl Residual {
                 changes, literals, ..
             } => 1 + 4 + 8 * changes.len() as u64 + literals.len() as u64,
             Residual::RansCoded { .. } => 1 + 32 + 32 + 1 + 1 + 4,
+            Residual::BaseSequence { .. } => 1 + 32 + 32 + 1 + 1 + 4 + 4 + 4 + 4 + 4,
         }
     }
 
@@ -755,6 +794,43 @@ impl Residual {
                 }
                 if *decoded_len != repr_len {
                     return Err(ReprError::ResidualLenMismatch);
+                }
+            }
+            Residual::BaseSequence {
+                enc_obj,
+                model,
+                scale_bits,
+                seq_len,
+                lit_len,
+                off_len,
+                cmds,
+                lit_out,
+                ..
+            } => {
+                if enc_obj.is_zero() || model.is_zero() {
+                    return Err(ReprError::ZeroObjectId);
+                }
+                if !(1..=16).contains(scale_bits) {
+                    return Err(ReprError::BadScaleBits);
+                }
+                // Stream-length sanity: bounded by the chunk class.
+                let max_stream = limits.max_chunk_size.saturating_add(64);
+                for s in [*seq_len, *lit_len, *off_len] {
+                    if s as u64 > max_stream {
+                        return Err(ReprError::SequenceStreamTooLarge);
+                    }
+                }
+                // Literals are a subset of the output; every command
+                // writes at least one byte, so the command count cannot
+                // exceed the output length.
+                if (*lit_out as u64) > repr_len {
+                    return Err(ReprError::SequenceLitOutMismatch);
+                }
+                if *cmds == 0 && repr_len > 0 {
+                    return Err(ReprError::SequenceNoCommands);
+                }
+                if (*cmds as u64) > repr_len {
+                    return Err(ReprError::SequenceCmdsMismatch);
                 }
             }
         }

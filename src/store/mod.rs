@@ -549,9 +549,15 @@ impl Store {
             return Ok(None);
         }
         let bytes = self.read_file(ino, offset, len as u64)?;
-        if bytes.len() != len {
-            return Ok(None); // shorter than requested: hole/tail at EOF
+        if bytes.is_empty() {
+            return Ok(None);
         }
+        // A shorter-than-requested result is a valid prefix base (the
+        // EOF tail): the shift-aware delta family accepts bases of any
+        // length (insertions make targets longer than their bases). Holes
+        // materialize as zeros that resolve to nothing in the chunk index
+        // (or to a zero chunk, which the delta gate rejects as literals),
+        // so this cannot fabricate a meaningful base.
         self.base_chunk_from_bytes(&bytes)
     }
 

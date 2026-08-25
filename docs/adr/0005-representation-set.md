@@ -41,6 +41,13 @@ distance; every stream has a raw fallback so degenerate streams never
 force the family to lose. All three streams plus their models are
 persisted, content-addressed objects counted in the extent's byte total.
 
+Residual kind `0x04 BASE_SEQUENCE` (inside `BASE_RESIDUAL`) is the
+shift-aware copy/literal delta: the output is a command stream of
+`COPY(base_offset, len)` and `LITERAL(run)` against the base, so
+inserted/deleted regions cost only their own bytes instead of exploding a
+positional XOR residual. It shares the three-stream rANS/raw codec with
+`SEQUENCE_RANS` and accepts bases shorter or longer than the target.
+
 Hard rules:
 
 - **No executable programs.** The descriptor language is not Turing-complete;

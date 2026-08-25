@@ -223,6 +223,7 @@ pub fn dependent_reads(rep: &Representation) -> u32 {
         Representation::ExactRef { .. } => 1,
         Representation::BaseResidual { residual, .. } => match residual {
             crate::core::representation::Residual::RansCoded { .. } => 3, // base + encoded + model
+            crate::core::representation::Residual::BaseSequence { .. } => 3, // base + encoded + model
             _ => 1,
         },
         Representation::Sparse { .. } | Representation::Palette { .. } => 0,

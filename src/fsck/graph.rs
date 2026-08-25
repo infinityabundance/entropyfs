@@ -274,6 +274,13 @@ fn mark_descriptor_refs(
             refs.push(*enc_obj);
             refs.push(*model);
         }
+        Representation::BaseResidual {
+            residual: Residual::BaseSequence { enc_obj, model, .. },
+            ..
+        } => {
+            refs.push(*enc_obj);
+            refs.push(*model);
+        }
         _ => {}
     }
     for r in refs {

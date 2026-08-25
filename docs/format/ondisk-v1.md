@@ -191,10 +191,28 @@ Residual (for BASE_RESIDUAL / ENTROPY_REF), kinds:
 | 0x01 XOR_SPARSE | edit_count u32, edits: (pos u32, val u8) × count — byte X at `pos` differs from base by `val` (X = base[pos] XOR val) |
 | 0x02 RANGE_REPLACE | change_count u32, changes: (start u32, end u32) × count, then literal bytes concatenated in order |
 | 0x03 RANS_CODED | enc_obj `[u8;32]`, model `[u8;32]`, scale_bits u8, codec u8, decoded_len u32 (decoded residual applied as XOR_SPARSE after decode? No — decoded residual is a byte stream of length len, applied by XOR with base) |
+| 0x04 BASE_SEQUENCE | enc_obj `[u8;32]`, model `[u8;32]`, scale_bits u8, codec u8, seq_len u32, lit_len u32, off_len u32, cmds u32, lit_out u32 — shift-aware copy/literal delta (below) |
 
 For 0x03 the decoded byte stream is XORed against the base (all positions),
 which is equivalent to XOR_SPARSE with dense edits; the rANS-coded residual
 is the *compressed XOR difference*.
+
+BASE_SEQUENCE (0x04) is the shift-aware delta: the output `X` is built by
+walking a command stream, so inserted/deleted regions (which shift
+positions and break positional XOR residuals) cost only their own bytes.
+Command stream (one byte per command):
+
+| Command byte | Meaning |
+|--------------|---------|
+| 0x00..=0x7F | literal run of `b + 1` (1..=128) bytes from the literal stream |
+| 0x80..=0xFF | copy of `b - 0x80 + 4` (4..=131) bytes from the base at a u32 LE base offset (next 4 bytes of the offset stream) |
+
+The three streams use the same codec as SEQUENCE_RANS (per-stream rANS
+with a raw fallback; three-slot model object; `seq_len + lit_len +
+off_len` == enc object length; `cmds` decoded command count ≤ len;
+`lit_out` decoded literal bytes ≤ len). The base may be shorter or longer
+than the target (the `base_len >= len` constraint of the positional
+residuals does not apply).
 
 ## 8. rANS model object (payload of tag 0x02)
 

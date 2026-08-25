@@ -84,6 +84,10 @@ pub fn residual_data_bytes(residual: &Residual) -> u64 {
             changes, literals, ..
         } => 8 * changes.len() as u64 + literals.len() as u64,
         Residual::RansCoded { .. } => 0,
+        // Copy/literal deltas carry their own object bytes (counted via
+        // the enc/model objects in the cost accounting, not the residual
+        // split).
+        Residual::BaseSequence { .. } => 0,
     }
 }
 

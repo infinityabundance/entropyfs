@@ -121,6 +121,7 @@ impl Encoder for UniverseEncoder {
             Residual::XorSparse { edits, .. } => edits.len() as u64 <= ctx.limits.max_fanout as u64,
             Residual::RangeReplace { .. } => false, // v1: entropy-ref uses XOR only
             Residual::RansCoded { .. } => false,
+            Residual::BaseSequence { .. } => false, // not valid for entropy ref
         });
         let mut out = Vec::new();
         for residual in residuals {

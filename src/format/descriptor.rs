@@ -44,6 +44,8 @@ pub const RESIDUAL_XOR_SPARSE: u8 = 0x01;
 pub const RESIDUAL_RANGE_REPLACE: u8 = 0x02;
 /// Residual kind: rANS-coded stream.
 pub const RESIDUAL_RANS_CODED: u8 = 0x03;
+/// Residual kind: shift-aware copy/literal delta against the base.
+pub const RESIDUAL_BASE_SEQUENCE: u8 = 0x04;
 
 /// Encode a representation descriptor.
 pub fn encode(rep: &Representation) -> Result<Vec<u8>, CodecError> {
@@ -236,6 +238,29 @@ pub fn encode_residual(w: &mut Writer, r: &Residual) -> Result<(), CodecError> {
             w.u8(*scale_bits);
             w.u8(codec.tag());
             w.u32(*decoded_len as u32);
+        }
+        Residual::BaseSequence {
+            enc_obj,
+            model,
+            scale_bits,
+            codec,
+            seq_len,
+            lit_len,
+            off_len,
+            cmds,
+            lit_out,
+            ..
+        } => {
+            w.u8(RESIDUAL_BASE_SEQUENCE);
+            w.bytes(enc_obj.as_bytes());
+            w.bytes(model.as_bytes());
+            w.u8(*scale_bits);
+            w.u8(codec.tag());
+            w.u32(*seq_len);
+            w.u32(*lit_len);
+            w.u32(*off_len);
+            w.u32(*cmds);
+            w.u32(*lit_out);
         }
     }
     Ok(())
@@ -468,6 +493,29 @@ pub fn decode_residual(r: &mut Reader<'_>, repr_len: u64) -> Result<Residual, Co
                 decoded_len,
             })
         }
+        RESIDUAL_BASE_SEQUENCE => {
+            let enc_obj = read_id(r)?;
+            let model = read_id(r)?;
+            let scale_bits = r.u8()?;
+            let codec = RansCodec::from_u8(r.u8()?).ok_or(CodecError::Malformed)?;
+            let seq_len = r.u32()?;
+            let lit_len = r.u32()?;
+            let off_len = r.u32()?;
+            let cmds = r.u32()?;
+            let lit_out = r.u32()?;
+            Ok(Residual::BaseSequence {
+                len: repr_len,
+                enc_obj,
+                model,
+                scale_bits,
+                codec,
+                seq_len,
+                lit_len,
+                off_len,
+                cmds,
+                lit_out,
+            })
+        }
         _ => Err(CodecError::Malformed),
     }
 }
@@ -537,6 +585,23 @@ mod tests {
                     len: 64,
                     changes: vec![RangeChange { start: 4, end: 10 }],
                     literals: vec![9; 6],
+                },
+                len: 64,
+            },
+            Representation::BaseResidual {
+                base: id,
+                base_len: 64,
+                residual: Residual::BaseSequence {
+                    len: 64,
+                    enc_obj: id,
+                    model: id,
+                    scale_bits: 14,
+                    codec: RansCodec::Interleaved2,
+                    seq_len: 10,
+                    lit_len: 5,
+                    off_len: 8,
+                    cmds: 4,
+                    lit_out: 3,
                 },
                 len: 64,
             },
