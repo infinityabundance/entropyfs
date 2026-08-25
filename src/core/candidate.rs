@@ -1,0 +1,332 @@
+//! Candidate representations: the encoder-side proposal type.
+//!
+//! An encoder proposes a [`Candidate`]: a representation descriptor, the
+//! new objects it needs persisted, and its exact cost. The optimizer
+//! pipeline collects candidates, **validates each one** (materialize and
+//! compare against the target bytes — §32, non-negotiable), and commits the
+//! cheapest valid one.
+
+#![forbid(unsafe_code)]
+
+use crate::core::cost::{CostBreakdown, Policy};
+use crate::core::extent::ChunkId;
+use crate::core::limits::Limits;
+use crate::core::materialize::{DecoderContext, MaterializeError, materialize_to_vec};
+use crate::core::representation::Representation;
+
+/// Kind of a persisted object record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectKind {
+    /// Arbitrary data payload (raw bytes, rANS stream, residual stream).
+    Data,
+    /// Encoded rANS model.
+    Model,
+}
+
+/// A new object a candidate requires the store to persist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectRecord {
+    /// Content id (BLAKE3 of `payload`).
+    pub id: ChunkId,
+    /// Object kind.
+    pub kind: ObjectKind,
+    /// Payload bytes.
+    pub payload: Vec<u8>,
+}
+
+impl ObjectRecord {
+    /// Construct a data object from bytes (content id computed).
+    pub fn data(payload: Vec<u8>) -> Self {
+        let id = ChunkId::of(&payload);
+        Self {
+            id,
+            kind: ObjectKind::Data,
+            payload,
+        }
+    }
+
+    /// Construct a model object from bytes (content id computed).
+    pub fn model(payload: Vec<u8>) -> Self {
+        let id = ChunkId::of(&payload);
+        Self {
+            id,
+            kind: ObjectKind::Model,
+            payload,
+        }
+    }
+}
+
+/// A candidate representation with its objects and cost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    /// The representation descriptor.
+    pub representation: Representation,
+    /// New objects to persist for this candidate.
+    pub objects: Vec<ObjectRecord>,
+    /// Exact cost accounting.
+    pub cost: CostBreakdown,
+    /// Logical content id of the materialized bytes (== target chunk id).
+    pub content_id: ChunkId,
+}
+
+/// A candidate family encoder: proposes zero or more candidates for an
+/// input chunk. Encoders are pure (no I/O): bases and dedup hits arrive
+/// materialized via [`CandidateContext`].
+pub trait Encoder {
+    /// Encoder name (for explain output and DSFB channel attribution).
+    fn name(&self) -> &'static str;
+
+    /// Propose candidates for `input`. Never panics; returns an empty vec
+    /// when the family does not apply or cannot represent the chunk.
+    fn encode(&self, input: &[u8], ctx: &CandidateContext<'_>) -> Vec<Candidate>;
+}
+
+impl Candidate {
+    /// Total objective under the policy.
+    pub fn total(&self, policy: &Policy) -> u128 {
+        self.cost.total(policy)
+    }
+}
+
+/// A materialized base chunk available to candidate encoders.
+#[derive(Debug, Clone)]
+pub struct BaseChunk {
+    /// Content id of the base.
+    pub id: ChunkId,
+    /// Materialized base bytes.
+    pub bytes: Vec<u8>,
+    /// Reference depth the base already contributes.
+    pub depth: u8,
+}
+
+/// A verified deduplication hit: an existing logical chunk with identical
+/// content (length + content id verified, bytes verified by the caller).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DedupHit {
+    /// Content id of the existing identical chunk.
+    pub id: ChunkId,
+}
+
+/// Context passed to candidate encoders.
+#[derive(Debug)]
+pub struct CandidateContext<'a> {
+    /// Resource limits.
+    pub limits: &'a Limits,
+    /// Cost policy.
+    pub policy: &'a Policy,
+    /// Content id of the target bytes.
+    pub content_id: ChunkId,
+    /// Candidate bases (previous version, adjacent, family base, ...).
+    pub bases: &'a [BaseChunk],
+    /// Verified deduplication hit, if any.
+    pub dedup: Option<DedupHit>,
+}
+
+/// Candidate pipeline errors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CandidateError {
+    /// Target length is not a supported chunk class.
+    BadChunkClass(u64),
+    /// No candidate could represent the chunk (RAW must always succeed).
+    NoCandidate,
+    /// Validation failed: candidate materializes to different bytes.
+    ValidationFailed,
+    /// Materialization error during validation.
+    Materialize(MaterializeError),
+    /// Internal budget exceeded.
+    BudgetExceeded,
+}
+
+impl std::fmt::Display for CandidateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl std::error::Error for CandidateError {}
+
+/// Validate a candidate by materializing it and comparing against the
+/// target bytes (§32). The candidate's own objects plus any context bases
+/// and dedup targets must be resolvable through `ctx`.
+pub fn validate_candidate(
+    candidate: &Candidate,
+    target: &[u8],
+    resolver: &dyn DecoderContext,
+    limits: &Limits,
+) -> Result<(), CandidateError> {
+    if candidate.content_id != ChunkId::of(target) {
+        return Err(CandidateError::ValidationFailed);
+    }
+    let out = materialize_to_vec(&candidate.representation, resolver, limits)
+        .map_err(CandidateError::Materialize)?;
+    if out.len() != target.len() || out != target {
+        return Err(CandidateError::ValidationFailed);
+    }
+    Ok(())
+}
+
+/// Pick the cheapest candidate by the policy objective.
+///
+/// Returns `None` for an empty input (the caller must ensure RAW exists).
+pub fn pick_cheapest<'a>(candidates: &'a [Candidate], policy: &Policy) -> Option<&'a Candidate> {
+    candidates.iter().min_by_key(|c| c.total(policy))
+}
+
+/// The always-available RAW candidate for arbitrary bytes.
+///
+/// The raw payload becomes a Data object; the descriptor references it.
+pub fn raw_candidate(input: &[u8], content_id: ChunkId, limits: &Limits) -> Option<Candidate> {
+    if input.len() as u64 > limits.max_chunk_size {
+        return None;
+    }
+    let obj = ObjectRecord::data(input.to_vec());
+    let rep = Representation::Raw {
+        obj: obj.id,
+        len: input.len() as u64,
+    };
+    let split = crate::core::cost::ByteSplit {
+        reference: 32,
+        ..Default::default()
+    };
+    let cost = crate::core::cost::estimate(&rep, &split, 0);
+    Some(Candidate {
+        representation: rep,
+        objects: vec![obj],
+        cost,
+        content_id,
+    })
+}
+
+/// The ZERO candidate for all-zero input.
+pub fn zero_candidate(input: &[u8], content_id: ChunkId, limits: &Limits) -> Option<Candidate> {
+    if input.len() as u64 > limits.max_chunk_size {
+        return None;
+    }
+    if input.iter().any(|&b| b != 0) {
+        return None;
+    }
+    let rep = Representation::Zero {
+        len: input.len() as u64,
+    };
+    let cost = crate::core::cost::estimate(&rep, &Default::default(), 0);
+    Some(Candidate {
+        representation: rep,
+        objects: Vec::new(),
+        cost,
+        content_id,
+    })
+}
+
+/// The FILL candidate for constant-byte input.
+pub fn fill_candidate(input: &[u8], content_id: ChunkId) -> Option<Candidate> {
+    let value = *input.first()?;
+    if input.iter().any(|&b| b != value) {
+        return None;
+    }
+    let rep = Representation::Fill {
+        value,
+        len: input.len() as u64,
+    };
+    let cost = crate::core::cost::estimate(&rep, &Default::default(), 0);
+    Some(Candidate {
+        representation: rep,
+        objects: Vec::new(),
+        cost,
+        content_id,
+    })
+}
+
+/// The INLINE candidate for small inputs stored inside the descriptor.
+pub fn inline_candidate(input: &[u8], content_id: ChunkId, limits: &Limits) -> Option<Candidate> {
+    if input.len() as u64 > limits.max_inline_bytes || input.is_empty() {
+        return None;
+    }
+    let rep = Representation::Inline {
+        data: input.to_vec(),
+    };
+    let cost = crate::core::cost::estimate(&rep, &Default::default(), 0);
+    Some(Candidate {
+        representation: rep,
+        objects: Vec::new(),
+        cost,
+        content_id,
+    })
+}
+
+/// The EXACT_REF candidate for a verified deduplication hit.
+pub fn exact_ref_candidate(
+    target: ChunkId,
+    content_id: ChunkId,
+    len: u64,
+    target_len: u64,
+    limits: &Limits,
+) -> Option<Candidate> {
+    if target.is_zero() || len > limits.max_chunk_size || len > target_len {
+        return None;
+    }
+    let rep = Representation::ExactRef {
+        target,
+        off: 0,
+        len,
+    };
+    let split = crate::core::cost::ByteSplit {
+        reference: 32,
+        ..Default::default()
+    };
+    let cost = crate::core::cost::estimate(&rep, &split, 0);
+    Some(Candidate {
+        representation: rep,
+        objects: Vec::new(),
+        cost,
+        content_id,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_candidate_always_valid() {
+        let limits = Limits::default();
+        let policy = Policy::default();
+        let data: Vec<u8> = (0..1024u32).map(|i| (i % 251) as u8).collect();
+        let cid = ChunkId::of(&data);
+        let cand = raw_candidate(&data, cid, &limits).unwrap();
+        assert_eq!(cand.representation.len(), 1024);
+        assert_eq!(cand.total(&policy), cand.cost.total(&policy));
+        // The candidate's own object must resolve; build a tiny resolver.
+        let map: std::collections::HashMap<ChunkId, Vec<u8>> = cand
+            .objects
+            .iter()
+            .map(|o| (o.id, o.payload.clone()))
+            .collect();
+        let resolver = crate::tests::helpers::MemResolver::from_map(map);
+        validate_candidate(&cand, &data, &resolver, &limits).unwrap();
+    }
+
+    #[test]
+    fn zero_candidate_only_for_zeros() {
+        let limits = Limits::default();
+        let zeros = vec![0u8; 4096];
+        let cid = ChunkId::of(&zeros);
+        let cand = zero_candidate(&zeros, cid, &limits).unwrap();
+        assert_eq!(cand.representation.len(), 4096);
+        let not_zeros = vec![1u8; 4096];
+        let cid2 = ChunkId::of(&not_zeros);
+        assert!(zero_candidate(&not_zeros, cid2, &limits).is_none());
+    }
+
+    #[test]
+    fn pick_cheapest_prefers_zero() {
+        let limits = Limits::default();
+        let policy = Policy::default();
+        let zeros = vec![0u8; 4096];
+        let cid = ChunkId::of(&zeros);
+        let z = zero_candidate(&zeros, cid, &limits).unwrap();
+        let r = raw_candidate(&zeros, cid, &limits).unwrap();
+        let cands = [r.clone(), z.clone()];
+        let best = pick_cheapest(&cands, &policy).unwrap();
+        assert!(matches!(best.representation, Representation::Zero { .. }));
+    }
+}

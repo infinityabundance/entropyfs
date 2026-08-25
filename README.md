@@ -1,0 +1,98 @@
+# EntropyFS
+
+**Persist irreducible state. Materialize structure. Preserve exact bytes.
+Measure everything.**
+
+EntropyFS is a native-Rust, mountable Linux filesystem whose central research
+premise is:
+
+> Logical bytes are an interface presented to applications. They do not have
+> to be the primary persisted representation. EntropyFS persists the minimum
+> exact reversible entropy/configuration state necessary to reproduce those
+> bytes.
+
+The defining equation:
+
+```text
+X = Materialize(D)
+```
+
+`X` is the exact logical byte sequence; `D` is the persisted representation
+descriptor. A more general family:
+
+```text
+X = T(E(U, S, P)) ⊕ R
+```
+
+`U` = versioned entropy universe · `S` = seed/state · `P` = rank/coordinate ·
+`T` = bounded reversible transform · `R` = exact residual · `E` =
+deterministic materialization.
+
+EntropyFS does **not** claim to evade information theory: the SSD still
+stores physical bits. Its innovation is to make *entropy state, mathematical
+rank/configuration, immutable references, deterministic generators,
+transforms, and irreducible residuals* first-class storage representations
+instead of assuming logical byte blocks must themselves exist at rest. For
+random/encrypted/incompressible data it converges gracefully toward ordinary
+physical storage (RAW fallback) — that is a success condition, not a failure.
+
+## Current status
+
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 0 | Research, ADRs, information-theory boundary, format v1, crash protocol | ✅ sealed (`docs/`) |
+| 1 | In-memory representation engine: RAW/ZERO/FILL/INLINE/RANS/EXACT_REF/BASE_RESIDUAL/SPARSE/PALETTE/PERIODIC/PERMUTATION/ENTROPY_REF, cost accounting, round trips | ✅ implemented (tests green) |
+| 2 | Persistent immutable store: segments, dual superblocks, records, descriptor codec, feature bits | 🚧 in progress |
+| 3 | Mountable FUSE filesystem | ⏳ |
+| 4 | Entropy-native optimization (DSFB-guided search, background optimizer) | ⏳ |
+| 5 | Snapshots, GC, robustness | ⏳ |
+| 6 | Performance | ⏳ |
+| 7 | Experimental ublk frontend (internal module) | ⏳ |
+
+## One crate
+
+EntropyFS is **one Cargo package** — no workspace, no subsystem crates
+(`docs/adr/0001-single-crate.md`). Architecture lives in the module tree and
+dependency direction, not package proliferation.
+
+## Honesty rules
+
+- A 128-bit seed does not "store" a gigabyte. Descriptor bits select at most
+  `2^k` states; every persisted bit is accounted
+  (`docs/theory/information-accounting.md`).
+- No hidden corpus, no network, no RNG in materialization, no CPU-dependent
+  floating point. The universe specification is part of the format version.
+- No arbitrary generator programs: the descriptor language is bounded and
+  not Turing-complete (`docs/adr/0005-representation-set.md`).
+- DSFB has zero decoding authority (`docs/adr/0004-dsfb-observer.md`).
+- `statfs` reports physical capacity; effective ratio is an observation,
+  never a promise (`docs/adr/0018-statfs.md`).
+- Every optimization claim requires reproducible evidence
+  (`docs/performance/methodology.md`).
+
+## Building
+
+```sh
+rustup toolchain install stable --profile minimal --component rustfmt,clippy
+cargo build --release
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+```
+
+## Target platform
+
+CachyOS/Arch Linux, x86-64, FUSE (`/dev/fuse` + `fusermount3`; kernel
+`CONFIG_FUSE_FS=y`). No custom kernel, no out-of-tree module, no reboot.
+
+## Reading order
+
+- `docs/architecture/overview.md` — architecture map
+- `docs/theory/entropy-medium.md` — the information-theory boundary statement
+- `docs/format/ondisk-v1.md` — the on-disk format
+- `docs/recovery/crash-consistency.md` — the crash protocol
+- `docs/adr/` — all architecture decision records
+
+## License
+
+MIT OR Apache-2.0, at your option.

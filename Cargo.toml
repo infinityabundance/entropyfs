@@ -1,0 +1,67 @@
+# EntropyFS — single crate, one package, one architectural source tree.
+#
+# This package is intentionally NOT a workspace and intentionally has no
+# subsystem crates.  Architecture is expressed with modules, visibility and
+# dependency direction inside this single crate (see docs/architecture/overview.md
+# and docs/adr/0001-single-crate.md).
+
+[package]
+name = "entropyfs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Entropy-native Linux filesystem: persist irreducible state, materialize structure, preserve exact bytes."
+license = "MIT OR Apache-2.0"
+keywords = ["filesystem", "fuse", "entropy", "storage", "rans"]
+categories = ["filesystem", "compression"]
+readme = "README.md"
+
+[lib]
+name = "entropyfs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "entropyfs"
+path = "src/main.rs"
+
+[dependencies]
+# --- Entropy / representation backends (external dependencies, not EntropyFS subsystems) ---
+# ryg-rans-rs: public facade over the ryg_rans reconstruction (byte/64-bit/word rANS,
+# model construction, malformed-input validation).  Exact scalar authority path.
+ryg-rans-rs = { version = "=0.5.1", features = ["alloc"] }
+# dsfb: drift–slew fusion bootstrap observer core (phi/omega/alpha + trust weighting).
+# EntropyFS adapts it into a storage observer with ZERO decoding authority.
+dsfb = "=0.1.2"
+
+# --- Integrity / content identity ---
+blake3 = "=1.8.7"   # logical content hashing (256-bit content IDs)
+crc32c = "=0.6.8"   # physical record integrity (SSE4.2 crc32c w/ software fallback)
+
+# --- Linux / FUSE frontend ---
+fuser = "=0.18.0"   # stable synchronous FUSE binding (pure Rust; no libfuse required)
+rustix = "1"        # safe syscall wrappers where std does not provide what we need
+
+# --- CLI / diagnostics ---
+clap = { version = "4", features = ["derive"] }
+# serde/serde_json are for HUMAN-READABLE JSON evidence and diagnostics ONLY.
+# The permanent on-disk format is explicit little-endian byte codecs (src/format),
+# never serde/bincode-derived layouts.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+proptest = "1"  # property tests: rank/unrank round trips, materialization, store invariants
+tempfile = "3"  # isolated scratch stores for tests (never the host filesystem)
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = true
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1
+
+# Deny warnings in CI-style builds; the crate additionally uses
+# `#![forbid(unsafe_code)]` where the Linux boundary does not require otherwise.
+[workspace]

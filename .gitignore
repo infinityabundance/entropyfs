@@ -1,0 +1,18 @@
+/target
+Cargo.lock.orig
+*.swp
+*~
+.idea/
+.vscode/
+# Never commit test stores / mounts
+/tmp
+/store-test-*/
+*.store
+*.store.lock
+/mnt-test/
+# Fuzz artifacts
+/fuzz/target
+/fuzz/artifacts
+/fuzz/corpus
+# Evidence staging
+/evidence/.staging

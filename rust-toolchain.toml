@@ -1,0 +1,9 @@
+# EntropyFS toolchain pin.
+#
+# `stable` is deliberate: EntropyFS must build on ordinary CachyOS/Arch stable
+# Rust without nightly.  Kani / cargo-fuzz / Miri are run as separate tools on
+# the same toolchain where the environment provides them.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
