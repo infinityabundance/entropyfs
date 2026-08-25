@@ -199,15 +199,19 @@ pub struct AblationRow {
     pub families: BTreeMap<String, u64>,
 }
 
-/// The ablation ladder table (methodology §4 A0–A8).
+/// The ablation tables (methodology §4): leave-one-out gates and the
+/// strict cumulative ladder A0–A8. Both are kept forever — they answer
+/// different questions (marginal necessity vs. cumulative contribution).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AblationTable {
     /// Corpus the ladder ran on.
     pub corpus: String,
     /// Structured corpus size in MiB.
     pub size_mib: u64,
-    /// One row per ablation mode.
+    /// Leave-one-out rows (one mechanism disabled at a time).
     pub rows: Vec<AblationRow>,
+    /// Strict cumulative ladder rows (A0–A8, each adds one mechanism).
+    pub cumulative_rows: Vec<AblationRow>,
 }
 
 /// DSFB search-budget investigation: identical final physical
@@ -431,6 +435,7 @@ pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
             corpus: "structured".into(),
             size_mib: opts.size_mib,
             rows: Vec::new(),
+            cumulative_rows: Vec::new(),
         },
         dsfb_investigation: DsfbInvestigation {
             corpus: "structured".into(),
@@ -498,8 +503,10 @@ pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
         results.runs.push(group);
     }
 
-    // 3. Ablation ladder on the structured corpus.
-    line(&mut log, "\n== ablation ladder (structured) ==");
+    // 3. Ablation tables on the structured corpus: leave-one-out gates
+    // (one mechanism disabled at a time) and the strict cumulative ladder
+    // A0-A8 (methodology §4, spec §43). Both are kept forever.
+    line(&mut log, "\n== leave-one-out ablation (structured) ==");
     for (mode, options) in OptimizeOptions::ablation_modes() {
         let tmp = scratch_tempdir(&opts.scratch_dir, "abl-")?;
         let store = fresh_store(tmp.path())?;
@@ -526,6 +533,43 @@ pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
             ),
         );
         results.ablation.rows.push(row);
+    }
+
+    line(&mut log, "\n== cumulative ladder A0-A8 (structured) ==");
+    for (mode, options, run_background) in OptimizeOptions::cumulative_ladder_modes() {
+        let tmp = scratch_tempdir(&opts.scratch_dir, "ladder-")?;
+        let store = fresh_store(tmp.path())?;
+        let o = write_only(&store, 3, &structured, options)?;
+        // A8: the background re-optimization pass (the only ladder step
+        // the foreground write path does not include).
+        let mut n = store_numbers(&store)?;
+        if run_background {
+            let opt = crate::optimizer::background::optimize_pass(&store, options, None, None)
+                .map_err(|e| e.to_string())?;
+            n = store_numbers(&store)?;
+            let _ = opt;
+        }
+        let row = AblationRow {
+            mode: mode.to_string(),
+            physical: n.reachable,
+            ratio: n.logical as f64 / n.reachable.max(1) as f64,
+            write_mbps: o.metrics.write_mbps,
+            cpu_user_s: o.metrics.cpu_user_s,
+            families: o.families,
+        };
+        line(
+            &mut log,
+            &format!(
+                "  {mode:<18} physical {:>12} ratio {:>7.3}x write {:>8.1} MiB/s cpu {:.3}+{:.3}s (p95 write {:.0}µs)",
+                row.physical,
+                row.ratio,
+                row.write_mbps,
+                row.cpu_user_s,
+                o.metrics.cpu_sys_s,
+                summary(&o.latencies).p95 * 1e6,
+            ),
+        );
+        results.ablation.cumulative_rows.push(row);
     }
 
     // 4. DSFB investigation (repeated, same physical expectation).
@@ -1469,14 +1513,18 @@ fn admission_checklist(results: &CampaignResults, corpora: &[Corpus]) -> Vec<Adm
         ),
     });
 
-    // Rule 4: ablations identify the mechanism.
-    let ablation_ok = results.ablation.rows.len() >= 8;
+    // Rule 4: ablations identify the mechanism. Both tables must be
+    // present: leave-one-out (marginal necessity) and the strict
+    // cumulative ladder A0-A8 (cumulative contribution).
+    let ablation_ok =
+        results.ablation.rows.len() >= 8 && results.ablation.cumulative_rows.len() >= 9;
     items.push(AdmissionItem {
-        rule: "ablations identify which mechanism caused the gain".to_string(),
+        rule: "ablations identify which mechanism caused the gain (cumulative ladder A0-A8 + leave-one-out)".to_string(),
         met: ablation_ok,
         note: format!(
-            "ablation ladder has {} rows (A0–A8 families)",
-            results.ablation.rows.len()
+            "leave-one-out table {} rows; cumulative ladder {} rows (A0-A8)",
+            results.ablation.rows.len(),
+            results.ablation.cumulative_rows.len()
         ),
     });
 

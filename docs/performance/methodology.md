@@ -90,7 +90,11 @@ Comparisons against only raw storage are insufficient for broad claims.
 
 ## 4. Ablation Ladder
 
-Run the system in strict increments:
+Two complementary ablation tables are required for every campaign, and
+both are kept forever:
+
+**The strict cumulative ladder A0–A8** — each step adds exactly one
+mechanism on top of the previous:
 
 ```text
 A0  RAW
@@ -104,15 +108,27 @@ A7  + DSFB candidate guidance
 A8  + background re-optimization
 ```
 
+**The leave-one-out table** — the full pipeline with exactly one mechanism
+disabled at a time (`full | raw | raw-rans | no-dedup | no-base |
+no-temporal | no-config | no-rans | no-universe | no-dsfb`).
+
 Rules:
 
-- Report the incremental gain from each stage.
+- Report the incremental gain from each cumulative-ladder stage.
+- Report the marginal necessity of each mechanism from the leave-one-out
+  table; the two tables answer different questions (cumulative contribution
+  vs. marginal necessity) and must never be substituted for each other.
 - If most savings occur at `A2`, call them deduplication savings.
 - If `A7` changes CPU cost but not storage size, report exactly that.
 - Never credit DSFB with savings produced by rANS, deduplication, or base
   residuals.
 - If `A6` contributes no benefit after selector and residual cost, report that
   as a negative result.
+- Protocol note: the first sealed campaign (`campaign-1787658658-67d977a/`)
+  labels its nine-row table as the “ablation ladder”; that table is the
+  leave-one-out table, not the strict cumulative ladder. It predates the
+  two-table rule and is amended in `evidence/performance/INDEX.md`, never
+  rewritten.
 
 ## 5. Negative Controls
 

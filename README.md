@@ -82,6 +82,12 @@ oversized-descriptor fix (Phase 6) eliminated.
   64 KiB chunks its 16.876× is dominated by content-addressed dedup. The
   campaign's structured-corpus ratios (up to 211× on that same corpus)
   have the same corpus property and are presented as ablation data only.
+- The campaign's ablation evidence is two tables, both kept forever: the
+  **strict cumulative ladder A0–A8** (each step adds one mechanism) and the
+  **leave-one-out table** (one mechanism disabled at a time). The first
+  campaign's nine-row table is the leave-one-out table; it predates the
+  two-table rule and is amended as such in `evidence/performance/INDEX.md`
+  (protocol note, never rewritten).
 - The campaign's DSFB investigation (5+5 repeated runs) found: with DSFB
   ranking enabled vs disabled, the final physical representation is
   byte-identical (79,298 B) while write throughput is 765 vs 335 MiB/s and

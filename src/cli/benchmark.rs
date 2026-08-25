@@ -32,11 +32,14 @@ pub struct BenchmarkArgs {
     /// Total logical bytes to write (MiB).
     #[arg(long, default_value_t = 64)]
     pub size_mib: u64,
-    /// Run a single ablation mode (full | raw | raw-rans | no-dedup |
-    /// no-base | no-config | no-rans | no-universe | no-dsfb).
+    /// Run a single ablation mode: a leave-one-out gate (full | raw |
+    /// raw-rans | no-dedup | no-base | no-config | no-rans | no-universe |
+    /// no-dsfb | no-temporal) or a cumulative-ladder step (A0-raw …
+    /// A8-full+background).
     #[arg(long)]
     pub ablation: Option<String>,
-    /// Run all ablation modes on fresh stores and print the comparison.
+    /// Run all ablation modes (leave-one-out gates + the cumulative
+    /// ladder A0-A8) on fresh stores and print both comparison tables.
     #[arg(long)]
     pub ablation_all: bool,
     /// Run the full evidence-sealing campaign, archiving under this
@@ -190,24 +193,43 @@ pub fn run(args: &BenchmarkArgs) -> Result<(), String> {
         return run_ablation_table(args);
     }
     if let Some(name) = &args.ablation {
-        let mode = OptimizeOptions::ablation_modes()
+        // Leave-one-out gates first, then the cumulative-ladder steps
+        // (whose A8 step also runs the background optimizer pass).
+        let single = OptimizeOptions::ablation_modes()
             .into_iter()
             .find(|(n, _)| n == name)
-            .ok_or_else(|| {
-                format!(
-                    "unknown ablation mode '{name}' ({})",
-                    OptimizeOptions::ablation_modes()
+            .map(|(n, o)| (n, o, false));
+        let ladder = single.or_else(|| {
+            OptimizeOptions::cumulative_ladder_modes()
+                .into_iter()
+                .find(|(n, _, _)| n == name)
+        });
+        let (mode_name, options, run_background) = ladder.ok_or_else(|| {
+            let names: Vec<&str> = OptimizeOptions::ablation_modes()
+                .iter()
+                .map(|(n, _)| *n)
+                .chain(
+                    OptimizeOptions::cumulative_ladder_modes()
                         .iter()
-                        .map(|(n, _)| *n)
-                        .collect::<Vec<_>>()
-                        .join("|")
+                        .map(|(n, _, _)| *n),
                 )
-            })?;
+                .collect();
+            format!("unknown ablation mode '{name}' ({})", names.join("|"))
+        })?;
         let dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
         Store::create(dir.path(), &StoreConfig::default(), [0x66; 16])
             .map_err(|e| e.to_string())?;
-        let r = run_corpus(dir.path(), args.size_mib, mode.1)?;
-        print_run(&r, mode.0);
+        let mut r = run_corpus(dir.path(), args.size_mib, options)?;
+        if run_background {
+            // Reopen the store and run the background pass (the A8 step).
+            let store =
+                Store::open(dir.path(), &StoreConfig::default()).map_err(|e| e.to_string())?;
+            crate::optimizer::background::optimize_pass(&store, options, None, None)
+                .map_err(|e| e.to_string())?;
+            r.physical = store.physical_used();
+        }
+        r.mode = mode_name;
+        print_run(&r, mode_name);
         return Ok(());
     }
 
@@ -331,7 +353,9 @@ fn print_run(r: &RunResult, name: &str) {
     }
 }
 
-/// Run every ablation mode on a fresh store and print the attribution.
+/// Run every ablation mode on a fresh store and print both attribution
+/// tables: the leave-one-out gates (one mechanism disabled at a time) and
+/// the strict cumulative ladder A0-A8 (spec §43, methodology §4).
 fn run_ablation_table(args: &BenchmarkArgs) -> Result<(), String> {
     let mut rows: Vec<RunResult> = Vec::new();
     for (name, options) in OptimizeOptions::ablation_modes() {
@@ -365,8 +389,11 @@ fn run_ablation_table(args: &BenchmarkArgs) -> Result<(), String> {
             r.write_mbps
         );
     }
-    // Attribution vs full.
-    println!("\nsavings attributable to each component (physical bytes vs full):");
+    // Attribution vs full (leave-one-out: removing a mechanism must make
+    // physical bytes grow if the mechanism contributed).
+    println!(
+        "\nleave-one-out attribution (physical bytes vs full; + means the\nmechanism contributed to density):"
+    );
     for r in &rows {
         if r.mode == "full" {
             continue;
@@ -377,6 +404,7 @@ fn run_ablation_table(args: &BenchmarkArgs) -> Result<(), String> {
             "raw-rans" => "rANS over RAW",
             "no-dedup" => "exact dedup",
             "no-base" => "base+residual channels",
+            "no-temporal" => "temporal base channels",
             "no-config" => "configurational coding",
             "no-rans" => "rANS",
             "no-universe" => "entropy universes",
@@ -388,6 +416,53 @@ fn run_ablation_table(args: &BenchmarkArgs) -> Result<(), String> {
             delta,
             (r.physical as f64 / full as f64)
         );
+    }
+
+    // Cumulative ladder A0-A8: each step adds exactly one mechanism.
+    println!(
+        "\ncumulative ladder A0-A8 (each step adds one mechanism; A8 also\nruns the background optimizer pass):"
+    );
+    let mut ladder_rows: Vec<RunResult> = Vec::new();
+    for (name, options, run_background) in OptimizeOptions::cumulative_ladder_modes() {
+        let dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
+        Store::create(dir.path(), &StoreConfig::default(), [0x66; 16])
+            .map_err(|e| e.to_string())?;
+        let mut r = run_corpus(dir.path(), args.size_mib, options)?;
+        if run_background {
+            let store =
+                Store::open(dir.path(), &StoreConfig::default()).map_err(|e| e.to_string())?;
+            crate::optimizer::background::optimize_pass(&store, options, None, None)
+                .map_err(|e| e.to_string())?;
+            r.physical = store.physical_used();
+        }
+        r.mode = name;
+        println!(
+            "{:<18} {:>12} {:>14} {:>9.3}x {:>10.1}",
+            r.mode,
+            r.logical,
+            r.physical,
+            r.logical as f64 / r.physical as f64,
+            r.write_mbps
+        );
+        ladder_rows.push(r);
+    }
+    // Incremental attribution: the gain each step adds over the previous.
+    println!("\nincremental contribution of each ladder step (bytes saved vs the previous step):");
+    let mut prev: Option<i64> = None;
+    for r in &ladder_rows {
+        match prev {
+            None => println!("  {:<18} baseline", r.mode),
+            Some(p) => {
+                let delta = p - r.physical as i64;
+                println!(
+                    "  {:<18} {:+12} bytes ({:.3}x)",
+                    r.mode,
+                    delta,
+                    r.physical as f64 / p.max(1) as f64
+                );
+            }
+        }
+        prev = Some(r.physical as i64);
     }
     Ok(())
 }

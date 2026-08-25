@@ -153,6 +153,13 @@ corrected run.
   only 4 unique 64 KiB chunks, so content-addressed object aliasing already
   absorbs most dedup; the ladder's incremental rows must be read with that
   corpus property in mind.
+
+  **Protocol amendment (Phase-8A):** this table is the *leave-one-out*
+  table (one mechanism disabled at a time). It predates the two-table rule
+  in `docs/performance/methodology.md` §4 and was labeled “ablation
+  ladder” at the time; it is amended here as a mislabel, never rewritten.
+  The strict cumulative ladder A0–A8 (each step adds one mechanism) is
+  introduced by the Phase-8A campaign; both tables are kept forever.
 - **H2 versioned experiment (synthetic drift corpus):** sequential full
   2,463,484 B vs shuffled full 2,655,556 B (temporal adjacency saves 7.2%),
   but no-base 2,141,320 B — the current base+residual implementation loses

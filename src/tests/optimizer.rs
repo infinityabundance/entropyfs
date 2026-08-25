@@ -358,3 +358,78 @@ fn ablation_modes_preserve_bytes_and_differ() {
     let full_bytes = current_persisted_bytes(&store2, &exts2[0].1);
     assert!(full_bytes <= raw_bytes);
 }
+
+/// A period-26 text chunk (benchmark pattern 0): compressible by rANS,
+/// dedup-able, periodic, and cheap to edit — exercises every ladder step.
+fn compressible_chunk(seed: u8) -> Vec<u8> {
+    (0..65536u64)
+        .map(|i| b'a' + ((i as u8).wrapping_add(seed)) % 26)
+        .collect()
+}
+
+#[test]
+fn cumulative_ladder_is_exact_and_monotone() {
+    // The strict cumulative ladder A0-A8 (methodology §4, spec §43): each
+    // step adds exactly one mechanism on top of the previous. Every step
+    // must preserve bytes exactly, and physical bytes must never grow when
+    // a mechanism is added (the ladder is monotone non-increasing). On this
+    // corpus rANS (A1) must strictly beat RAW (A0).
+    let mut prev_physical: Option<u64> = None;
+    for (name, options, run_background) in OptimizeOptions::cumulative_ladder_modes() {
+        let dir = TempDir::new().unwrap();
+        let store = create_store(&dir);
+        let f = ino(&store);
+        let v1 = compressible_chunk(0);
+        // Dedup fixture: identical chunk at a second offset.
+        store.write_region_with(f, 0, &v1, options).unwrap();
+        store.write_region_with(f, 65536, &v1, options).unwrap();
+        // Base-residual fixture: a drifted version of the first chunk
+        // (three single-byte edits; P0 is in hand at the overwrite).
+        let mut v1e = v1.clone();
+        v1e[10] ^= 0x5;
+        v1e[32000] ^= 0x5;
+        v1e[65530] ^= 0x5;
+        store.write_region_with(f, 0, &v1e, options).unwrap();
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&v1e);
+        expected.extend_from_slice(&v1);
+        let got = store.read_file(f, 0, expected.len() as u64).unwrap();
+        assert_eq!(got, expected, "{name}: write path corrupted bytes");
+        if run_background {
+            optimize_pass(&store, options, None, None).unwrap();
+            let got2 = store.read_file(f, 0, expected.len() as u64).unwrap();
+            assert_eq!(got2, expected, "{name}: background pass corrupted bytes");
+        }
+        // The ladder measures the *persisted reachable* state, not the
+        // transient unreclaimed garbage each step leaves behind or the
+        // layout noise of the append-only compaction (record alignment,
+        // copy order). Reachable bytes — the campaign's metric — is
+        // deterministic; GC is the reclamation boundary.
+        crate::store::gc::collect(&store, &CrashHooks::none()).unwrap();
+        let got3 = store.read_file(f, 0, expected.len() as u64).unwrap();
+        assert_eq!(got3, expected, "{name}: GC corrupted bytes");
+        let live = crate::store::gc::mark_live(&store).unwrap();
+        let reachable: u64 = store
+            .object_index()
+            .iter()
+            .into_iter()
+            .filter(|(id, _)| live.contains(id))
+            .map(|(_, loc)| loc.total_size())
+            .sum();
+        let physical = reachable;
+        if let Some(prev) = prev_physical {
+            assert!(
+                physical <= prev,
+                "{name}: adding a mechanism must not grow physical bytes \
+                 ({physical} > {prev})"
+            );
+            if name == "A1-rans" {
+                assert!(
+                    physical < prev,
+                    "A1-rans must strictly beat A0-raw on compressible text"
+                );
+            }
+        }
+        prev_physical = Some(physical);
+    }
+}
