@@ -229,15 +229,15 @@ fn extent_family(store: &Store, offset: u64) -> String {
 
 #[test]
 fn group_commit_batch_dedups_within_the_batch() {
-    // Phase-8C: the dedup lookup reads the committed chunk index, so a
-    // group-commit batch must expose its own pending entries — otherwise
-    // repeated content inside one transaction never aliases. The second
-    // and third identical chunks in a batch must become EXACT_REF against
-    // the first, and the aliases must materialize byte-exact through the
-    // committed index (owner + aliases commit in the same transaction).
+    // Phase-8C: a group-commit batch must expose its own pending entries,
+    // and the dedup layer must pick the MARGINALLY cheapest exact
+    // representation for a duplicate: reusing the canonical descriptor
+    // (a RAW descriptor is object-id + length) beats the EXACT_REF alias,
+    // and the shared object is physically written ONCE (transaction-local
+    // CAS canonicalization — no duplicate records).
     let dir = tempfile::TempDir::new().unwrap();
     let store = create_store(&dir);
-    let x = deterministic(1); // incompressible: RAW first occurrence (object-bearing)
+    let x = deterministic(1); // incompressible: RAW canonical first occurrence
     let batch = vec![(0u64, x.clone()), (65536, x.clone()), (131072, x.clone())];
     store
         .write_region_batch(
@@ -248,10 +248,29 @@ fn group_commit_batch_dedups_within_the_batch() {
         .unwrap();
     let expect: Vec<u8> = [x.clone(), x.clone(), x.clone()].concat();
     assert_eq!(store.read_file(3, 0, 3 * 65536).unwrap(), expect);
-    // One self-contained owner + two EXACT_REF aliases.
-    assert_eq!(extent_family(&store, 0), "RAW");
-    assert_eq!(extent_family(&store, 65536), "EXACT_REF");
-    assert_eq!(extent_family(&store, 131072), "EXACT_REF");
+    // The duplicate extents are dedup-layer representations (canonical
+    // RAW reuse or EXACT_REF alias), never fresh self-contained encodings.
+    for off in [65536u64, 131072] {
+        let fam = extent_family(&store, off);
+        assert!(
+            fam == "RAW" || fam == "EXACT_REF",
+            "duplicate extent@{off} must be the dedup layer, got {fam}"
+        );
+    }
+    // Physical canonicalization: the 3 identical chunks share ONE object
+    // record (the transaction stages the payload once).
+    let live = crate::store::gc::mark_live(&store).unwrap();
+    let reachable: u64 = store
+        .object_index()
+        .iter()
+        .into_iter()
+        .filter(|(id, _)| live.contains(id))
+        .map(|(_, loc)| loc.total_size())
+        .sum();
+    assert!(
+        reachable < 70 * 1024,
+        "three identical 64 KiB chunks must share one object: reachable {reachable}"
+    );
 
     // Cross-batch dedup still works through the committed index.
     store
@@ -261,7 +280,11 @@ fn group_commit_batch_dedups_within_the_batch() {
             crate::optimizer::policy::OptimizeOptions::default(),
         )
         .unwrap();
-    assert_eq!(extent_family(&store, 3 * 65536), "EXACT_REF");
+    let fam = extent_family(&store, 3 * 65536);
+    assert!(
+        fam == "RAW" || fam == "EXACT_REF",
+        "cross-batch duplicate must be the dedup layer, got {fam}"
+    );
     assert_eq!(
         store.read_file(3, 0, 4 * 65536).unwrap(),
         [x.clone(), x.clone(), x.clone(), x.clone()].concat()
@@ -280,7 +303,7 @@ fn group_commit_batch_dedups_within_the_batch() {
 fn group_commit_batch_dedup_survives_in_batch_overwrite() {
     // An in-batch overwrite (same offset, newer content) must not poison
     // the pending entry for the older content: a later duplicate of the
-    // older content still aliases to its (still-committed) index entry.
+    // older content still dedups against its (still-committed) entry.
     let dir = tempfile::TempDir::new().unwrap();
     let store = create_store(&dir);
     let x = deterministic(2);
@@ -293,13 +316,18 @@ fn group_commit_batch_dedup_survives_in_batch_overwrite() {
             crate::optimizer::policy::OptimizeOptions::default(),
         )
         .unwrap();
-    // Chunk 0 ends as y; chunk 1 is an EXACT_REF alias of the older x
-    // (whose entry and objects were committed in the same transaction).
+    // Chunk 0 ends as y; chunk 1 is a dedup-layer representation of the
+    // older x (whose entry and objects were committed in the same
+    // transaction).
     let mut expect = Vec::new();
     expect.extend_from_slice(&y);
     expect.extend_from_slice(&x);
     assert_eq!(store.read_file(3, 0, 2 * 65536).unwrap(), expect);
-    assert_eq!(extent_family(&store, 65536), "EXACT_REF");
+    let fam = extent_family(&store, 65536);
+    assert!(
+        fam == "RAW" || fam == "EXACT_REF",
+        "duplicate after overwrite must be the dedup layer, got {fam}"
+    );
 }
 
 #[test]

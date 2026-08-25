@@ -75,6 +75,17 @@ Record tags (v1):
 | 0x06 | XATTR — xattr value payload |
 | 0x7F | PAD — zero padding; never referenced |
 
+**Object identity and record tags (Phase-8C):** a record's `content_id` is
+BLAKE3 of the PAYLOAD ALONE. The record tag (DATA vs MODEL vs BTREE) is
+envelope metadata, NOT part of identity: two records with equal payloads
+share one content id regardless of tag, and the store stages at most one
+physical record per content id per transaction (an id already pending or
+committed costs zero new records). The materialized-length flag is likewise
+envelope metadata; identical payloads always have identical materialized
+content, so a skipped re-stage loses nothing. A descriptor referencing an
+object by id never depends on the record's tag — the descriptor knows the
+object's role.
+
 Segment files: optional 4 KiB header (magic `ESEG` + segment_seq + record
 count at seal time), then records back-to-back, then a sealed trailer
 (record_count u64, trailer CRC) when the segment is sealed by rollover or

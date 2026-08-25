@@ -423,10 +423,10 @@ fn cumulative_ladder_is_exact_and_monotone() {
                 "{name}: adding a mechanism must not grow physical bytes \
                  ({physical} > {prev})"
             );
-            if name == "A1-rans" {
+            if name == "A1-byte-rans" {
                 assert!(
                     physical < prev,
-                    "A1-rans must strictly beat A0-raw on compressible text"
+                    "A1-byte-rans must strictly beat A0-raw on compressible text"
                 );
             }
         }

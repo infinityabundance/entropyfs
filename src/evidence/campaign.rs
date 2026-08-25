@@ -27,7 +27,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::representation::Representation;
+use crate::core::representation::{Representation, Residual};
 use crate::evidence::corpus::{self, Corpus};
 use crate::evidence::environment::{
     DiskDelta, Environment, StatSummary, disk_delta, diskstats, summary,
@@ -78,6 +78,9 @@ pub struct CampaignResults {
     pub versioned_experiment: VersionedExperiment,
     /// GC + background-optimizer traffic.
     pub gc_traffic: GcTraffic,
+    /// Post-GC physical footprint per corpus (reachable, total backing,
+    /// allocated blocks and their ratios).
+    pub post_gc_footprint: std::collections::BTreeMap<String, PostGcFootprint>,
     /// Baselines and waivers (methodology §3).
     pub baselines: Baselines,
     /// Device-level write/read delta over the campaign window.
@@ -178,6 +181,14 @@ pub struct Accounting {
     pub allocator_overhead_bytes: u64,
     /// Unreclaimed (GC-pending) bytes.
     pub unreclaimed_bytes: u64,
+    /// What content-addressed OBJECT sharing saves vs a per-reference
+    /// store (Σ (refcount−1) × object size). A store invariant, not a
+    /// representation; the same payload hash always aliases to one object.
+    pub cas_shared_bytes_saved: u64,
+    /// What the EXACT_REF alias REPRESENTATION saves vs storing each
+    /// alias's content self-contained. The descriptor-level dedup layer,
+    /// gated by `allow_exact_ref` (distinct from CAS sharing above).
+    pub exact_ref_bytes_saved: u64,
     /// "ok", or a description of any accounting mismatch found.
     pub check: String,
 }
@@ -289,6 +300,29 @@ pub struct VersionedExperiment {
     pub base_savings_pct: f64,
 }
 
+/// Post-GC physical footprint of a corpus (the Phase-8 strategic metric:
+/// logical compactness ≈ actual physical compactness after GC).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostGcFootprint {
+    /// Corpus name.
+    pub corpus: String,
+    /// Logical materialized bytes written.
+    pub logical: u64,
+    /// Reachable persisted bytes (mark-live sum, incl. envelopes).
+    pub reachable: u64,
+    /// Total backing-store bytes after GC (segment files + superblock).
+    pub total_backing: u64,
+    /// Allocated disk blocks after GC (st_blocks × 512 over the store
+    /// directory — what the backing filesystem actually charges).
+    pub allocated_blocks: u64,
+    /// logical / reachable.
+    pub ratio_reachable: f64,
+    /// logical / total_backing.
+    pub ratio_total_backing: f64,
+    /// logical / allocated_blocks.
+    pub ratio_allocated: f64,
+}
+
 /// GC + background-optimizer traffic (methodology §6 maintenance metrics).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GcTraffic {
@@ -317,12 +351,22 @@ pub struct GcTraffic {
 pub struct Baselines {
     /// RAW file on the backing filesystem.
     pub raw_file: Option<RawBaseline>,
-    /// zstd -1 compression baseline.
+    /// zstd -1 compression baseline (whole stream).
     pub zstd_level_1: Option<CompressionBaseline>,
-    /// zstd -19 compression baseline.
+    /// zstd -19 compression baseline (whole stream).
     pub zstd_level_19: Option<CompressionBaseline>,
-    /// Direct rANS (same backend) on the source corpus.
+    /// zstd per 64 KiB extent — the dictionary-horizon diagnostic: the
+    /// same chunking EntropyFS uses, so the gap to whole-file zstd is
+    /// attributable to cross-chunk context vs per-extent coding.
+    pub zstd_per_64k_level_1: Option<CompressionBaseline>,
+    /// zstd per 64 KiB extent at -19.
+    pub zstd_per_64k_level_19: Option<CompressionBaseline>,
+    /// Direct byte rANS (same backend, A1-pure — no SequenceRans) on the
+    /// source corpus.
     pub direct_rans_src: Option<RunMetrics>,
+    /// Standalone SequenceRans (RAW + SequenceRans only) on the source
+    /// corpus — the E1 fast floor measured without byte rANS or dedup.
+    pub sequence_rans_src: Option<RunMetrics>,
     /// Explicitly waived baselines with reasons.
     pub waived: Vec<String>,
 }
@@ -482,6 +526,7 @@ pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
             optimizer_rewritten: 0,
             optimizer_saved_bytes: 0,
         },
+        post_gc_footprint: std::collections::BTreeMap::new(),
         baselines: Baselines::default(),
         device_writes: None,
         admission: Vec::new(),
@@ -749,6 +794,35 @@ pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
         ),
     );
 
+    // 6b. Post-GC physical footprint per corpus: the strategic metric
+    // (logical compactness ≈ actual physical compactness after GC).
+    // Reachable is the representation state; total backing and allocated
+    // blocks are what the backing filesystem actually charges.
+    line(&mut log, "\n== post-GC physical footprint ==");
+    for c in corpora.iter().filter(|c| {
+        matches!(
+            c.name.as_str(),
+            "structured" | "src" | "urandom" | "compressed-z19"
+        )
+    }) {
+        let fp = write_gc_footprint(opts, c, OptimizeOptions::default())?;
+        line(
+            &mut log,
+            &format!(
+                "  {}: logical {} → reachable {} ({:.2}x) / total backing {} ({:.2}x) / allocated {} ({:.2}x)",
+                fp.corpus,
+                fp.logical,
+                fp.reachable,
+                fp.ratio_reachable,
+                fp.total_backing,
+                fp.ratio_total_backing,
+                fp.allocated_blocks,
+                fp.ratio_allocated
+            ),
+        );
+        results.post_gc_footprint.insert(fp.corpus.clone(), fp);
+    }
+
     // 7. Baselines.
     line(&mut log, "\n== baselines ==");
     let src_pack = corpora
@@ -773,6 +847,11 @@ pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
     for (name, b) in [
         ("zstd -1", &results.baselines.zstd_level_1),
         ("zstd -19", &results.baselines.zstd_level_19),
+        ("zstd -1 per 64KiB", &results.baselines.zstd_per_64k_level_1),
+        (
+            "zstd -19 per 64KiB",
+            &results.baselines.zstd_per_64k_level_19,
+        ),
     ] {
         if let Some(b) = b {
             line(
@@ -788,7 +867,16 @@ pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
         line(
             &mut log,
             &format!(
-                "  direct rANS (same backend, src corpus): {} → {} bytes ({:.3}x)",
+                "  direct byte rANS (same backend, src corpus): {} → {} bytes ({:.3}x)",
+                r.logical_bytes, r.reachable_bytes, r.ratio_reachable
+            ),
+        );
+    }
+    if let Some(r) = &results.baselines.sequence_rans_src {
+        line(
+            &mut log,
+            &format!(
+                "  standalone SequenceRans (src corpus): {} → {} bytes ({:.3}x)",
                 r.logical_bytes, r.reachable_bytes, r.ratio_reachable
             ),
         );
@@ -1091,6 +1179,54 @@ fn write_gc_reachable(
     Ok(n.reachable)
 }
 
+/// Write a corpus, GC, and measure the post-GC physical footprint:
+/// reachable bytes, total backing-store bytes, and allocated disk blocks
+/// (st_blocks × 512 — what the backing filesystem charges).
+fn write_gc_footprint(
+    opts: &CampaignOptions,
+    corpus: &Corpus,
+    options: OptimizeOptions,
+) -> Result<PostGcFootprint, String> {
+    let tmp = scratch_tempdir(&opts.scratch_dir, "fpgc-")?;
+    let store = fresh_store(tmp.path())?;
+    write_only(&store, 3, corpus, options)?;
+    crate::store::gc::collect(&store, &crate::store::transaction::CrashHooks::none())
+        .map_err(|e| e.to_string())?;
+    let n = store_numbers(&store)?;
+    let backing = dir_bytes(store.dir());
+    let allocated = allocated_blocks(store.dir());
+    let logical = corpus.logical_bytes();
+    Ok(PostGcFootprint {
+        corpus: corpus.name.clone(),
+        logical,
+        reachable: n.reachable,
+        total_backing: backing,
+        allocated_blocks: allocated,
+        ratio_reachable: logical as f64 / n.reachable.max(1) as f64,
+        ratio_total_backing: logical as f64 / backing.max(1) as f64,
+        ratio_allocated: logical as f64 / allocated.max(1) as f64,
+    })
+}
+
+/// Allocated disk blocks (st_blocks × 512) over the store directory: what
+/// the backing filesystem actually charges, including its own metadata
+/// blocks (the post-GC density metric that determines usable capacity).
+fn allocated_blocks(dir: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let mut total = 0u64;
+    if let Ok(md) = std::fs::metadata(dir.join("superblock")) {
+        total = total.saturating_add(md.blocks().saturating_mul(512));
+    }
+    if let Ok(segments) = crate::store::segment::list_segments(dir) {
+        for seq in segments {
+            if let Ok(md) = std::fs::metadata(crate::store::segment::segment_path(dir, seq)) {
+                total = total.saturating_add(md.blocks().saturating_mul(512));
+            }
+        }
+    }
+    total
+}
+
 // ---------------------------------------------------------------------------
 // Accounting
 // ---------------------------------------------------------------------------
@@ -1129,7 +1265,14 @@ fn store_numbers(store: &Store) -> Result<StoreNumbers, String> {
 }
 
 /// Per-extent exact accounting: descriptor bytes, model objects, payload
-/// objects, residual bytes, and the representation distribution.
+/// objects, residual bytes, the representation distribution, and the two
+/// dedup-layer attributions (Phase-8 review correction):
+///
+/// - `cas_shared_bytes_saved`: what content-addressed object sharing saves
+///   vs a per-reference store (Σ (refcount−1) × object size). This is a
+///   store invariant, not a representation.
+/// - `exact_ref_bytes_saved`: what the EXACT_REF alias representation
+///   saves vs storing each alias's content self-contained.
 fn extent_decomposition(
     store: &Store,
     ino: u64,
@@ -1151,6 +1294,12 @@ fn extent_decomposition(
     let mut model_objs: std::collections::HashSet<crate::core::extent::ChunkId> =
         std::collections::HashSet::new();
     let mut residual_bytes = 0u64;
+    // Object reference counts across all extents (for CAS-shared savings)
+    // and the materialized lengths of EXACT_REF aliases (for the
+    // descriptor-level savings).
+    let mut object_refs: std::collections::HashMap<crate::core::extent::ChunkId, u64> =
+        std::collections::HashMap::new();
+    let mut exact_ref_lens: Vec<u64> = Vec::new();
     for (_, bytes) in
         crate::store::extent_tree::scan_all(root, BTREE_ORDER, limits.max_fanout, store)
             .map_err(|e| e.to_string())?
@@ -1167,31 +1316,76 @@ fn extent_decomposition(
         descriptor_bytes += d.encoded_size();
         *families.entry(d.family().to_string()).or_insert(0) += 1;
         // Objects are counted once per unique id: content-addressed stores
-        // alias shared objects, so a per-reference sum would double-count.
+        // alias shared objects, so a per-reference sum would double-count
+        // the persisted bytes. Reference COUNTS are kept separately for the
+        // CAS-sharing attribution.
+        let mut refs: Vec<crate::core::extent::ChunkId> = Vec::new();
+        let residual_refs = |r: &Residual| -> Vec<crate::core::extent::ChunkId> {
+            match r {
+                Residual::RansCoded { enc_obj, model, .. }
+                | Residual::BaseSequence { enc_obj, model, .. } => vec![*enc_obj, *model],
+                _ => Vec::new(),
+            }
+        };
         match &d {
             Representation::Raw { obj, .. } => {
                 payload_objs.insert(*obj);
+                refs.push(*obj);
             }
-            Representation::Rans { model, enc_obj, .. } => {
+            Representation::Rans { model, enc_obj, .. }
+            | Representation::SequenceRans { model, enc_obj, .. }
+            | Representation::SparseBlock64 { model, enc_obj, .. } => {
                 model_objs.insert(*model);
                 payload_objs.insert(*enc_obj);
+                refs.push(*model);
+                refs.push(*enc_obj);
             }
-            Representation::ExactRef { target, .. } => {
+            Representation::ExactRef { target, len, .. } => {
                 payload_objs.insert(*target);
+                refs.push(*target);
+                exact_ref_lens.push(*len);
             }
             Representation::BaseResidual { base, residual, .. } => {
                 payload_objs.insert(*base);
+                refs.push(*base);
                 residual_bytes += residual.encoded_size();
+                refs.extend(residual_refs(residual));
+            }
+            Representation::EntropyRef { residual, .. } => {
+                refs.extend(residual_refs(residual));
             }
             _ => {}
+        }
+        for id in refs {
+            *object_refs.entry(id).or_insert(0) += 1;
         }
     }
     let payload_bytes: u64 = payload_objs.iter().map(|id| object_size(store, id)).sum();
     let model_bytes: u64 = model_objs.iter().map(|id| object_size(store, id)).sum();
+    // CAS object sharing: what a per-reference store would pay extra for
+    // the shared objects (refcount−1 copies each). A store invariant.
+    let mut cas_shared = 0u64;
+    for (id, count) in &object_refs {
+        if *count >= 2 {
+            cas_shared = cas_shared.saturating_add((count - 1) * object_size(store, id));
+        }
+    }
+    // EXACT_REF aliasing: the alias representation vs storing each alias's
+    // content self-contained (~1 byte per byte).
+    let mut exact_ref_saved = 0u64;
+    for len in &exact_ref_lens {
+        exact_ref_saved = exact_ref_saved.saturating_add(*len);
+    }
+    exact_ref_saved = exact_ref_saved.saturating_sub(exact_ref_lens
+            .len()
+            .saturating_mul(41) // ~encoded EXACT_REF descriptor size
+            as u64);
     acct.descriptor_bytes = descriptor_bytes;
     acct.payload_bytes = payload_bytes;
     acct.model_bytes = model_bytes;
     acct.residual_bytes = residual_bytes;
+    acct.cas_shared_bytes_saved = cas_shared;
+    acct.exact_ref_bytes_saved = exact_ref_saved;
     Ok((acct, families))
 }
 
@@ -1296,16 +1490,27 @@ fn run_baselines(
         ratio: 1.0,
     });
 
-    // zstd baselines.
+    // zstd baselines: whole-file (the usual reference) AND per 64 KiB
+    // extent (the dictionary-horizon diagnostic: EntropyFS encodes 64 KiB
+    // extents independently, so the gap to whole-file zstd is attributable
+    // to cross-chunk context vs per-extent coding).
     b.zstd_level_1 = zstd_baseline(src_pack, 1);
     b.zstd_level_19 = zstd_baseline(src_pack, 19);
+    b.zstd_per_64k_level_1 = zstd_per_64k_baseline(src_pack, 1);
+    b.zstd_per_64k_level_19 = zstd_per_64k_baseline(src_pack, 19);
 
-    // Direct rANS (same backend) on the source corpus.
+    // Direct byte rANS (same backend, A1-pure) on the source corpus, and
+    // the standalone SequenceRans fast floor (RAW + SequenceRans only) so
+    // the two floors are measured separately.
     if let Some(src) = corpora.iter().find(|c| c.name == "src") {
         let tmp = scratch_tempdir(&opts.scratch_dir, "rans-")?;
         let store = fresh_store(tmp.path())?;
         let outcome = full_run(&store, src, OptimizeOptions::raw_rans())?;
         b.direct_rans_src = Some(outcome.metrics);
+        let tmp2 = scratch_tempdir(&opts.scratch_dir, "seq-")?;
+        let store2 = fresh_store(tmp2.path())?;
+        let outcome2 = full_run(&store2, src, OptimizeOptions::raw_sequence())?;
+        b.sequence_rans_src = Some(outcome2.metrics);
     }
 
     // Explicit waivers: writable compressed-FS (btrfs) and read-only
@@ -1344,6 +1549,42 @@ fn zstd_baseline(input: &[u8], level: i32) -> Option<CompressionBaseline> {
         input_bytes: input.len() as u64,
         output_bytes: out.stdout.len() as u64,
         ratio: input.len() as f64 / out.stdout.len().max(1) as f64,
+        wall_s: wall,
+    })
+}
+
+/// zstd per 64 KiB extent: the same chunking EntropyFS uses, so the gap
+/// between this and whole-file zstd is attributable to cross-chunk
+/// dictionary context vs per-extent coding quality (the Phase-8 diagnostic
+/// before deciding how deep to make the matcher).
+fn zstd_per_64k_baseline(input: &[u8], level: i32) -> Option<CompressionBaseline> {
+    let chunk = 64 * 1024;
+    let mut total_out = 0u64;
+    let t0 = Instant::now();
+    let mut off = 0usize;
+    while off < input.len() {
+        let end = (off + chunk).min(input.len());
+        let tmp = tempfile::NamedTempFile::new().ok()?;
+        std::fs::write(tmp.path(), &input[off..end]).ok()?;
+        let out = std::process::Command::new("zstd")
+            .args(["-q", &format!("-{level}"), "-c"])
+            .arg(tmp.path())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        total_out = total_out.saturating_add(out.stdout.len() as u64);
+        off = end;
+    }
+    let wall = t0.elapsed().as_secs_f64();
+    Some(CompressionBaseline {
+        tool: "zstd".into(),
+        version: "per-64KiB".into(),
+        level: level.to_string(),
+        input_bytes: input.len() as u64,
+        output_bytes: total_out,
+        ratio: input.len() as f64 / total_out.max(1) as f64,
         wall_s: wall,
     })
 }

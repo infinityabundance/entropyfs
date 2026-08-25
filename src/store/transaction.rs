@@ -98,6 +98,43 @@ pub struct Tx<'a> {
 }
 
 impl<'a> Tx<'a> {
+    /// Stage an immutable object (Phase-8C transaction-local CAS
+    /// canonicalization): append a physical record ONLY when the content
+    /// id is not already pending in this transaction and not already
+    /// committed. An object that exists costs zero new records — that is
+    /// the content-addressed store's whole point.
+    ///
+    /// Object identity is the PAYLOAD HASH alone: `RecordTag` (Data vs
+    /// Model vs BtreeNode) is envelope metadata, not part of identity, so
+    /// two equal payloads share one identity regardless of tag. The
+    /// materialized length is likewise envelope metadata; identical
+    /// payloads always have identical materialized content, so a skipped
+    /// re-stage never loses information. This is safe under the
+    /// durability ordering: a committed object's record was appended (and
+    /// segment-rolled segments were fsync'd) before the superblock slot
+    /// could reference this transaction's root, so the object survives
+    /// whenever this root does (append-ordered segments can only lose a
+    /// tail, never the middle). The commit-coordinator lock (held from
+    /// `begin`) serializes against GC's root publication, so the object
+    /// index cannot lose the object mid-transaction.
+    fn stage(
+        &mut self,
+        id: ChunkId,
+        bytes: Vec<u8>,
+        tag: RecordTag,
+        materialized_len: Option<u64>,
+    ) {
+        if self.pending.contains_key(&id) || self.store.object_index().contains(&id) {
+            // Already staged or committed: no new physical record.
+            return;
+        }
+        self.pending.insert(id, bytes.clone());
+        self.records.push(PendingRecord {
+            tag,
+            payload: bytes,
+            materialized_len,
+        });
+    }
     /// Begin a transaction from the current root (the caller has taken
     /// the store's commit lock).
     pub(crate) fn begin(
@@ -217,12 +254,7 @@ impl<'a> ObjectProvider for Tx<'a> {
     }
 
     fn put(&mut self, id: ChunkId, bytes: Vec<u8>) {
-        self.pending.insert(id, bytes.clone());
-        self.records.push(PendingRecord {
-            tag: RecordTag::BtreeNode,
-            payload: bytes,
-            materialized_len: None,
-        });
+        self.stage(id, bytes, RecordTag::BtreeNode, None);
     }
 }
 
@@ -234,12 +266,7 @@ pub fn put_object(
     materialized_len: Option<u64>,
 ) -> ChunkId {
     let id = ChunkId::of(&payload);
-    tx.pending.insert(id, payload.clone());
-    tx.records.push(PendingRecord {
-        tag,
-        payload,
-        materialized_len,
-    });
+    tx.stage(id, payload, tag, materialized_len);
     id
 }
 

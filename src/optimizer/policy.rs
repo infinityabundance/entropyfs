@@ -2,8 +2,23 @@
 //!
 //! Every claimed benefit must be attributable. `OptimizeOptions` toggles
 //! whole candidate families/channels so ablation benchmarks can isolate:
-//! RAW-only, RAW+rANS, +exact dedup, +base residuals, +configurational
-//! coding, +entropy universes, +DSFB ranking, +background optimizer.
+//! RAW-only, RAW+byte-rANS, +EXACT_REF aliasing, +base residuals,
+//! +configurational coding, +entropy universes, +DSFB ranking,
+//! +background optimizer, and the post-registration SequenceRans floor.
+//!
+//! Attribution model (Phase-8 review correction):
+//!
+//! - Content-addressed object sharing is a STORE INVARIANT, not a gate:
+//!   identical payloads always hash to one `ChunkId` and the object index
+//!   keeps one location per id. `allow_exact_ref` therefore gates only the
+//!   *descriptor-level* EXACT_REF aliasing representation, never object
+//!   sharing. The two layers are accounted separately in the evidence
+//!   (`cas_shared_bytes_saved` vs `exact_ref_bytes_saved`).
+//! - Byte-level rANS (`RansEncoder`) and SequenceRans (local-match +
+//!   entropy, `SequenceEncoder`) are separate gates. The original
+//!   methodology's A1 step is RAW + byte rANS; SequenceRans is a
+//!   post-registration extension (ladder step E1) so A1 never silently
+//!   includes the match finder.
 
 #![forbid(unsafe_code)]
 
@@ -14,13 +29,22 @@ use crate::dsfb::features::Channel;
 /// All toggles default to on; ablation runs flip them off one at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OptimizeOptions {
-    /// Exact deduplication (P2) via the chunk index.
-    pub allow_dedup: bool,
+    /// EXACT_REF aliasing (P2) via the chunk index: a duplicate logical
+    /// chunk is stored as a reference to the canonical content id. This
+    /// gates only the *representation*; content-addressed object sharing
+    /// (identical payload → one `ChunkId`) is a store invariant and is
+    /// never disabled by this flag.
+    pub allow_exact_ref: bool,
     /// Configurational families: SPARSE, PALETTE, PERIODIC, PERMUTATION,
     /// SPARSE_BLOCK64.
     pub allow_configurational: bool,
-    /// rANS coding (P6).
-    pub allow_rans: bool,
+    /// Byte-level rANS coding (`RansEncoder`, P6): the original
+    /// methodology's "rANS" step (A1).
+    pub allow_byte_rans: bool,
+    /// SequenceRans — the post-registration local-match + entropy floor
+    /// (`SequenceEncoder`, ladder step E1). Gated separately so A1 and the
+    /// "direct rANS" baseline measure pure byte rANS.
+    pub allow_sequence_rans: bool,
     /// Base+residual coding against the in-hand previous version (P0): the
     /// "base residuals" step of the cumulative ladder (methodology §4 A3).
     pub allow_bases: bool,
@@ -36,9 +60,10 @@ pub struct OptimizeOptions {
 impl Default for OptimizeOptions {
     fn default() -> Self {
         Self {
-            allow_dedup: true,
+            allow_exact_ref: true,
             allow_configurational: true,
-            allow_rans: true,
+            allow_byte_rans: true,
+            allow_sequence_rans: true,
             allow_bases: true,
             allow_temporal_bases: true,
             allow_universe: true,
@@ -51,9 +76,10 @@ impl OptimizeOptions {
     /// The RAW-only ablation (nothing but RAW).
     pub const fn raw_only() -> Self {
         Self {
-            allow_dedup: false,
+            allow_exact_ref: false,
             allow_configurational: false,
-            allow_rans: false,
+            allow_byte_rans: false,
+            allow_sequence_rans: false,
             allow_bases: false,
             allow_temporal_bases: false,
             allow_universe: false,
@@ -61,12 +87,29 @@ impl OptimizeOptions {
         }
     }
 
-    /// RAW + rANS.
+    /// RAW + byte rANS only (the original methodology's A1; pure — no
+    /// SequenceRans, no EXACT_REF, no structural families).
     pub const fn raw_rans() -> Self {
         Self {
-            allow_dedup: false,
+            allow_exact_ref: false,
             allow_configurational: false,
-            allow_rans: true,
+            allow_byte_rans: true,
+            allow_sequence_rans: false,
+            allow_bases: false,
+            allow_temporal_bases: false,
+            allow_universe: false,
+            allow_dsfb_ranking: false,
+        }
+    }
+
+    /// RAW + SequenceRans only (the standalone fast-floor baseline: the
+    /// match finder over nothing else).
+    pub const fn raw_sequence() -> Self {
+        Self {
+            allow_exact_ref: false,
+            allow_configurational: false,
+            allow_byte_rans: false,
+            allow_sequence_rans: true,
             allow_bases: false,
             allow_temporal_bases: false,
             allow_universe: false,
@@ -77,14 +120,43 @@ impl OptimizeOptions {
     /// Whether a channel may be evaluated at all.
     pub const fn channel_allowed(&self, channel: Channel) -> bool {
         match channel {
-            Channel::SharedContent => self.allow_dedup,
+            Channel::SharedContent => self.allow_exact_ref,
             Channel::PrevVersion => self.allow_bases,
             Channel::Adjacent | Channel::PrevInFile | Channel::FamilyBase => {
                 self.allow_bases && self.allow_temporal_bases
             }
             Channel::Universe => self.allow_universe,
-            Channel::Rans => self.allow_rans,
+            Channel::Rans => self.allow_byte_rans || self.allow_sequence_rans,
             Channel::Raw => true,
+        }
+    }
+
+    /// Whether a canonical descriptor may be REUSED for a duplicate
+    /// logical chunk under these options. CAS object sharing is a store
+    /// invariant (always on); canonical descriptor reuse is representation
+    /// reuse, so it must stay within the families this configuration
+    /// admits — otherwise the RAW-only ablation would silently store
+    /// ZERO/PERIODIC descriptors and the ladder steps would conflate.
+    pub const fn representation_allowed(
+        &self,
+        d: &crate::core::representation::Representation,
+    ) -> bool {
+        use crate::core::representation::Representation;
+        match d {
+            Representation::Raw { .. } => true,
+            Representation::Rans { .. } => self.allow_byte_rans,
+            Representation::SequenceRans { .. } => self.allow_sequence_rans,
+            Representation::ExactRef { .. } => self.allow_exact_ref,
+            Representation::BaseResidual { .. } => self.allow_bases,
+            Representation::EntropyRef { .. } => self.allow_universe,
+            Representation::Zero { .. }
+            | Representation::Fill { .. }
+            | Representation::Inline { .. }
+            | Representation::Sparse { .. }
+            | Representation::Palette { .. }
+            | Representation::Periodic { .. }
+            | Representation::Permutation { .. }
+            | Representation::SparseBlock64 { .. } => self.allow_configurational,
         }
     }
 
@@ -94,11 +166,11 @@ impl OptimizeOptions {
         vec![
             ("full", OptimizeOptions::default()),
             ("raw", OptimizeOptions::raw_only()),
-            ("raw-rans", OptimizeOptions::raw_rans()),
+            ("raw-byte-rans", OptimizeOptions::raw_rans()),
             (
-                "no-dedup",
+                "no-exact-ref",
                 OptimizeOptions {
-                    allow_dedup: false,
+                    allow_exact_ref: false,
                     ..Default::default()
                 },
             ),
@@ -127,7 +199,22 @@ impl OptimizeOptions {
             (
                 "no-rans",
                 OptimizeOptions {
-                    allow_rans: false,
+                    allow_byte_rans: false,
+                    allow_sequence_rans: false,
+                    ..Default::default()
+                },
+            ),
+            (
+                "no-byte-rans",
+                OptimizeOptions {
+                    allow_byte_rans: false,
+                    ..Default::default()
+                },
+            ),
+            (
+                "no-sequence-rans",
+                OptimizeOptions {
+                    allow_sequence_rans: false,
                     ..Default::default()
                 },
             ),
@@ -149,25 +236,28 @@ impl OptimizeOptions {
     }
 
     /// The strict cumulative ablation ladder (methodology §4, spec §43):
-    /// each step adds exactly one mechanism on top of the previous. Step
-    /// A8 additionally runs the background optimizer pass after the write
-    /// (the only step the foreground write path does not include).
+    /// each step adds exactly one mechanism on top of the previous. Steps
+    /// A0–A8 follow the ORIGINAL methodology (A1 = RAW + byte rANS);
+    /// SequenceRans is a post-registration extension, E1 (the current
+    /// production pipeline = full + background pass).
     ///
-    /// Note: the engine has one base gate for the in-hand previous-version
+    /// The engine has one base gate for the in-hand previous-version
     /// residual coding (A3) and one for the temporal base channels that
     /// materialize other chunks (A5); both map to the generic ladder's
     /// "base" steps without loss of granularity.
     pub fn cumulative_ladder_modes() -> Vec<(&'static str, OptimizeOptions, bool)> {
         vec![
             ("A0-raw", OptimizeOptions::raw_only(), false),
-            ("A1-rans", OptimizeOptions::raw_rans(), false),
-            // A2 = A1 + exact dedup.
+            // A1 = A0 + byte rANS (pure; the original methodology's step).
+            ("A1-byte-rans", OptimizeOptions::raw_rans(), false),
+            // A2 = A1 + EXACT_REF aliasing (descriptor-level dedup).
             (
-                "A2-dedup",
+                "A2-exact-ref",
                 OptimizeOptions {
-                    allow_dedup: true,
+                    allow_exact_ref: true,
                     allow_configurational: false,
-                    allow_rans: true,
+                    allow_byte_rans: true,
+                    allow_sequence_rans: false,
                     allow_bases: false,
                     allow_temporal_bases: false,
                     allow_universe: false,
@@ -179,9 +269,10 @@ impl OptimizeOptions {
             (
                 "A3-base-residual",
                 OptimizeOptions {
-                    allow_dedup: true,
+                    allow_exact_ref: true,
                     allow_configurational: false,
-                    allow_rans: true,
+                    allow_byte_rans: true,
+                    allow_sequence_rans: false,
                     allow_bases: true,
                     allow_temporal_bases: false,
                     allow_universe: false,
@@ -193,9 +284,10 @@ impl OptimizeOptions {
             (
                 "A4-config",
                 OptimizeOptions {
-                    allow_dedup: true,
+                    allow_exact_ref: true,
                     allow_configurational: true,
-                    allow_rans: true,
+                    allow_byte_rans: true,
+                    allow_sequence_rans: false,
                     allow_bases: true,
                     allow_temporal_bases: false,
                     allow_universe: false,
@@ -207,9 +299,10 @@ impl OptimizeOptions {
             (
                 "A5-temporal-bases",
                 OptimizeOptions {
-                    allow_dedup: true,
+                    allow_exact_ref: true,
                     allow_configurational: true,
-                    allow_rans: true,
+                    allow_byte_rans: true,
+                    allow_sequence_rans: false,
                     allow_bases: true,
                     allow_temporal_bases: true,
                     allow_universe: false,
@@ -221,9 +314,10 @@ impl OptimizeOptions {
             (
                 "A6-universe",
                 OptimizeOptions {
-                    allow_dedup: true,
+                    allow_exact_ref: true,
                     allow_configurational: true,
-                    allow_rans: true,
+                    allow_byte_rans: true,
+                    allow_sequence_rans: false,
                     allow_bases: true,
                     allow_temporal_bases: true,
                     allow_universe: true,
@@ -235,9 +329,10 @@ impl OptimizeOptions {
             (
                 "A7-dsfb",
                 OptimizeOptions {
-                    allow_dedup: true,
+                    allow_exact_ref: true,
                     allow_configurational: true,
-                    allow_rans: true,
+                    allow_byte_rans: true,
+                    allow_sequence_rans: false,
                     allow_bases: true,
                     allow_temporal_bases: true,
                     allow_universe: true,
@@ -246,7 +341,23 @@ impl OptimizeOptions {
                 false,
             ),
             // A8 = A7 + background re-optimization pass after the write.
-            ("A8-full+background", OptimizeOptions::default(), true),
+            (
+                "A8-background",
+                OptimizeOptions {
+                    allow_exact_ref: true,
+                    allow_configurational: true,
+                    allow_byte_rans: true,
+                    allow_sequence_rans: false,
+                    allow_bases: true,
+                    allow_temporal_bases: true,
+                    allow_universe: true,
+                    allow_dsfb_ranking: true,
+                },
+                true,
+            ),
+            // E1 = the post-registration SequenceRans floor (the current
+            // production pipeline: full + background pass).
+            ("E1-sequence-rans", OptimizeOptions::default(), true),
         ]
     }
 }

@@ -33,9 +33,10 @@ pub struct BenchmarkArgs {
     #[arg(long, default_value_t = 64)]
     pub size_mib: u64,
     /// Run a single ablation mode: a leave-one-out gate (full | raw |
-    /// raw-rans | no-dedup | no-base | no-config | no-rans | no-universe |
-    /// no-dsfb | no-temporal) or a cumulative-ladder step (A0-raw …
-    /// A8-full+background).
+    /// raw-byte-rans | no-exact-ref | no-base | no-config | no-rans |
+    /// no-byte-rans | no-sequence-rans | no-universe | no-dsfb |
+    /// no-temporal) or a cumulative-ladder step (A0-raw … A8-background,
+    /// E1-sequence-rans).
     #[arg(long)]
     pub ablation: Option<String>,
     /// Run all ablation modes (leave-one-out gates + the cumulative
@@ -417,12 +418,14 @@ fn run_ablation_table(args: &BenchmarkArgs) -> Result<(), String> {
         let delta = r.physical as i64 - full as i64;
         let label = match r.mode {
             "raw" => "all structure (RAW alone)",
-            "raw-rans" => "rANS over RAW",
-            "no-dedup" => "exact dedup",
+            "raw-byte-rans" => "byte rANS over RAW",
+            "no-exact-ref" => "EXACT_REF aliasing (descriptor dedup)",
             "no-base" => "base+residual channels",
             "no-temporal" => "temporal base channels",
             "no-config" => "configurational coding",
-            "no-rans" => "rANS",
+            "no-rans" => "rANS (byte + sequence)",
+            "no-byte-rans" => "byte rANS",
+            "no-sequence-rans" => "SequenceRans",
             "no-universe" => "entropy universes",
             "no-dsfb" => "DSFB ranking",
             _ => r.mode,

@@ -135,16 +135,25 @@ pub fn encode_guided(
     let mut bases_tried: Vec<(Channel, bool)> = Vec::new();
 
     // --- P2: exact dedup, always first in the write path (§12). The chunk
-    // index maps the content id to a descriptor; the hit is accepted only
-    // after materializing the existing chunk and comparing exact bytes.
+    // index (or the batch pending state) maps the content id to a
+    // descriptor; a hit is accepted only after materializing the existing
+    // chunk and comparing exact bytes. Two candidates are proposed for a
+    // hit: reusing the canonical descriptor (zero marginal objects — CAS
+    // sharing is a store invariant) and the EXACT_REF alias (gated). The
+    // marginally cheapest wins.
     // A background REWRITE of the same extent never dedups profitably: the
     // aliased chunk index entry must stay for decodability, so the
     // apparent savings are vacuous (cross-extent dedup already happened
     // in the foreground write path).
-    if options.allow_dedup && ctx.mode == SearchMode::Foreground {
-        if let Some(c) = dedup_candidate(store, ctx.target, cid, &limits, ctx.pending)? {
-            candidates.push((Channel::SharedContent, c));
+    if ctx.mode == SearchMode::Foreground {
+        let mut dd = dedup_candidates(store, ctx.target, cid, &limits, ctx.pending, &options)?;
+        if !options.allow_exact_ref {
+            // Content-addressed object sharing is a store invariant, not a
+            // representation: reusing a canonical descriptor of an allowed
+            // family stays legal, only the EXACT_REF alias is gated off.
+            dd.retain(|c| !matches!(c.representation, Representation::ExactRef { .. }));
         }
+        candidates.extend(dd.into_iter().map(|c| (Channel::SharedContent, c)));
     }
 
     // --- Cheap structural families + rANS + RAW (always evaluated; they
@@ -196,11 +205,12 @@ pub fn encode_guided(
     // Decisive-win early exit (Phase 6): if a cheap candidate already
     // beats RAW by a large margin, the expensive families (rANS,
     // configurational rank/unrank) cannot plausibly win — skip them and
-    // keep the write path latency-conscious (§16).
+    // keep the write path latency-conscious (§16). "Cheap" is measured
+    // MARGINALLY: an object that already exists (committed CAS or the
+    // batch pending state) costs zero payload bytes.
     let raw_bytes = ctx.target.len() as u64;
-    let mut best_so_far: Option<&Candidate> = cheapest_of(&candidates, &policy);
-    let mut decisive = best_so_far
-        .map(|c| c.cost.persisted_bytes() <= raw_bytes / 8)
+    let mut decisive = cheapest_marginal(&candidates, store, ctx.pending)
+        .map(|c| marginal_bytes(c, store, ctx.pending) <= raw_bytes / 8)
         .unwrap_or(false);
     if !decisive && options.allow_configurational {
         for enc in [
@@ -215,25 +225,34 @@ pub fn encode_guided(
                     .map(|c| (Channel::Raw, c)),
             );
         }
-        best_so_far = cheapest_of(&candidates, &policy);
-        decisive = best_so_far
-            .map(|c| c.cost.persisted_bytes() <= raw_bytes / 8)
+        decisive = cheapest_marginal(&candidates, store, ctx.pending)
+            .map(|c| marginal_bytes(c, store, ctx.pending) <= raw_bytes / 8)
             .unwrap_or(false);
     }
     let mut rans_measurement: Option<f64> = None;
-    if options.allow_rans && !decisive {
-        // P6 (conventional rANS) and the local-match floor (SequenceRans)
-        // are the general-purpose compression workhorses; both are always
-        // evaluated together.
-        let mut floor_cands: Vec<Candidate> =
-            crate::rans::residual::RansEncoder.encode(ctx.target, &base_ctx);
-        floor_cands.extend(crate::rans::sequence::SequenceEncoder.encode(ctx.target, &base_ctx));
-        if let Some(best_floor) = pick_cheapest(&floor_cands, &policy) {
+    if options.allow_byte_rans && !decisive {
+        // P6: conventional byte-level rANS (the original methodology's
+        // "rANS" — the pure entropy coder over the raw alphabet).
+        let cands = crate::rans::residual::RansEncoder.encode(ctx.target, &base_ctx);
+        if let Some(best_floor) = pick_cheapest(&cands, &policy) {
             rans_measurement = Some(measurement_for_ratio(
                 best_floor.cost.persisted_bytes() as f64 / ctx.target.len() as f64,
             ));
         }
-        candidates.extend(floor_cands.into_iter().map(|c| (Channel::Rans, c)));
+        candidates.extend(cands.into_iter().map(|c| (Channel::Rans, c)));
+        decisive = cheapest_marginal(&candidates, store, ctx.pending)
+            .map(|c| marginal_bytes(c, store, ctx.pending) <= raw_bytes / 8)
+            .unwrap_or(false);
+    }
+    if options.allow_sequence_rans && !decisive {
+        // E1: the post-registration local-match floor (SequenceRans).
+        let cands = crate::rans::sequence::SequenceEncoder.encode(ctx.target, &base_ctx);
+        if let Some(best_floor) = pick_cheapest(&cands, &policy) {
+            rans_measurement = Some(measurement_for_ratio(
+                best_floor.cost.persisted_bytes() as f64 / ctx.target.len() as f64,
+            ));
+        }
+        candidates.extend(cands.into_iter().map(|c| (Channel::Rans, c)));
     }
     if let Some(r) = crate::core::candidate::raw_candidate(ctx.target, cid, &limits) {
         candidates.push((Channel::Raw, r));
@@ -351,15 +370,10 @@ pub fn encode_guided(
     }
 
     // --- Validate (§32) and pick the cheapest valid candidate.
-    let (winner_channel, winner) = pick_best_valid(
-        store,
-        &candidates,
-        ctx.target,
-        &limits,
-        &policy,
-        ctx.pending,
-    )
-    .ok_or_else(|| StoreError::Invariant("no valid candidate (RAW must always work)".into()))?;
+    let (winner_channel, winner) =
+        pick_best_valid(store, &candidates, ctx.target, &limits, ctx.pending).ok_or_else(|| {
+            StoreError::Invariant("no valid candidate (RAW must always work)".into())
+        })?;
     let update = ExtentUpdate {
         offset: ctx.offset,
         descriptor: winner.representation.clone(),
@@ -422,24 +436,31 @@ pub fn encode_guided(
     })
 }
 
-/// Exact dedup: look up the content id in the chunk index (or the batch's
-/// pending state, Phase-8C), materialize the existing descriptor, and
-/// verify the bytes are identical before proposing EXACT_REF (§12 — a
-/// candidate dedup hit must verify logical length, content identity, and
-/// exact bytes).
-fn dedup_candidate(
+/// Exact dedup (P2): look up the content id in the chunk index (or the
+/// batch's pending state), materialize the existing descriptor, and verify
+/// the bytes are identical before proposing either:
+///
+/// - reusing the CANONICAL descriptor (zero marginal objects), restricted
+///   to families this configuration admits (`representation_allowed`), or
+/// - the EXACT_REF alias (gated separately by `allow_exact_ref`).
+///
+/// Both are exact representations of the target (§12 — a candidate dedup
+/// hit must verify logical length, content identity, and exact bytes);
+/// the marginally cheapest wins.
+fn dedup_candidates(
     store: &Store,
     target: &[u8],
     cid: ChunkId,
     limits: &crate::core::limits::Limits,
     pending: Option<&PendingBatch>,
-) -> Result<Option<Candidate>, StoreError> {
+    options: &OptimizeOptions,
+) -> Result<Vec<Candidate>, StoreError> {
     let desc_bytes = match pending.and_then(|p| p.descriptors.get(&cid)) {
         Some(b) => Some(b.clone()),
         None => store.chunk_descriptor(&cid)?,
     };
     let Some(desc_bytes) = desc_bytes else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let desc = match crate::format::descriptor::decode(
         &desc_bytes,
@@ -450,25 +471,78 @@ fn dedup_candidate(
         limits.max_chunk_size,
     ) {
         Ok(d) => d,
-        Err(_) => return Ok(None), // unreadable index entry: treat as miss
+        Err(_) => return Ok(Vec::new()), // unreadable index entry: miss
     };
     if desc.len() != target.len() as u64 {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     // Verify exact bytes. For a committed entry the store resolves
     // everything; for a pending entry the descriptor's objects are staged
     // in the same batch (not yet committed), so validation must see them.
     let resolver = CandidateResolver::new(store, std::collections::HashMap::new(), pending);
     if materialize_to_vec(&desc, &resolver, limits).as_deref() != Ok(target) {
-        return Ok(None);
+        return Ok(Vec::new());
     }
-    Ok(crate::core::candidate::exact_ref_candidate(
+    let mut out = Vec::with_capacity(2);
+    // Canonical reuse: the descriptor is already persisted (committed) or
+    // staged (pending); its objects cost zero marginal bytes. Only
+    // families this configuration admits may be reused (the RAW-only
+    // ablation must not smuggle a ZERO/PERIODIC canonical in). For
+    // ZERO/FILL/PERIODIC this beats an EXACT_REF alias outright.
+    if options.representation_allowed(&desc) {
+        out.push(Candidate {
+            representation: desc.clone(),
+            objects: Vec::new(),
+            cost: crate::core::cost::CostBreakdown {
+                logical_bytes: desc.len(),
+                descriptor_bytes: desc.encoded_size(),
+                ..Default::default()
+            },
+            content_id: cid,
+        });
+    }
+    if let Some(alias) = crate::core::candidate::exact_ref_candidate(
         cid,
         cid,
         target.len() as u64,
         target.len() as u64,
         limits,
-    ))
+    ) {
+        out.push(alias);
+    }
+    Ok(out)
+}
+
+/// Marginal persisted bytes of a candidate: the encoded descriptor plus
+/// the payloads of objects that do NOT already exist (committed CAS or
+/// the batch's pending state). An object that already exists costs zero
+/// marginal payload bytes — reusing it is the entire point of a
+/// content-addressed store. This is the cost that decides between
+/// "reuse the canonical descriptor" and "emit a new representation".
+fn marginal_bytes(cand: &Candidate, store: &Store, pending: Option<&PendingBatch>) -> u64 {
+    let mut total = cand.representation.encoded_size();
+    for o in &cand.objects {
+        let exists = pending
+            .map(|p| p.objects.contains_key(&o.id))
+            .unwrap_or(false)
+            || store.object_index().contains(&o.id);
+        if !exists {
+            total = total.saturating_add(o.payload.len() as u64);
+        }
+    }
+    total
+}
+
+/// Cheapest candidate by marginal persisted bytes.
+fn cheapest_marginal<'a>(
+    candidates: &'a [(Channel, Candidate)],
+    store: &Store,
+    pending: Option<&PendingBatch>,
+) -> Option<&'a Candidate> {
+    candidates
+        .iter()
+        .map(|(_, c)| c)
+        .min_by_key(|c| marginal_bytes(c, store, pending))
 }
 
 /// Validate candidates (§32) and return the cheapest valid one with its
@@ -476,17 +550,18 @@ fn dedup_candidate(
 /// is a hard error path that must fall through to RAW. Each candidate is
 /// validated against a resolver that can see the committed store, the
 /// candidate's own new objects, and (Phase-8C) the batch's pending
-/// descriptors/objects.
+/// descriptors/objects. Ordering is by MARGINAL bytes: objects that
+/// already exist (committed or pending) cost zero, so canonical reuse of
+/// a stored descriptor competes fairly with a fresh encoding.
 fn pick_best_valid<'a>(
     store: &Store,
     candidates: &'a [(Channel, Candidate)],
     target: &[u8],
     limits: &crate::core::limits::Limits,
-    policy: &crate::core::cost::Policy,
     pending: Option<&'a PendingBatch>,
 ) -> Option<(Channel, &'a Candidate)> {
     let mut order: Vec<usize> = (0..candidates.len()).collect();
-    order.sort_by_key(|&i| candidates[i].1.total(policy));
+    order.sort_by_key(|&i| marginal_bytes(&candidates[i].1, store, pending));
     for &i in &order {
         let (channel, cand) = &candidates[i];
         let resolver = CandidateResolver {
@@ -598,17 +673,6 @@ fn measurement_for_ratio(ratio: f64) -> f64 {
     (1.0 - ratio.clamp(0.0, 1.0)).clamp(0.0, 1.0)
 }
 
-/// Cheapest candidate in a (channel, candidate) list.
-fn cheapest_of<'a>(
-    candidates: &'a [(Channel, Candidate)],
-    policy: &crate::core::cost::Policy,
-) -> Option<&'a Candidate> {
-    candidates
-        .iter()
-        .min_by_key(|(_, c)| c.total(policy))
-        .map(|(_, c)| c)
-}
-
 /// The outcome-quality scalar fed to the regime tracker: 1.0 for perfect
 /// structural/generated wins, the channel measurement for
 /// base/rans/raw-driven wins.
@@ -710,16 +774,24 @@ mod tests {
         let store = create_store(&dir);
         let f = ino(&store);
         // Crypto-uniform (incompressible): no structural family can beat
-        // EXACT_REF for a second copy of the same chunk.
+        // the dedup layer for a second copy of the same chunk. The winner
+        // is either the canonical-descriptor reuse (a RAW descriptor is
+        // object-id + length — cheaper than the alias's own metadata) or
+        // the EXACT_REF alias; both carry zero new objects (CAS sharing
+        // is the store invariant, EXACT_REF is the gated representation).
         let data = noise(65536);
         write(&store, f, &data);
         let out = search(&store, f, &data, None);
-        assert!(
-            matches!(out.update.descriptor, Representation::ExactRef { .. }),
-            "expected EXACT_REF, got {:?}",
-            out.update.descriptor.family()
-        );
         assert_eq!(out.winner, Channel::SharedContent);
+        assert!(
+            out.update.objects.is_empty(),
+            "dedup must not stage new objects"
+        );
+        let limits = *store.limits();
+        let back = materialize_to_vec(&out.update.descriptor, &store, &limits).unwrap();
+        assert_eq!(back, data, "dedup winner must be byte-exact");
+        let fresh = materialize_to_vec(&out.update.descriptor, &store, &limits).unwrap();
+        assert_eq!(fresh, data);
     }
 
     #[test]

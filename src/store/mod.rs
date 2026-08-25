@@ -1302,13 +1302,28 @@ impl Store {
     /// search; this closes the bypass for `encode_chunk` call sites
     /// (flatten-on-write, truncate re-encoding).
     fn validate_update(&self, u: &ExtentUpdate) -> Result<(), StoreError> {
+        self.validate_update_pending(u, None)
+    }
+
+    /// §32 gate for unguided updates: materialize the update's descriptor
+    /// through a resolver that sees the committed store, the update's own
+    /// new objects, and (Phase-8C) the batch's pending descriptors and
+    /// staged objects, and require the result to hash to the update's
+    /// content id. The pending view is required for the canonical-reuse
+    /// path: the reused descriptor's objects are staged in the same batch,
+    /// not yet committed.
+    fn validate_update_pending(
+        &self,
+        u: &ExtentUpdate,
+        pending: Option<&crate::optimizer::search::PendingBatch>,
+    ) -> Result<(), StoreError> {
         let resolver = crate::optimizer::search::CandidateResolver::new(
             self,
             u.objects
                 .iter()
                 .map(|o| (o.id, o.payload.clone()))
                 .collect(),
-            None,
+            pending,
         );
         let bytes = crate::core::materialize::materialize_to_vec(
             &u.descriptor,
@@ -2355,6 +2370,61 @@ impl Store {
             let chunk_bytes = &chunk_bytes[..chunk_len];
             if let Some(o) = overlay.as_mut() {
                 o.insert(chunk_off, chunk_bytes.to_vec());
+            }
+
+            // Phase-8C batch canonicalization: if this exact content was
+            // already encoded earlier in the batch, reuse the canonical
+            // descriptor (or alias via EXACT_REF) instead of re-running
+            // the search — encode each unique final content once (§12,
+            // the marginally cheapest exact representation wins). The
+            // canonical was validated when its first occurrence won §32;
+            // the reuse is re-validated here against the batch pending
+            // state (the canonical's objects are staged, not committed).
+            let cid = crate::core::extent::ChunkId::of(chunk_bytes);
+            let canonical: Option<Vec<u8>> = pending
+                .as_ref()
+                .and_then(|p| p.descriptors.get(&cid))
+                .cloned();
+            if let Some(canon_bytes) = canonical {
+                let canon = crate::format::descriptor::decode(
+                    &canon_bytes,
+                    limits.max_descriptor_bytes,
+                    limits.max_inline_bytes,
+                    limits.max_palette,
+                    limits.max_period,
+                    limits.max_chunk_size,
+                )?;
+                let reuse_cost = canon_bytes.len() as u64;
+                let alias = if options.allow_exact_ref {
+                    crate::core::candidate::exact_ref_candidate(
+                        cid,
+                        cid,
+                        chunk_len as u64,
+                        chunk_len as u64,
+                        &limits,
+                    )
+                } else {
+                    None
+                };
+                let alias_cost = alias
+                    .as_ref()
+                    .map(|a| a.representation.encoded_size())
+                    .unwrap_or(u64::MAX);
+                let update = ExtentUpdate {
+                    offset: chunk_off,
+                    descriptor: if alias_cost < reuse_cost {
+                        alias.expect("alias present").representation
+                    } else {
+                        canon
+                    },
+                    content_id: cid,
+                    objects: Vec::new(),
+                };
+                // §32 gate for the reuse path (pending-aware resolver).
+                self.validate_update_pending(&update, pending.as_deref())?;
+                updates.push(update);
+                chunk += 1;
+                continue;
             }
 
             // Phase 4: the guided search (DSFB-ordered, §16). P0 is the
