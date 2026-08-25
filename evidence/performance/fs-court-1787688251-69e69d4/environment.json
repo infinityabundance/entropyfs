@@ -1,0 +1,10 @@
+{
+ "revision": "69e69d4",
+ "created_unix": 1787688251,
+ "kernel": "7.2.0-1-cachyos",
+ "cpu": "x86_64",
+ "scratch_fstype": "overlay",
+ "scratch_source": "overlay",
+ "uname": "5bac65c60055",
+ "root": true
+}
