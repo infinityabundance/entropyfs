@@ -35,6 +35,10 @@ pub enum Feature {
     SequenceSharedDict = 13,
     /// SEQUENCE_DEEP descriptors present (incompat).
     SequenceDeep = 14,
+    /// MUTATION_LOG records present (Phase-10D metadata writeback epoch;
+    /// incompat — an implementation that cannot replay the log must refuse
+    /// the store).
+    MutationLog = 15,
 }
 
 impl Feature {
@@ -51,7 +55,8 @@ impl Feature {
             | Feature::SparseBlock64
             | Feature::SequenceDict
             | Feature::SequenceSharedDict
-            | Feature::SequenceDeep => FeatureSetKind::Incompat,
+            | Feature::SequenceDeep
+            | Feature::MutationLog => FeatureSetKind::Incompat,
             Feature::Encrypted => FeatureSetKind::RoCompat,
             Feature::ExtentDeltaIndex | Feature::OptimizerRewrite => FeatureSetKind::Compat,
         }
@@ -162,7 +167,8 @@ pub fn check(on_disk: FeatureBits, _want_write: bool) -> Compatibility {
         | Feature::SparseBlock64.mask()
         | Feature::SequenceDict.mask()
         | Feature::SequenceSharedDict.mask()
-        | Feature::SequenceDeep.mask();
+        | Feature::SequenceDeep.mask()
+        | Feature::MutationLog.mask();
     if on_disk.incompat & !supported_incompat != 0 {
         return Compatibility::Refused(format!(
             "unsupported incompat feature bits: 0x{:016x}",

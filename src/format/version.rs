@@ -43,6 +43,10 @@ pub enum RecordTag {
     Root = 0x05,
     /// XATTR — xattr value payload.
     Xattr = 0x06,
+    /// MUTATION_LOG — one acknowledged namespace/writeback mutation
+    /// (Phase-10D metadata writeback epoch; the recoverable dirty state
+    /// between checkpoints).
+    MutationLog = 0x07,
     /// PAD — zero padding; never referenced.
     Pad = 0x7F,
 }
@@ -57,6 +61,7 @@ impl RecordTag {
             0x04 => Some(Self::BtreeNode),
             0x05 => Some(Self::Root),
             0x06 => Some(Self::Xattr),
+            0x07 => Some(Self::MutationLog),
             0x7F => Some(Self::Pad),
             _ => None,
         }
@@ -76,6 +81,7 @@ impl RecordTag {
             RecordTag::BtreeNode => "btree",
             RecordTag::Root => "root",
             RecordTag::Xattr => "xattr",
+            RecordTag::MutationLog => "mutation_log",
             RecordTag::Pad => "pad",
         }
     }

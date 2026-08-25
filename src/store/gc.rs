@@ -669,6 +669,11 @@ pub fn collect(
     store: &Store,
     hooks: &crate::store::transaction::CrashHooks,
 ) -> Result<u64, StoreError> {
+    // Phase-10D: GC's reachability walk only sees committed roots; the
+    // active epoch's staged objects are referenced only by the log, so a
+    // GC during an epoch would treat them as garbage. Flush the epoch
+    // (one checkpoint) first.
+    store.ensure_epoch_flushed(hooks)?;
     let mark = mark_live_full(store)?;
     // Phase-9H: victim selection uses the PHYSICAL per-segment occupancy
     // (scanned from the segment files), so segments full of index-hidden

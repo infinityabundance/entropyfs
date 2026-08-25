@@ -73,6 +73,7 @@ Record tags (v1):
 | 0x04 | DIR_LEAF / BTREE node — encoded persistent B-tree node |
 | 0x05 | ROOT — encoded filesystem root |
 | 0x06 | XATTR — xattr value payload |
+| 0x07 | MUTATION_LOG — one acknowledged namespace/writeback mutation (Phase-10D metadata writeback epoch; the recoverable dirty state between checkpoints) |
 | 0x7F | PAD — zero padding; never referenced |
 
 **Object identity and record tags (Phase-8C):** a record's `content_id` is
@@ -131,6 +132,7 @@ root to leaf, producing new nodes; unchanged nodes are shared.
 | index_epoch | u64 |
 | uuid | `[u8;16]` |
 | generation | u64 |
+| log_seq | u64 | highest epoch log sequence consumed by this root (Phase-10D); 0 for pre-epoch roots; the trailing field is absent in pre-epoch payloads and decodes as 0 |
 
 ## 6. Inode object (payload of tag 0x03)
 

@@ -29,7 +29,6 @@ use crate::store::inode::Timespec;
 use crate::store::transaction::CrashHooks;
 use crate::store::{EntryKind, Store, StoreError};
 
-use super::directory;
 use super::inode as inode_attr;
 use super::locking::{self, LockTable};
 
@@ -244,12 +243,15 @@ impl EntropyFs {
         }
     }
 
-    /// Look up an inode's attributes.
+    /// Look up an inode's attributes (overlay-aware: the active epoch's
+    /// pending inodes are visible before the checkpoint).
     fn get_attr(&self, ino: u64) -> Result<FileAttr, StoreError> {
         let store = self.store();
+        let ep = store.epoch();
         let inode = store
-            .get_inode(ino)?
+            .get_inode_epoch(&ep, ino)?
             .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
+        drop(ep);
         Ok(inode_attr::attr_for(&inode, ino))
     }
 
@@ -265,7 +267,7 @@ impl EntropyFs {
         }
     }
 
-    /// Create a new entry under `parent`.
+    /// Create a new entry under `parent` (Phase-10D epoch path).
     fn create_entry(
         &self,
         parent: u64,
@@ -282,7 +284,7 @@ impl EntropyFs {
             uid,
             gid,
         };
-        let ino = store.create_entry(parent, name, entry, &CrashHooks::none())?;
+        let ino = store.epoch_create(parent, name, entry, &CrashHooks::none())?;
         drop(store);
         self.notify_dir_changed(parent);
         Ok(ino)
@@ -303,6 +305,11 @@ impl Drop for EntropyFs {
         // advisory lock is released when the session ends.
         self.worker_stop
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        // Phase-10D: unmount must not leave acknowledged mutations in the
+        // log — checkpoint the epoch and make the merged state durable.
+        let store = self.store();
+        let _ = store.epoch_checkpoint(&crate::store::transaction::CrashHooks::none());
+        let _ = store.durability_barrier(&crate::store::transaction::CrashHooks::none());
         // Phase-10A: dump the request/phase instrumentation when the
         // daemon unmounts (the court reads this file for its analysis).
         if let Some(path) = &self.stats_file {
@@ -354,7 +361,8 @@ impl Filesystem for EntropyFs {
         let _g = ReqGuard::begin(&self.stats, "lookup");
         let name = name.as_bytes();
         let store = self.store();
-        let entry = match store.dir_lookup(inon(parent), name) {
+        let ep = store.epoch();
+        let entry = match store.dir_lookup_epoch(&ep, inon(parent), name) {
             Ok(e) => e,
             Err(e) => return reply.error(Self::errno(&e)),
         };
@@ -362,11 +370,12 @@ impl Filesystem for EntropyFs {
             Some(e) => e,
             None => return reply.error(Errno::ENOENT),
         };
-        let inode = match store.get_inode(entry.ino) {
+        let inode = match store.get_inode_epoch(&ep, entry.ino) {
             Ok(Some(i)) => i,
             Ok(None) => return reply.error(Errno::ENOENT),
             Err(e) => return reply.error(Self::errno(&e)),
         };
+        drop(ep);
         let attr = inode_attr::attr_for(&inode, entry.ino);
         reply.entry(&ENTRY_TTL, &attr, fuser::Generation(0));
     }
@@ -407,7 +416,7 @@ impl Filesystem for EntropyFs {
             TimeOrNow::Now => Timespec::now(),
         });
         let store = self.store();
-        let inode = match store.setattr_inode(
+        let inode = match store.epoch_setattr(
             ino.0,
             &crate::store::AttrUpdate {
                 mode,
@@ -428,7 +437,8 @@ impl Filesystem for EntropyFs {
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
         let _g = ReqGuard::begin(&self.stats, "readlink");
         let store = self.store();
-        match store.get_inode(ino.0) {
+        let ep = store.epoch();
+        match store.get_inode_epoch(&ep, ino.0) {
             Ok(Some(inode)) => match inode.data {
                 crate::store::inode::InodeData::Symlink { target } => reply.data(&target),
                 _ => reply.error(Errno::EINVAL),
@@ -507,7 +517,7 @@ impl Filesystem for EntropyFs {
     fn unlink(&self, _req: &Request, parent: INodeNo, name: &std::ffi::OsStr, reply: ReplyEmpty) {
         let _g = ReqGuard::begin(&self.stats, "unlink");
         let store = self.store();
-        match store.unlink(inon(parent), name.as_bytes(), false, &CrashHooks::none()) {
+        match store.epoch_unlink(inon(parent), name.as_bytes(), false, &CrashHooks::none()) {
             Ok(child) => {
                 drop(store);
                 self.notify_entry_removed(inon(parent), child, name.as_bytes());
@@ -520,7 +530,7 @@ impl Filesystem for EntropyFs {
     fn rmdir(&self, _req: &Request, parent: INodeNo, name: &std::ffi::OsStr, reply: ReplyEmpty) {
         let _g = ReqGuard::begin(&self.stats, "rmdir");
         let store = self.store();
-        match store.unlink(inon(parent), name.as_bytes(), true, &CrashHooks::none()) {
+        match store.epoch_unlink(inon(parent), name.as_bytes(), true, &CrashHooks::none()) {
             Ok(child) => {
                 drop(store);
                 self.notify_entry_removed(inon(parent), child, name.as_bytes());
@@ -574,7 +584,7 @@ impl Filesystem for EntropyFs {
             return;
         }
         let store = self.store();
-        match store.rename(
+        match store.epoch_rename(
             inon(parent),
             name.as_bytes(),
             inon(newparent),
@@ -640,7 +650,8 @@ impl Filesystem for EntropyFs {
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         let _g = ReqGuard::begin(&self.stats, "open");
         let store = self.store();
-        let inode = match store.get_inode(ino.0) {
+        let ep = store.epoch();
+        let inode = match store.get_inode_epoch(&ep, ino.0) {
             Ok(Some(i)) => i,
             Ok(None) => return reply.error(Errno::ENOENT),
             Err(e) => return reply.error(Self::errno(&e)),
@@ -648,7 +659,7 @@ impl Filesystem for EntropyFs {
         if !inode.is_file() {
             return reply.error(Errno::EISDIR);
         }
-        drop(store);
+        drop(ep);
         let fh = self
             .next_handle
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -675,7 +686,8 @@ impl Filesystem for EntropyFs {
     ) {
         let _g = ReqGuard::begin(&self.stats, "read");
         let store = self.store();
-        match store.read_file(ino.0, offset, size as u64) {
+        let ep = store.epoch();
+        match store.read_file_epoch(&ep, ino.0, offset, size as u64) {
             Ok(data) => reply.data(&data),
             Err(e) => reply.error(Self::errno(&e)),
         }
@@ -696,7 +708,12 @@ impl Filesystem for EntropyFs {
         let _g = ReqGuard::begin(&self.stats, "write");
         self.stats.record_write_size(data.len());
         let store = self.store();
-        match store.write_region(ino.0, offset, data) {
+        // Phase-10D: the write goes through the ACTIVE EPOCH (log append
+        // + ack; the trees merge at the checkpoint). The store's configured
+        // foreground policy applies.
+        let opts = crate::optimizer::policy::OptimizeOptions::default();
+        let fg = store.foreground_policy();
+        match store.epoch_write(ino.0, offset, data, opts, fg, &CrashHooks::none()) {
             Ok(()) => reply.written(data.len() as u32),
             Err(StoreError::Full(_)) => reply.error(Errno::ENOSPC),
             Err(e) => reply.error(Self::errno(&e)),
@@ -763,8 +780,10 @@ impl Filesystem for EntropyFs {
     fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
         let _g = ReqGuard::begin(&self.stats, "opendir");
         let store = self.store();
-        match store.get_inode(ino.0) {
+        let ep = store.epoch();
+        match store.get_inode_epoch(&ep, ino.0) {
             Ok(Some(i)) if i.is_dir() => {
+                drop(ep);
                 drop(store);
                 let fh = self
                     .next_handle
@@ -796,8 +815,29 @@ impl Filesystem for EntropyFs {
     ) {
         let _g = ReqGuard::begin(&self.stats, "readdir");
         let store = self.store();
-        match directory::fill_reply(&store, ino.0, offset, &mut reply) {
-            Ok(_) => reply.ok(),
+        let ep = store.epoch();
+        // Overlay-aware: pending creates/removes are visible before the
+        // checkpoint.
+        let res = (|| -> Result<(), StoreError> {
+            let all = crate::fuse::directory::entry_list_epoch(&store, &ep, ino.0)?;
+            let mut idx = offset as usize;
+            while idx < all.len() {
+                let (e_ino, d_type, name) = &all[idx];
+                let os_name = std::ffi::OsStr::from_bytes(name);
+                if reply.add(
+                    fuser::INodeNo(*e_ino),
+                    (idx + 1) as u64,
+                    crate::fuse::directory::file_type_for(*d_type),
+                    os_name,
+                ) {
+                    return Ok(()); // kernel buffer full; resume at idx+1
+                }
+                idx += 1;
+            }
+            Ok(())
+        })();
+        match res {
+            Ok(()) => reply.ok(),
             Err(e) => reply.error(Self::errno(&e)),
         }
     }
@@ -919,7 +959,8 @@ impl Filesystem for EntropyFs {
     fn access(&self, _req: &Request, ino: INodeNo, _mask: AccessFlags, reply: ReplyEmpty) {
         let _g = ReqGuard::begin(&self.stats, "access");
         let store = self.store();
-        match store.get_inode(ino.0) {
+        let ep = store.epoch();
+        match store.get_inode_epoch(&ep, ino.0) {
             Ok(Some(_)) => reply.ok(),
             Ok(None) => reply.error(Errno::ENOENT),
             Err(e) => reply.error(Self::errno(&e)),
@@ -947,10 +988,12 @@ impl Filesystem for EntropyFs {
         ) {
             Ok(i) => {
                 let store = self.store();
-                let attr = match store.get_inode(i) {
+                let ep = store.epoch();
+                let attr = match store.get_inode_epoch(&ep, i) {
                     Ok(Some(inode)) => inode_attr::attr_for(&inode, i),
                     _ => return reply.error(Errno::EIO),
                 };
+                drop(ep);
                 drop(store);
                 let fh = self
                     .next_handle
@@ -1048,7 +1091,9 @@ impl Filesystem for EntropyFs {
             return;
         }
         if !keep_size {
-            let inode = match store.get_inode(ino.0) {
+            let store = self.store();
+            let ep = store.epoch();
+            let inode = match store.get_inode_epoch(&ep, ino.0) {
                 Ok(Some(i)) => i,
                 _ => return reply.error(Errno::ENOENT),
             };
@@ -1088,7 +1133,8 @@ impl Filesystem for EntropyFs {
         }
         let offset = offset as u64;
         let store = self.store();
-        let inode = match store.get_inode(ino.0) {
+        let ep = store.epoch();
+        let inode = match store.get_inode_epoch(&ep, ino.0) {
             Ok(Some(i)) => i,
             _ => return reply.error(Errno::ENOENT),
         };

@@ -85,6 +85,11 @@ pub fn optimize_pass(
     max_extents: Option<u64>,
     mut cursor: Option<&mut PassCursor>,
 ) -> Result<BackgroundStats, StoreError> {
+    // Phase-10D: the optimizer rewrites COMMITTED state; the active
+    // epoch's pending chunks are invisible to it (and re-encoding a file
+    // the epoch is mid-write to would corrupt the overlay view). Flush
+    // the epoch first.
+    store.ensure_epoch_flushed(&crate::store::transaction::CrashHooks::none())?;
     let mut stats = BackgroundStats::default();
     let inos = store.all_inodes()?;
     let start_idx = cursor.as_ref().map(|c| c.ino_index).unwrap_or(0);

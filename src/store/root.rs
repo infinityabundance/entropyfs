@@ -42,6 +42,10 @@ pub struct Root {
     pub generation: u64,
     /// Root of the chunk index (content id → descriptor bytes).
     pub chunk_index_root: ChunkId,
+    /// Highest epoch log sequence consumed by this root (Phase-10D):
+    /// mutation-log records with `seq > log_seq` are replayed at recovery.
+    /// 0 for pre-epoch roots.
+    pub log_seq: u64,
 }
 
 impl Default for Root {
@@ -58,6 +62,7 @@ impl Default for Root {
             uuid: [0u8; 16],
             generation: 0,
             chunk_index_root: ChunkId::ZERO,
+            log_seq: 0,
         }
     }
 }
@@ -77,6 +82,7 @@ impl Root {
         w.bytes(&self.uuid);
         w.u64(self.generation);
         w.bytes(self.chunk_index_root.as_bytes());
+        w.u64(self.log_seq);
         w.into_bytes()
     }
 
@@ -94,6 +100,11 @@ impl Root {
         let uuid = read16(&mut r)?;
         let generation = r.u64()?;
         let chunk_index_root = read_id(&mut r)?;
+        // Phase-10D: the log_seq field is appended at the END of the v1
+        // root payload. Pre-epoch roots (shorter payloads) decode with
+        // log_seq = 0; the trailing field is only present when the store
+        // actually uses the epoch log.
+        let log_seq = if r.remaining() >= 8 { r.u64()? } else { 0 };
         if !r.done() {
             return Err(CodecError::Malformed);
         }
@@ -112,6 +123,7 @@ impl Root {
             uuid,
             generation,
             chunk_index_root,
+            log_seq,
         })
     }
 

@@ -28,6 +28,28 @@ pub fn entry_list(store: &Store, ino: u64) -> Result<Vec<(u64, u8, Vec<u8>)>, St
     Ok(all)
 }
 
+/// Phase-10D overlay-aware entry list: the ACTIVE EPOCH's pending
+/// creates/removes are merged with the committed entries before the
+/// checkpoint, and an epoch-created inode's parent resolves through the
+/// overlay.
+pub fn entry_list_epoch(
+    store: &Store,
+    ep: &crate::store::epoch::Epoch,
+    ino: u64,
+) -> Result<Vec<(u64, u8, Vec<u8>)>, StoreError> {
+    let inode = store
+        .get_inode_epoch(ep, ino)?
+        .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
+    let _ = inode;
+    let parent = store.parent_of_epoch(ep, ino)?;
+    let entries = store.read_dir_epoch(ep, ino)?;
+    let mut all: Vec<(u64, u8, Vec<u8>)> = Vec::with_capacity(entries.len() + 2);
+    all.push((ino, crate::store::directory::dt::DT_DIR, b".".to_vec()));
+    all.push((parent, crate::store::directory::dt::DT_DIR, b"..".to_vec()));
+    all.extend(entries.into_iter().map(|(name, e)| (e.ino, e.d_type, name)));
+    Ok(all)
+}
+
 /// Map a stored `d_type` to a `fuser::FileType`.
 pub fn file_type_for(d_type: u8) -> FileType {
     match d_type {

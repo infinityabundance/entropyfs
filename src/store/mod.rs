@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 pub mod directory;
+pub mod epoch;
 pub mod extent_tree;
 pub mod gc;
 pub mod index;
@@ -260,6 +261,9 @@ pub struct Store {
     perf: std::sync::Arc<crate::perf::Timings>,
     /// Phase-10B foreground representation policy.
     foreground: crate::optimizer::foreground::ForegroundPolicy,
+    /// Phase-10D active metadata writeback epoch (pending namespace/write-
+    /// back mutations between checkpoints; see `store/epoch.rs`).
+    epoch: std::sync::Mutex<crate::store::epoch::Epoch>,
 }
 
 impl std::fmt::Debug for Store {
@@ -323,6 +327,7 @@ impl Store {
             inode_locks: std::sync::Arc::new(InodeLockTable::default()),
             perf: std::sync::Arc::new(crate::perf::Timings::default()),
             foreground: config.foreground,
+            epoch: std::sync::Mutex::new(crate::store::epoch::Epoch::default()),
         };
         store.open_segment(0)?;
         // Create the root directory inode (ino 1) and commit the initial
@@ -397,7 +402,12 @@ impl Store {
             inode_locks: std::sync::Arc::new(InodeLockTable::default()),
             perf: std::sync::Arc::new(crate::perf::Timings::default()),
             foreground: config.foreground,
+            epoch: std::sync::Mutex::new(crate::store::epoch::Epoch::default()),
         };
+        // Phase-10D: replay any un-checkpointed mutation log tail left by
+        // a process crash (the last checkpoint root is authoritative; the
+        // log records with a higher sequence are the acknowledged-but-
+        // unmerged mutations).
         store
             .stats
             .lock()
@@ -406,6 +416,13 @@ impl Store {
         store.open_segment(sb.segment_seq)?;
         // Deep-verify the chosen root quickly (structural).
         recovery::verify_root(&store)?;
+        // Phase-10D: replay any un-checkpointed mutation log tail left by
+        // a process crash (the last checkpoint root is authoritative; log
+        // envelopes with a higher sequence are the acknowledged-but-
+        // unmerged mutations). The replay commits its own checkpoint root
+        // and runs a durability barrier, so the mounted state is fully
+        // consistent.
+        store.epoch_replay()?;
         Ok(store)
     }
 
@@ -842,6 +859,10 @@ impl Store {
         &self,
         hooks: &crate::store::transaction::CrashHooks,
     ) -> Result<(), StoreError> {
+        // Phase-10D: the barrier also makes the epoch's acknowledged
+        // mutations power-durable — checkpoint the epoch first (its own
+        // commit is then covered by this barrier; a no-op when empty).
+        self.epoch_checkpoint(hooks)?;
         // Serialize with in-flight commits: an fsync observes every commit
         // that started before it (and every commit that started after
         // waits for the barrier).
@@ -2069,6 +2090,9 @@ impl Store {
     }
 
     /// Create a hard link: another directory entry for `ino` (nlink++).
+    /// Flushes the active epoch first (the link target must be committed;
+    /// the epoch's pending inodes are invisible to the transactional
+    /// path).
     pub fn link(
         &self,
         parent: u64,
@@ -2076,6 +2100,7 @@ impl Store {
         ino: u64,
         hooks: &crate::store::transaction::CrashHooks,
     ) -> Result<(), StoreError> {
+        self.ensure_epoch_flushed(hooks)?;
         if !Self::validate_name(name) {
             return Err(StoreError::Config("invalid entry name".into()));
         }
@@ -2462,7 +2487,8 @@ impl Store {
         if data.is_empty() {
             return Ok(());
         }
-        let (updates, new_size) = self.prepare_write(ino, offset, data, None, None, options, fg)?;
+        let (updates, new_size) =
+            self.prepare_write(ino, offset, data, None, None, options, fg, None)?;
         self.commit_file_extents_deferred(ino, updates, Some(new_size), &CrashHooks::none())?;
         Ok(())
     }
@@ -2474,7 +2500,11 @@ impl Store {
     ///
     /// `overlay` (chunk offset → bytes) carries uncommitted in-batch chunk
     /// state so a later partial write in the same batch sees earlier batch
-    /// writes instead of stale committed bytes. Returns the updates plus
+    /// writes instead of stale committed bytes. `epoch_size` (Phase-10D)
+    /// overrides the committed inode size with the ACTIVE EPOCH's size:
+    /// the epoch's writes/truncates are uncommitted, and clipping chunks
+    /// to the committed size would corrupt a file the epoch has already
+    /// grown. `None` for the transactional paths. Returns the updates plus
     /// the file size after this write.
     fn prepare_write(
         &self,
@@ -2485,22 +2515,30 @@ impl Store {
         mut pending: Option<&mut crate::optimizer::search::PendingBatch>,
         options: crate::optimizer::policy::OptimizeOptions,
         fg: crate::optimizer::foreground::ForegroundPolicy,
+        epoch_size: Option<u64>,
     ) -> Result<(Vec<ExtentUpdate>, u64), StoreError> {
         if data.is_empty() {
-            return Ok((
-                Vec::new(),
-                self.get_inode(ino)?.map(|i| i.size).unwrap_or(0),
-            ));
+            let committed = self.get_inode(ino)?.map(|i| i.size).unwrap_or(0);
+            return Ok((Vec::new(), epoch_size.unwrap_or(committed)));
         }
         let limits = self.config.limits;
         let chunk_class = limits.chunk_class;
         let end = offset.saturating_add(data.len() as u64);
         let first_chunk = offset / chunk_class;
         let last_chunk = end.div_ceil(chunk_class);
-        let inode = self
-            .get_inode(ino)?
-            .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
-        let old_size = inode.size;
+        // The committed inode is only the size source for the
+        // transactional paths; the epoch write passes its own (possibly
+        // uncommitted) size and the caller already validated existence
+        // against the overlay, so a committed miss is not an error there.
+        let old_size = match epoch_size {
+            Some(s) => s,
+            None => {
+                let inode = self
+                    .get_inode(ino)?
+                    .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
+                inode.size
+            }
+        };
         let new_size = old_size.max(end);
 
         // Phase-10C: parallel chunk preparation in three phases.
@@ -2913,6 +2951,7 @@ impl Store {
                 Some(&mut pending),
                 options,
                 fg,
+                None,
             )?;
             updates.extend(u);
             new_size = new_size.max(sz);
@@ -2932,6 +2971,9 @@ impl Store {
         end: u64,
         keep_size: bool,
     ) -> Result<(), StoreError> {
+        // Flush the epoch: the hole punch operates on the committed
+        // extents, which the epoch's pending writes would shadow.
+        self.ensure_epoch_flushed(&crate::store::transaction::CrashHooks::none())?;
         let _lock = self.inode_lock(ino);
         self.punch_hole_locked(ino, start, end, keep_size)
     }
@@ -2976,6 +3018,9 @@ impl Store {
         offset_out: u64,
         len: u64,
     ) -> Result<u64, StoreError> {
+        // Flush the epoch: both sides must be committed for the
+        // transactional copy.
+        self.ensure_epoch_flushed(&crate::store::transaction::CrashHooks::none())?;
         let data = self.read_file(ino_in, offset_in, len)?;
         let copied = data.len() as u64;
         if copied > 0 {
@@ -3060,6 +3105,27 @@ impl Store {
             }
         }
         Ok(root_dir)
+    }
+
+    /// Overlay-aware parent lookup (Phase-10D): the epoch's pending
+    /// entries first (an epoch-created inode's parent is only visible
+    /// there), then the committed scan.
+    pub fn parent_of_epoch(
+        &self,
+        ep: &crate::store::epoch::Epoch,
+        ino: u64,
+    ) -> Result<u64, StoreError> {
+        let root_dir = self.current_root().root_dir_ino;
+        if ino == root_dir {
+            return Ok(root_dir);
+        }
+        for ((parent, name), e) in ep.pending_entries.iter() {
+            let _ = name;
+            if e.ino == ino {
+                return Ok(*parent);
+            }
+        }
+        self.parent_of(ino)
     }
 
     /// Allocate a fresh inode number (monotonic; simple for v1 — the max
@@ -3236,8 +3302,10 @@ impl Store {
             && !name.contains(&b'/')
     }
 
-    /// Get an xattr value (raw bytes; `None` when absent).
+    /// Get an xattr value (raw bytes; `None` when absent). Flushes the
+    /// active epoch first (xattrs live in committed inode trees).
     pub fn get_xattr(&self, ino: u64, name: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
+        self.ensure_epoch_flushed(&crate::store::transaction::CrashHooks::none())?;
         let inode = self
             .get_inode(ino)?
             .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
@@ -3253,7 +3321,7 @@ impl Store {
         )?)
     }
 
-    /// Set an xattr (insert or replace).
+    /// Set an xattr (insert or replace). Flushes the active epoch first.
     pub fn set_xattr(
         &self,
         ino: u64,
@@ -3261,6 +3329,7 @@ impl Store {
         value: &[u8],
         hooks: &crate::store::transaction::CrashHooks,
     ) -> Result<(), StoreError> {
+        self.ensure_epoch_flushed(hooks)?;
         if !Self::validate_xattr_name(name) {
             return Err(StoreError::Config("invalid xattr name".into()));
         }
@@ -3283,13 +3352,15 @@ impl Store {
         Ok(())
     }
 
-    /// Remove an xattr; returns whether it existed.
+    /// Remove an xattr; returns whether it existed. Flushes the active
+    /// epoch first.
     pub fn remove_xattr(
         &self,
         ino: u64,
         name: &[u8],
         hooks: &crate::store::transaction::CrashHooks,
     ) -> Result<bool, StoreError> {
+        self.ensure_epoch_flushed(hooks)?;
         let fanout = self.config.limits.max_fanout;
         let mut tx = self.begin_tx()?;
         let inode = Store::inode_for_tx(&tx, ino)?;
@@ -3309,8 +3380,9 @@ impl Store {
         Ok(true)
     }
 
-    /// List xattr names.
+    /// List xattr names. Flushes the active epoch first.
     pub fn list_xattr(&self, ino: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+        self.ensure_epoch_flushed(&crate::store::transaction::CrashHooks::none())?;
         let inode = self
             .get_inode(ino)?
             .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
@@ -3509,6 +3581,1272 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     }
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase-10D: metadata writeback epoch
+// ---------------------------------------------------------------------------
+//
+// The foreground write path accumulates acknowledged namespace/writeback
+// mutations in an ACTIVE EPOCH (`store/epoch.rs`) instead of committing one
+// immutable transaction per operation. Each op appends its staged objects
+// plus a `MutationLog` ENVELOPE (the recoverable dirty state) to the
+// append-only store and flushes to the page cache BEFORE the ack — the
+// same process-crash guarantee as the deferred-commit path. The committed
+// trees still describe the last CHECKPOINT; on checkpoint the frozen
+// overlay is merged into the trees once (bulk-load for the small
+// per-directory trees, `apply_sorted_batch` for the global indexes) and
+// ONE root publication carries the merged state plus the consumed log
+// sequence. Recovery replays envelopes with `seq > root.log_seq`.
+
+impl Store {
+    /// The active epoch (serialized by its mutex).
+    pub fn epoch(&self) -> std::sync::MutexGuard<'_, crate::store::epoch::Epoch> {
+        self.epoch.lock().expect("epoch poisoned")
+    }
+
+    /// Append one epoch op's staged records + envelope (the per-op ack
+    /// path): append + flush to the page cache under the commit
+    /// coordinator; persist the MutationLog incompat bit once. The root
+    /// and superblock generation are untouched — the committed trees still
+    /// describe the last checkpoint.
+    pub(crate) fn epoch_append(
+        &self,
+        records: Vec<crate::store::transaction::PendingRecord>,
+        hooks: &CrashHooks,
+    ) -> Result<(), StoreError> {
+        let _guard = self.commit_lock.lock().expect("commit lock poisoned");
+        let needs_bit = {
+            self.commit
+                .read()
+                .expect("commit state poisoned")
+                .features_in_use
+                & crate::format::features::Feature::MutationLog.mask()
+                == 0
+        };
+        let mut recs = records;
+        self.perf().time("epoch_append", || {
+            self.append_records(&mut recs)?;
+            // Process-crash durable (page cache); the durability barrier
+            // makes it power-durable, exactly like every other commit.
+            self.flush_segment()
+        })?;
+        if needs_bit {
+            // Persist the incompat bit so an implementation that cannot
+            // replay the log refuses the store.
+            self.commit
+                .write()
+                .expect("commit state poisoned")
+                .features_in_use |= crate::format::features::Feature::MutationLog.mask();
+            let root = self.current_root();
+            let root_id = root.id();
+            self.write_superblock(root_id, &root)?;
+        }
+        hooks.hit(CrashPoint::AfterSegmentFdatasync)?;
+        Ok(())
+    }
+
+    // -- overlay-aware reads (committed trees + the active epoch) ------
+
+    /// Overlay-aware inode read.
+    pub fn get_inode_epoch(
+        &self,
+        ep: &crate::store::epoch::Epoch,
+        ino: u64,
+    ) -> Result<Option<Inode>, StoreError> {
+        let committed = self.get_inode(ino)?;
+        let out = ep.overlay_inode(ino, committed);
+        if out.is_none() {
+            eprintln!(
+                "DBG get_inode_epoch({ino}) none: removed={} pending={}",
+                ep.removed_inodes.contains(&ino),
+                ep.pending_inodes.contains_key(&ino)
+            );
+        }
+        Ok(out)
+    }
+
+    /// Overlay-aware directory lookup.
+    pub fn dir_lookup_epoch(
+        &self,
+        ep: &crate::store::epoch::Epoch,
+        dir_ino: u64,
+        name: &[u8],
+    ) -> Result<Option<directory::DirEntry>, StoreError> {
+        if let Some(e) = ep.overlay_entry(dir_ino, name) {
+            return Ok(Some(e));
+        }
+        if ep.removed_entries.contains(&(dir_ino, name.to_vec())) {
+            return Ok(None);
+        }
+        // Fall back to the committed tree through the overlay-aware parent
+        // inode (an epoch-created directory has no committed inode; its
+        // dir_root is ZERO until the checkpoint).
+        let inode = self
+            .get_inode_epoch(ep, dir_ino)?
+            .ok_or_else(|| StoreError::Invariant(format!("inode {dir_ino} missing")))?;
+        let dir_root = match inode.data {
+            InodeData::Directory { dir_root } => dir_root,
+            _ => return Err(StoreError::Invariant("not a directory".into())),
+        };
+        if dir_root.is_zero() {
+            return Ok(None);
+        }
+        Ok(directory::lookup(
+            dir_root,
+            name,
+            BTREE_ORDER,
+            self.config.limits.max_fanout,
+            self,
+        )?)
+    }
+
+    /// Overlay-aware chunk descriptor.
+    pub fn chunk_descriptor_epoch(
+        &self,
+        ep: &crate::store::epoch::Epoch,
+        cid: &crate::core::extent::ChunkId,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        if let Some(b) = ep.overlay_chunk(cid) {
+            return Ok(Some(b));
+        }
+        self.chunk_descriptor(cid)
+    }
+
+    /// Overlay-aware directory scan (name order).
+    pub fn read_dir_epoch(
+        &self,
+        ep: &crate::store::epoch::Epoch,
+        dir_ino: u64,
+    ) -> Result<Vec<(Vec<u8>, directory::DirEntry)>, StoreError> {
+        let inode = self
+            .get_inode_epoch(ep, dir_ino)?
+            .ok_or_else(|| StoreError::Invariant(format!("inode {dir_ino} missing")))?;
+        let dir_root = match inode.data {
+            InodeData::Directory { dir_root } => dir_root,
+            _ => return Err(StoreError::Invariant("not a directory".into())),
+        };
+        let mut merged: std::collections::BTreeMap<Vec<u8>, directory::DirEntry> =
+            std::collections::BTreeMap::new();
+        if !dir_root.is_zero() {
+            let committed = directory::scan(
+                dir_root,
+                None,
+                usize::MAX,
+                BTREE_ORDER,
+                self.config.limits.max_fanout,
+                self,
+            )?
+            .0;
+            for (name, e) in committed {
+                merged.insert(name, e);
+            }
+        }
+        for ((p, name), e) in ep.pending_entries.iter() {
+            if *p == dir_ino {
+                merged.insert(name.clone(), *e);
+            }
+        }
+        for (p, name) in ep.removed_entries.iter() {
+            if *p == dir_ino {
+                merged.remove(name);
+            }
+        }
+        Ok(merged.into_iter().collect())
+    }
+
+    /// Overlay-aware file read: the committed extents shadowed by the
+    /// epoch's pending writes, clamped to the epoch's file size.
+    pub fn read_file_epoch(
+        &self,
+        ep: &crate::store::epoch::Epoch,
+        ino: u64,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, StoreError> {
+        let inode = self
+            .get_inode_epoch(ep, ino)?
+            .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
+        if !inode.is_file() {
+            return Err(StoreError::Invariant("not a regular file".into()));
+        }
+        let limits = self.config.limits;
+        let extent_root = match inode.data {
+            InodeData::File { extent_root } => extent_root,
+            _ => unreachable!(),
+        };
+        // Merged extent map: committed entries overlaid with pending.
+        let mut extents: std::collections::BTreeMap<u64, Vec<u8>> =
+            std::collections::BTreeMap::new();
+        if !extent_root.is_zero() {
+            for (off, bytes) in crate::store::extent_tree::scan_all(
+                extent_root,
+                BTREE_ORDER,
+                limits.max_fanout,
+                self,
+            )? {
+                extents.insert(off, bytes);
+            }
+        }
+        for ((fino, off), bytes) in ep.pending_extents.iter() {
+            if *fino == ino {
+                extents.insert(*off, bytes.clone());
+            }
+        }
+        // Clamp to the final file size (the epoch's pending size).
+        let size = inode.size;
+        let end = offset.saturating_add(len).min(size);
+        if end <= offset {
+            return Ok(Vec::new());
+        }
+        let mut out = vec![0u8; (end - offset) as usize];
+        // Materialize through the epoch-aware context (pending chunk
+        // descriptors resolve before the committed index).
+        let ctx = crate::store::epoch::EpochContext::new(self, ep);
+        // Walk the merged extents covering [offset, end).
+        for (start, bytes) in extents.range(..end) {
+            let desc = crate::format::descriptor::decode(
+                bytes,
+                limits.max_descriptor_bytes,
+                limits.max_inline_bytes,
+                limits.max_palette,
+                limits.max_period,
+                limits.max_chunk_size,
+            )?;
+            let extent_end = start.saturating_add(desc.len()).min(end);
+            let copy_start = (*start).max(offset);
+            if copy_start >= extent_end {
+                continue;
+            }
+            let mut chunk = vec![0u8; desc.len() as usize];
+            let mut budget = limits.max_decode_work;
+            crate::core::materialize::materialize(&desc, &ctx, &limits, 0, &mut budget, &mut chunk)
+                .map_err(|e| StoreError::Descriptor(e.to_string()))?;
+            let src = &chunk[(copy_start - *start) as usize..(extent_end - *start) as usize];
+            let dst = &mut out[(copy_start - offset) as usize..(extent_end - offset) as usize];
+            dst.copy_from_slice(src);
+        }
+        Ok(out)
+    }
+
+    /// Flush the active epoch to a checkpoint (merge + one root
+    /// publication). A no-op when the epoch is empty. GC and the
+    /// background optimizer call this first: the epoch's staged objects
+    /// are only referenced by the log, which GC's reachability walk does
+    /// not see as roots.
+    pub fn epoch_checkpoint(&self, hooks: &CrashHooks) -> Result<(), StoreError> {
+        if self.epoch().is_empty() {
+            return Ok(());
+        }
+        let limits = self.config.limits;
+        let fanout = limits.max_fanout;
+        let mut tx = self.begin_tx()?;
+        let frozen: crate::store::epoch::Epoch = std::mem::take(&mut *self.epoch());
+        let committed_root = tx.root().clone();
+
+        // 1. Final inode map: the epoch's pending inodes (the ops updated
+        //    mtime/nlink/size) plus the directory and file trees the
+        //    checkpoint rebuilds (dir_root / extent_root become the new
+        //    tree roots).
+        let mut final_inodes: std::collections::BTreeMap<u64, Inode> =
+            frozen.pending_inodes.clone();
+
+        // 2. Rebuild every affected directory tree ONCE (bulk-load: the
+        //    merged entry set bottom-up, each node staged exactly once).
+        let mut affected_dirs: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+        for (parent, _) in frozen.pending_entries.keys() {
+            affected_dirs.insert(*parent);
+        }
+        for (parent, _) in frozen.removed_entries.iter() {
+            affected_dirs.insert(*parent);
+        }
+        for parent in &affected_dirs {
+            // The base directory tree is the COMMITTED parent's tree (the
+            // epoch never rebuilt it); an epoch-created directory has no
+            // committed tree (empty base).
+            let committed_parent = Store::inode_for_tx(&tx, *parent).ok();
+            let dir_root = match committed_parent.as_ref().map(|i| &i.data) {
+                Some(InodeData::Directory { dir_root }) => *dir_root,
+                _ => crate::core::extent::ChunkId::ZERO,
+            };
+            let mut merged: std::collections::BTreeMap<Vec<u8>, directory::DirEntry> =
+                std::collections::BTreeMap::new();
+            if !dir_root.is_zero() {
+                for (name, e) in
+                    directory::scan(dir_root, None, usize::MAX, BTREE_ORDER, fanout, &tx)?.0
+                {
+                    merged.insert(name, e);
+                }
+            }
+            for ((p, name), e) in frozen.pending_entries.iter() {
+                if *p == *parent {
+                    merged.insert(name.clone(), *e);
+                }
+            }
+            for (p, name) in frozen.removed_entries.iter() {
+                if *p == *parent {
+                    merged.remove(name);
+                }
+            }
+            let entries: Vec<(Vec<u8>, Vec<u8>)> =
+                merged.into_iter().map(|(n, e)| (n, e.encode())).collect();
+            let new_dir_root =
+                crate::store::index::bulk_load(&entries, BTREE_ORDER, fanout, &mut tx)?;
+            let pin = final_inodes.entry(*parent).or_insert_with(|| {
+                committed_parent
+                    .clone()
+                    .expect("affected parent inode must exist (committed or pending)")
+            });
+            pin.data = InodeData::Directory {
+                dir_root: new_dir_root,
+            };
+        }
+
+        // 3. Rebuild every affected extent tree ONCE (bulk COW patch).
+        let mut affected_files: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+        for (ino, _) in frozen.pending_extents.keys() {
+            affected_files.insert(*ino);
+        }
+        for ino in &affected_files {
+            // The base extent tree is the COMMITTED file's tree; an
+            // epoch-created file has no committed tree (empty base).
+            let committed_file = Store::inode_for_tx(&tx, *ino).ok();
+            let extent_root = match committed_file.as_ref().map(|i| &i.data) {
+                Some(InodeData::File { extent_root }) => *extent_root,
+                _ => crate::core::extent::ChunkId::ZERO,
+            };
+            let mut batch: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
+            for ((fino, off), bytes) in frozen.pending_extents.iter() {
+                if *fino == *ino {
+                    batch.push((off.to_be_bytes().to_vec(), Some(bytes.clone())));
+                }
+            }
+            let new_extent_root = crate::store::index::apply_sorted_batch(
+                extent_root,
+                &batch,
+                BTREE_ORDER,
+                fanout,
+                &mut tx,
+            )?;
+            let fin = final_inodes.entry(*ino).or_insert_with(|| {
+                committed_file
+                    .clone()
+                    .expect("affected file inode must exist (committed or pending)")
+            });
+            fin.data = InodeData::File {
+                extent_root: new_extent_root,
+            };
+        }
+
+        // 4. Stage every final inode object (dedup against the log-staged
+        //    records and the committed CAS) and build the inode-index
+        //    batch (one sorted, duplicate-free pass). Removed inodes drop
+        //    their entries.
+        let mut inode_batch_map: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>> =
+            std::collections::BTreeMap::new();
+        for ino in frozen.removed_inodes.iter() {
+            inode_batch_map.insert(ino.to_be_bytes().to_vec(), None);
+        }
+        for (ino, inode) in &final_inodes {
+            if frozen.removed_inodes.contains(ino) {
+                continue; // removed in this epoch: drop, do not re-add
+            }
+            let id = crate::store::transaction::put_object(
+                &mut tx,
+                RecordTag::Inode,
+                inode.encode(),
+                None,
+            );
+            inode_batch_map.insert(ino.to_be_bytes().to_vec(), Some(id.as_bytes().to_vec()));
+        }
+        let inode_batch: Vec<(Vec<u8>, Option<Vec<u8>>)> = inode_batch_map.into_iter().collect();
+
+        // 5. Chunk index: the pending descriptors (bulk COW patch).
+        let mut chunk_batch: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
+        for (cid, desc) in frozen.pending_chunks.iter() {
+            chunk_batch.push((cid.as_bytes().to_vec(), Some(desc.clone())));
+        }
+        tx.root_mut().chunk_index_root = crate::store::index::apply_sorted_batch(
+            committed_root.chunk_index_root,
+            &chunk_batch,
+            BTREE_ORDER,
+            fanout,
+            &mut tx,
+        )?;
+
+        // 6. Apply the inode index batch once.
+        tx.root_mut().inode_index_root = crate::store::index::apply_sorted_batch(
+            committed_root.inode_index_root,
+            &inode_batch,
+            BTREE_ORDER,
+            fanout,
+            &mut tx,
+        )?;
+
+        // 7. The checkpoint root consumes the frozen log sequence.
+        tx.root_mut().log_seq = frozen.seq;
+        tx.commit_deferred(hooks)?;
+        Ok(())
+    }
+
+    /// Stage an object record for the epoch (dedup against the epoch's
+    /// staged set AND the committed object index: an already-committed
+    /// object must not get a duplicate physical record).
+    fn epoch_stage(
+        ep: &mut crate::store::epoch::Epoch,
+        store: &Store,
+        records: &mut Vec<crate::store::transaction::PendingRecord>,
+        tag: RecordTag,
+        payload: Vec<u8>,
+        materialized_len: Option<u64>,
+    ) -> crate::core::extent::ChunkId {
+        let id = crate::core::extent::ChunkId::of(&payload);
+        if ep.is_staged(&id) || store.object_index().contains(&id) {
+            return id;
+        }
+        ep.mark_staged(id);
+        records.push(crate::store::transaction::PendingRecord {
+            tag,
+            payload,
+            materialized_len,
+        });
+        id
+    }
+
+    /// Phase-10D epoch create: validate against the overlay, stage the
+    /// inode objects, append the MutationLog envelope, ack. The directory
+    /// entry and index trees are built at the CHECKPOINT, not here.
+    pub fn epoch_create(
+        &self,
+        parent: u64,
+        name: &[u8],
+        entry: NewEntry,
+        hooks: &CrashHooks,
+    ) -> Result<u64, StoreError> {
+        if !Self::validate_name(name) {
+            return Err(StoreError::Config("invalid entry name".into()));
+        }
+        let mut ep = self.epoch();
+        let parent_inode = self
+            .get_inode_epoch(&ep, parent)?
+            .ok_or_else(|| StoreError::Invariant(format!("parent {parent} missing")))?;
+        if !matches!(parent_inode.data, InodeData::Directory { .. }) {
+            return Err(StoreError::Invariant("parent not a directory".into()));
+        }
+        if self.dir_lookup_epoch(&ep, parent, name)?.is_some() {
+            return Err(StoreError::Invariant("entry already exists".into()));
+        }
+        let kind = &entry.kind;
+        let ino = if ep.max_ino == 0 {
+            // First allocation this epoch: the committed high-water mark
+            // (inos are never reused, so the committed max is the max
+            // ever allocated).
+            let committed = self.all_inodes()?.iter().copied().max().unwrap_or(1);
+            ep.max_ino = committed.saturating_add(1);
+            ep.max_ino
+        } else {
+            ep.max_ino = ep.max_ino.saturating_add(1);
+            ep.max_ino
+        };
+        let inode = match kind {
+            EntryKind::File => Inode::new_file(entry.uid, entry.gid, entry.mode),
+            EntryKind::Directory => Inode::new_dir(entry.uid, entry.gid, entry.mode),
+            EntryKind::Symlink(target) => Inode::new_symlink(target.clone(), entry.uid, entry.gid),
+            EntryKind::Device(is_char, rdev) => {
+                let mut i = Inode::new_file(entry.uid, entry.gid, entry.mode);
+                i.data_kind = crate::store::inode::DATA_DEVICE;
+                i.data = InodeData::Device;
+                i.rdev = *rdev;
+                i.mode = (if *is_char {
+                    crate::store::inode::mode::S_IFCHR
+                } else {
+                    crate::store::inode::mode::S_IFBLK
+                }) | (entry.mode & crate::store::inode::mode::S_IPERM);
+                i
+            }
+        };
+        let d_type = match kind {
+            EntryKind::File => directory::dt::DT_REG,
+            EntryKind::Directory => directory::dt::DT_DIR,
+            EntryKind::Symlink(_) => directory::dt::DT_LNK,
+            EntryKind::Device(_, _) => directory::dt::DT_UNKNOWN,
+        };
+        let mut records: Vec<crate::store::transaction::PendingRecord> = Vec::new();
+        let inode_id = Self::epoch_stage(
+            &mut ep,
+            self,
+            &mut records,
+            RecordTag::Inode,
+            inode.encode(),
+            None,
+        );
+        let mut pin = parent_inode;
+        pin.mtime = crate::store::inode::Timespec::now();
+        if matches!(kind, EntryKind::Directory) {
+            pin.nlink = pin.nlink.saturating_add(1);
+        }
+        let parent_inode_id = Self::epoch_stage(
+            &mut ep,
+            self,
+            &mut records,
+            RecordTag::Inode,
+            pin.encode(),
+            None,
+        );
+        // Overlay.
+        ep.pending_inodes.insert(ino, inode);
+        ep.pending_inodes.insert(parent, pin);
+        ep.pending_entries
+            .insert((parent, name.to_vec()), directory::DirEntry { ino, d_type });
+        let env = ep.envelope(&crate::store::epoch::MutationOp::Create {
+            parent,
+            name: name.to_vec(),
+            ino,
+            d_type,
+            inode_id,
+            parent_inode_id,
+        });
+        records.push(crate::store::transaction::PendingRecord {
+            tag: RecordTag::MutationLog,
+            payload: env,
+            materialized_len: None,
+        });
+        drop(ep);
+        self.epoch_append(records, hooks)?;
+        self.maybe_checkpoint_epoch()?;
+        Ok(ino)
+    }
+
+    /// Phase-10D epoch setattr for NON-SIZE updates (mode/uid/gid/times).
+    /// A size change flushes the epoch and runs the transactional
+    /// truncate path (truncates are rare; the batching win is the common
+    /// times/mode update).
+    pub fn epoch_setattr(
+        &self,
+        ino: u64,
+        update: &AttrUpdate,
+        hooks: &CrashHooks,
+    ) -> Result<Inode, StoreError> {
+        if update.size.is_some() {
+            // Flush the epoch first so the truncate sees a clean,
+            // committed file state.
+            self.epoch_checkpoint(hooks)?;
+            return self.setattr_inode(ino, update, hooks);
+        }
+        let mut ep = self.epoch();
+        let mut inode = self
+            .get_inode_epoch(&ep, ino)?
+            .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
+        if let Some(m) = update.mode {
+            inode.mode = (inode.mode & crate::store::inode::mode::S_IFMT) | (m & 0o7777);
+        }
+        if let Some(u) = update.uid {
+            inode.uid = u;
+        }
+        if let Some(g) = update.gid {
+            inode.gid = g;
+        }
+        if let Some(a) = update.atime {
+            inode.atime = a;
+        }
+        if let Some(m) = update.mtime {
+            inode.mtime = m;
+        }
+        inode.ctime = crate::store::inode::Timespec::now();
+        let mut records: Vec<crate::store::transaction::PendingRecord> = Vec::new();
+        let inode_id = Self::epoch_stage(
+            &mut ep,
+            self,
+            &mut records,
+            RecordTag::Inode,
+            inode.encode(),
+            None,
+        );
+        let env = ep.envelope(&crate::store::epoch::MutationOp::Setattr { ino, inode_id });
+        ep.pending_inodes.insert(ino, inode.clone());
+        records.push(crate::store::transaction::PendingRecord {
+            tag: RecordTag::MutationLog,
+            payload: env,
+            materialized_len: None,
+        });
+        drop(ep);
+        self.epoch_append(records, hooks)?;
+        self.maybe_checkpoint_epoch()?;
+        Ok(inode)
+    }
+
+    /// Phase-10D epoch unlink/rmdir.
+    pub fn epoch_unlink(
+        &self,
+        parent: u64,
+        name: &[u8],
+        is_dir: bool,
+        hooks: &CrashHooks,
+    ) -> Result<u64, StoreError> {
+        if !Self::validate_name(name) {
+            return Err(StoreError::Config("invalid entry name".into()));
+        }
+        let mut ep = self.epoch();
+        let entry = self
+            .dir_lookup_epoch(&ep, parent, name)?
+            .ok_or_else(|| StoreError::Invariant("no such entry".into()))?;
+        let target = self
+            .get_inode_epoch(&ep, entry.ino)?
+            .ok_or_else(|| StoreError::Invariant("target inode missing".into()))?;
+        if is_dir {
+            if !target.is_dir() {
+                return Err(StoreError::Invariant("not a directory".into()));
+            }
+            // A directory is empty when its OVERLAY view has no entries.
+            if !self.read_dir_epoch(&ep, entry.ino)?.is_empty() {
+                return Err(StoreError::Invariant("directory not empty".into()));
+            }
+        } else if target.is_dir() {
+            return Err(StoreError::Invariant("is a directory".into()));
+        }
+        let mut records: Vec<crate::store::transaction::PendingRecord> = Vec::new();
+        let mut pin = self
+            .get_inode_epoch(&ep, parent)?
+            .ok_or_else(|| StoreError::Invariant("parent missing".into()))?;
+        pin.mtime = crate::store::inode::Timespec::now();
+        if target.is_dir() {
+            pin.nlink = pin.nlink.saturating_sub(1);
+        }
+        let parent_inode_id = Self::epoch_stage(
+            &mut ep,
+            self,
+            &mut records,
+            RecordTag::Inode,
+            pin.encode(),
+            None,
+        );
+        // The child: drop on rmdir / nlink-0, else stage the updated inode.
+        let mut child_inode_id = None;
+        if is_dir {
+            ep.removed_inodes.insert(entry.ino);
+        } else {
+            let mut t = target;
+            t.nlink = t.nlink.saturating_sub(1);
+            if t.nlink == 0 {
+                ep.removed_inodes.insert(entry.ino);
+            } else {
+                let id = Self::epoch_stage(
+                    &mut ep,
+                    self,
+                    &mut records,
+                    RecordTag::Inode,
+                    t.encode(),
+                    None,
+                );
+                child_inode_id = Some(id);
+                ep.pending_inodes.insert(entry.ino, t);
+            }
+        }
+        ep.pending_inodes.insert(parent, pin);
+        ep.removed_entries.insert((parent, name.to_vec()));
+        let env = ep.envelope(&crate::store::epoch::MutationOp::Unlink {
+            parent,
+            name: name.to_vec(),
+            child: entry.ino,
+            is_dir,
+            parent_inode_id,
+            child_inode_id,
+        });
+        records.push(crate::store::transaction::PendingRecord {
+            tag: RecordTag::MutationLog,
+            payload: env,
+            materialized_len: None,
+        });
+        drop(ep);
+        self.epoch_append(records, hooks)?;
+        self.maybe_checkpoint_epoch()?;
+        Ok(entry.ino)
+    }
+
+    /// Phase-10D epoch rename (POSIX type rules; a replaced destination is
+    /// dropped). Overlay-only: the directory trees are rebuilt at the
+    /// checkpoint.
+    pub fn epoch_rename(
+        &self,
+        src_parent: u64,
+        src_name: &[u8],
+        dst_parent: u64,
+        dst_name: &[u8],
+        hooks: &CrashHooks,
+    ) -> Result<crate::store::RenameOutcome, StoreError> {
+        if !Self::validate_name(src_name) || !Self::validate_name(dst_name) {
+            return Err(StoreError::Config("invalid entry name".into()));
+        }
+        // Renaming a name onto itself is a POSIX no-op.
+        if src_parent == dst_parent && src_name == dst_name {
+            let entry = self
+                .dir_lookup_epoch(&self.epoch(), src_parent, src_name)?
+                .ok_or_else(|| StoreError::Invariant("no such entry".into()))?;
+            return Ok(crate::store::RenameOutcome {
+                src_ino: entry.ino,
+                replaced_dst_ino: None,
+            });
+        }
+        let mut ep = self.epoch();
+        let src_entry = self
+            .dir_lookup_epoch(&ep, src_parent, src_name)?
+            .ok_or_else(|| StoreError::Invariant("no such entry".into()))?;
+        let src_inode = self
+            .get_inode_epoch(&ep, src_entry.ino)?
+            .ok_or_else(|| StoreError::Invariant("src inode missing".into()))?;
+        let src_is_dir = src_inode.is_dir();
+        let sp = self
+            .get_inode_epoch(&ep, src_parent)?
+            .ok_or_else(|| StoreError::Invariant("src parent missing".into()))?;
+        let dp = self
+            .get_inode_epoch(&ep, dst_parent)?
+            .ok_or_else(|| StoreError::Invariant("dst parent missing".into()))?;
+        if !matches!(dp.data, InodeData::Directory { .. }) {
+            return Err(StoreError::Invariant("dst parent not a directory".into()));
+        }
+        let mut replaced_dst_ino = None;
+        let mut replaced_dst_is_dir = false;
+        if let Some(dst_entry) = self.dir_lookup_epoch(&ep, dst_parent, dst_name)? {
+            if dst_entry.ino != src_entry.ino {
+                let dst_inode = self
+                    .get_inode_epoch(&ep, dst_entry.ino)?
+                    .ok_or_else(|| StoreError::Invariant("dst inode missing".into()))?;
+                let dst_is_dir = dst_inode.is_dir();
+                replaced_dst_is_dir = dst_is_dir;
+                if src_is_dir && !dst_is_dir {
+                    return Err(StoreError::Invariant("cannot rename dir over file".into()));
+                }
+                if !src_is_dir && dst_is_dir {
+                    return Err(StoreError::Invariant("cannot rename file over dir".into()));
+                }
+                if src_is_dir && dst_is_dir && !self.read_dir_epoch(&ep, dst_entry.ino)?.is_empty()
+                {
+                    return Err(StoreError::Invariant("directory not empty".into()));
+                }
+                replaced_dst_ino = Some(dst_entry.ino);
+                // Drop the destination's inode reference.
+                if dst_is_dir {
+                    ep.removed_inodes.insert(dst_entry.ino);
+                } else {
+                    let mut t = dst_inode;
+                    t.nlink = t.nlink.saturating_sub(1);
+                    if t.nlink == 0 {
+                        ep.removed_inodes.insert(dst_entry.ino);
+                    } else {
+                        ep.pending_inodes.insert(dst_entry.ino, t);
+                    }
+                }
+            }
+        }
+        let mut records: Vec<crate::store::transaction::PendingRecord> = Vec::new();
+        // The moved entry's inode (unchanged for a plain rename).
+        let src_child_inode_id = Self::epoch_stage(
+            &mut ep,
+            self,
+            &mut records,
+            RecordTag::Inode,
+            src_inode.encode(),
+            None,
+        );
+        // Source parent update (mtime; nlink when a directory leaves).
+        let mut nsp = sp.clone();
+        nsp.mtime = crate::store::inode::Timespec::now();
+        let mut ndp = dp.clone();
+        ndp.mtime = crate::store::inode::Timespec::now();
+        if src_parent == dst_parent {
+            // One parent, one entry set change.
+        } else if src_is_dir {
+            nsp.nlink = nsp.nlink.saturating_sub(1);
+            ndp.nlink = ndp.nlink.saturating_add(1);
+        }
+        // A replaced directory decrements the destination parent's nlink.
+        if replaced_dst_is_dir {
+            ndp.nlink = ndp.nlink.saturating_sub(1);
+        }
+        let sp_inode_id = Self::epoch_stage(
+            &mut ep,
+            self,
+            &mut records,
+            RecordTag::Inode,
+            nsp.encode(),
+            None,
+        );
+        let dp_inode_id = Self::epoch_stage(
+            &mut ep,
+            self,
+            &mut records,
+            RecordTag::Inode,
+            ndp.encode(),
+            None,
+        );
+        // Overlay entry moves.
+        if src_parent != dst_parent {
+            ep.removed_entries.insert((src_parent, src_name.to_vec()));
+        }
+        ep.pending_entries
+            .insert((dst_parent, dst_name.to_vec()), src_entry);
+        if src_parent != dst_parent {
+            ep.pending_inodes.insert(src_parent, nsp);
+            ep.pending_inodes.insert(dst_parent, ndp);
+        } else {
+            ep.pending_inodes.insert(src_parent, nsp);
+        }
+        // The source entry: a same-parent rename moves dst over src.
+        if src_parent == dst_parent {
+            // dst was inserted above; drop the source name (unless it IS
+            // the destination name — handled by the no-op case).
+            ep.removed_entries.insert((src_parent, src_name.to_vec()));
+        }
+        // The source child is the same inode; its bytes unchanged (a plain
+        // rename never rewrites the moved inode; a replaced destination
+        // was handled above).
+        let env = ep.envelope(&crate::store::epoch::MutationOp::Rename {
+            src_parent,
+            src_name: src_name.to_vec(),
+            dst_parent,
+            dst_name: dst_name.to_vec(),
+            src_ino: src_entry.ino,
+            dst_ino: replaced_dst_ino,
+            src_is_dir,
+            sp_inode_id,
+            dp_inode_id,
+            src_child_inode_id: Some(src_child_inode_id),
+            dst_child_inode_id: None,
+        });
+        records.push(crate::store::transaction::PendingRecord {
+            tag: RecordTag::MutationLog,
+            payload: env,
+            materialized_len: None,
+        });
+        drop(ep);
+        self.epoch_append(records, hooks)?;
+        self.maybe_checkpoint_epoch()?;
+        Ok(crate::store::RenameOutcome {
+            src_ino: src_entry.ino,
+            replaced_dst_ino,
+        })
+    }
+
+    /// Phase-10D epoch write: the 10C parallel chunk preparation against
+    /// the epoch's file view, staged as log records + a MutationLog
+    /// envelope. The extent/chunk trees are built at the checkpoint.
+    pub fn epoch_write(
+        &self,
+        ino: u64,
+        offset: u64,
+        data: &[u8],
+        options: crate::optimizer::policy::OptimizeOptions,
+        fg: crate::optimizer::foreground::ForegroundPolicy,
+        hooks: &CrashHooks,
+    ) -> Result<(), StoreError> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        let _lock = self.inode_lock(ino);
+        let mut ep = self.epoch();
+        eprintln!(
+            "DBG epoch_write ino={ino} pending?={}",
+            ep.pending_inodes.contains_key(&ino)
+        );
+        let inode = self
+            .get_inode_epoch(&ep, ino)?
+            .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
+        let limits = self.config.limits;
+        let chunk_class = limits.chunk_class;
+        let end = offset.saturating_add(data.len() as u64);
+        let old_size = inode.size;
+        let new_size = old_size.max(end);
+        // Pre-materialize the affected chunks from the epoch's file view
+        // into the in-batch overlay, so prepare_write's RMW sees pending
+        // writes (they are uncommitted; the committed read would be
+        // stale).
+        let first_chunk = offset / chunk_class;
+        let last_chunk = end.div_ceil(chunk_class);
+        let mut overlay: std::collections::BTreeMap<u64, Vec<u8>> =
+            std::collections::BTreeMap::new();
+        // Prefill from the PREVIOUS chunk: prepare_write's in-batch
+        // dictionary lookup (the previous same-file chunk) falls back to
+        // the committed store on an overlay miss, which would fail for
+        // epoch-pending chunks.
+        let prefill_first = first_chunk.saturating_sub(1);
+        for c in prefill_first..last_chunk {
+            let off = c * chunk_class;
+            let read_end = (off + chunk_class).min(old_size);
+            let bytes = if read_end > off {
+                self.read_file_epoch(&ep, ino, off, read_end - off)?
+            } else {
+                Vec::new()
+            };
+            overlay.insert(off, bytes);
+        }
+        let mut pending_batch = crate::optimizer::search::PendingBatch::default();
+        let (updates, _) = self.prepare_write(
+            ino,
+            offset,
+            data,
+            Some(&mut overlay),
+            Some(&mut pending_batch),
+            options,
+            fg,
+            Some(old_size),
+        )?;
+        // Stage the descriptors + objects + envelope.
+        let mut records: Vec<crate::store::transaction::PendingRecord> = Vec::new();
+        let mut chunks: Vec<(u64, crate::core::extent::ChunkId, Vec<u8>)> = Vec::new();
+        for u in &updates {
+            let desc_bytes = crate::format::descriptor::encode(&u.descriptor)?;
+            for o in &u.objects {
+                let tag = match o.kind {
+                    crate::core::candidate::ObjectKind::Data => RecordTag::Data,
+                    crate::core::candidate::ObjectKind::Model => RecordTag::Model,
+                };
+                let ml = if tag == RecordTag::Data {
+                    Some(u.descriptor.len())
+                } else {
+                    None
+                };
+                Self::epoch_stage(&mut ep, self, &mut records, tag, o.payload.clone(), ml);
+            }
+            chunks.push((u.offset, u.content_id, desc_bytes.clone()));
+            ep.pending_extents
+                .insert((ino, u.offset), desc_bytes.clone());
+            ep.pending_chunks.entry(u.content_id).or_insert(desc_bytes);
+        }
+        let mut fin = inode;
+        fin.size = new_size;
+        let inode_id = Self::epoch_stage(
+            &mut ep,
+            self,
+            &mut records,
+            RecordTag::Inode,
+            fin.encode(),
+            None,
+        );
+        ep.pending_inodes.insert(ino, fin);
+        let env = ep.envelope(&crate::store::epoch::MutationOp::Write {
+            ino,
+            size: new_size,
+            chunks,
+            inode_id,
+        });
+        records.push(crate::store::transaction::PendingRecord {
+            tag: RecordTag::MutationLog,
+            payload: env,
+            materialized_len: None,
+        });
+        drop(ep);
+        self.epoch_append(records, hooks)?;
+        self.maybe_checkpoint_epoch()?;
+        Ok(())
+    }
+
+    /// Phase-10D: replay the un-checkpointed mutation log tail at open.
+    /// The last checkpoint root is authoritative; envelopes with
+    /// `seq > root.log_seq` are the acknowledged-but-unmerged mutations.
+    /// Replayed in seq order in ONE transaction (the replayed state is
+    /// then committed with the consumed sequence and a durability
+    /// barrier, so the mounted state is fully consistent).
+    fn epoch_replay(&self) -> Result<(), StoreError> {
+        let root = self.current_root();
+        let segments = crate::store::segment::list_segments(&self.dir)?;
+        let mut log: Vec<(u64, Vec<u8>)> = Vec::new();
+        for seq_no in &segments {
+            let path = crate::store::segment::segment_path(&self.dir, *seq_no);
+            let (records, _) =
+                crate::store::segment::scan_segment(&path, self.config.max_records_per_segment)
+                    .map_err(|e| StoreError::Io(e.to_string()))?;
+            for rec in records {
+                if rec.tag == RecordTag::MutationLog {
+                    let s = crate::store::epoch::Epoch::envelope_seq(&rec.payload)?;
+                    if s > root.log_seq {
+                        log.push((s, rec.payload));
+                    }
+                }
+            }
+        }
+        log.sort_by_key(|(s, _)| *s);
+        // Duplicate sequences would imply two envelopes with the same
+        // sequence (a store bug); recovery must never silently drop one.
+        for w in log.windows(2) {
+            if w[0].0 == w[1].0 {
+                return Err(StoreError::Invariant(
+                    "duplicate mutation log sequence at recovery".into(),
+                ));
+            }
+        }
+        if log.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.begin_tx()?;
+        let limits = self.config.limits;
+        for (_, env) in &log {
+            let (_, op) = crate::store::epoch::Epoch::decode_envelope(env)?;
+            self.replay_op(&mut tx, &op, limits)?;
+        }
+        tx.root_mut().log_seq = log.last().expect("non-empty").0;
+        let store = tx.commit_deferred(&CrashHooks::none())?;
+        store.durability_barrier(&CrashHooks::none())?;
+        Ok(())
+    }
+
+    /// Apply one mutation op to a transaction's trees (recovery replay;
+    /// also the reference for what a checkpoint's merge produces). The
+    /// staged objects resolve through the object index (the log appended
+    /// them).
+    fn replay_op(
+        &self,
+        tx: &mut crate::store::transaction::Tx<'_>,
+        op: &crate::store::epoch::MutationOp,
+        limits: crate::core::limits::Limits,
+    ) -> Result<(), StoreError> {
+        let fanout = limits.max_fanout;
+        let fetch_inode = |tx: &crate::store::transaction::Tx<'_>,
+                           id: &crate::core::extent::ChunkId| {
+            let bytes = tx.fetch_pending_or_store(id)?.ok_or_else(|| {
+                StoreError::Invariant(format!("replay: staged inode object {id} missing"))
+            })?;
+            Inode::decode(&bytes).map_err(|e| StoreError::Descriptor(e.to_string()))
+        };
+        match op {
+            crate::store::epoch::MutationOp::Create {
+                parent,
+                name,
+                ino,
+                d_type,
+                inode_id,
+                parent_inode_id,
+            } => {
+                let inode = fetch_inode(tx, inode_id)?;
+                Store::put_inode_in_tx(tx, *ino, &inode)?;
+                // The parent's FINAL metadata is the log-staged object
+                // (mtime/nlink after this op); its dir_root is rebuilt
+                // from the tx's current tree + this entry.
+                let pmeta = fetch_inode(tx, parent_inode_id)?;
+                let pin_cur = Store::inode_for_tx(tx, *parent)?;
+                let dir_root = match pin_cur.data {
+                    InodeData::Directory { dir_root } => dir_root,
+                    _ => return Err(StoreError::Invariant("parent not a directory".into())),
+                };
+                let new_root = crate::store::directory::insert(
+                    dir_root,
+                    name,
+                    directory::DirEntry {
+                        ino: *ino,
+                        d_type: *d_type,
+                    },
+                    BTREE_ORDER,
+                    fanout,
+                    tx,
+                )?;
+                let mut pin = pmeta;
+                pin.data = InodeData::Directory { dir_root: new_root };
+                Store::put_inode_in_tx(tx, *parent, &pin)?;
+            }
+            crate::store::epoch::MutationOp::Setattr { ino, inode_id } => {
+                let inode = fetch_inode(tx, inode_id)?;
+                Store::put_inode_in_tx(tx, *ino, &inode)?;
+            }
+            crate::store::epoch::MutationOp::Unlink {
+                parent,
+                name,
+                child,
+                is_dir,
+                parent_inode_id,
+                child_inode_id,
+            } => {
+                let pmeta = fetch_inode(tx, parent_inode_id)?;
+                let pin_cur = Store::inode_for_tx(tx, *parent)?;
+                let dir_root = match pin_cur.data {
+                    InodeData::Directory { dir_root } => dir_root,
+                    _ => return Err(StoreError::Invariant("parent not a directory".into())),
+                };
+                let (new_root, _) =
+                    crate::store::directory::remove(dir_root, name, BTREE_ORDER, fanout, tx)?;
+                let mut pin = pmeta;
+                pin.data = InodeData::Directory { dir_root: new_root };
+                Store::put_inode_in_tx(tx, *parent, &pin)?;
+                match child_inode_id {
+                    Some(id) => {
+                        let child_inode = fetch_inode(tx, id)?;
+                        Store::put_inode_in_tx(tx, *child, &child_inode)?;
+                    }
+                    None => Store::remove_inode_in_tx(tx, *child)?,
+                }
+                let _ = is_dir;
+            }
+            crate::store::epoch::MutationOp::Rename {
+                src_parent,
+                src_name,
+                dst_parent,
+                dst_name,
+                src_ino,
+                dst_ino,
+                src_is_dir,
+                sp_inode_id,
+                dp_inode_id,
+                src_child_inode_id,
+                dst_child_inode_id: _,
+            } => {
+                let spmeta = fetch_inode(tx, sp_inode_id)?;
+                let dpmeta = fetch_inode(tx, dp_inode_id)?;
+                let sp = Store::inode_for_tx(tx, *src_parent)?;
+                let src_root = match sp.data {
+                    InodeData::Directory { dir_root } => dir_root,
+                    _ => return Err(StoreError::Invariant("src parent not a dir".into())),
+                };
+                let entry =
+                    crate::store::directory::lookup(src_root, src_name, BTREE_ORDER, fanout, tx)?
+                        .ok_or_else(|| StoreError::Invariant("replay: src entry missing".into()))?;
+                if src_parent == dst_parent {
+                    let mut root = src_root;
+                    if dst_ino.is_some() {
+                        root = crate::store::directory::remove(
+                            root,
+                            dst_name,
+                            BTREE_ORDER,
+                            fanout,
+                            tx,
+                        )?
+                        .0;
+                    }
+                    root = crate::store::directory::insert(
+                        root,
+                        dst_name,
+                        entry,
+                        BTREE_ORDER,
+                        fanout,
+                        tx,
+                    )?;
+                    if src_name != dst_name {
+                        root = crate::store::directory::remove(
+                            root,
+                            src_name,
+                            BTREE_ORDER,
+                            fanout,
+                            tx,
+                        )?
+                        .0;
+                    }
+                    let mut pin = spmeta;
+                    pin.data = InodeData::Directory { dir_root: root };
+                    Store::put_inode_in_tx(tx, *src_parent, &pin)?;
+                } else {
+                    let dp = Store::inode_for_tx(tx, *dst_parent)?;
+                    let mut dst_root = match dp.data {
+                        InodeData::Directory { dir_root } => dir_root,
+                        _ => return Err(StoreError::Invariant("dst parent not a dir".into())),
+                    };
+                    if dst_ino.is_some() {
+                        dst_root = crate::store::directory::remove(
+                            dst_root,
+                            dst_name,
+                            BTREE_ORDER,
+                            fanout,
+                            tx,
+                        )?
+                        .0;
+                    }
+                    dst_root = crate::store::directory::insert(
+                        dst_root,
+                        dst_name,
+                        entry,
+                        BTREE_ORDER,
+                        fanout,
+                        tx,
+                    )?;
+                    let src_root = crate::store::directory::remove(
+                        src_root,
+                        src_name,
+                        BTREE_ORDER,
+                        fanout,
+                        tx,
+                    )?
+                    .0;
+                    let mut pin = spmeta;
+                    pin.data = InodeData::Directory { dir_root: src_root };
+                    Store::put_inode_in_tx(tx, *src_parent, &pin)?;
+                    let mut pin = dpmeta;
+                    pin.data = InodeData::Directory { dir_root: dst_root };
+                    Store::put_inode_in_tx(tx, *dst_parent, &pin)?;
+                }
+                // The moved inode's final state.
+                match src_child_inode_id {
+                    Some(id) => {
+                        let child = fetch_inode(tx, id)?;
+                        Store::put_inode_in_tx(tx, *src_ino, &child)?;
+                    }
+                    None => Store::remove_inode_in_tx(tx, *src_ino)?,
+                }
+                // The replaced destination's final state.
+                if let Some(dst_ino) = dst_ino {
+                    if *dst_ino != *src_ino {
+                        if *src_is_dir {
+                            Store::remove_inode_in_tx(tx, *dst_ino)?;
+                        } else {
+                            let mut t = Store::inode_for_tx(tx, *dst_ino)?;
+                            t.nlink = t.nlink.saturating_sub(1);
+                            if t.nlink == 0 {
+                                Store::remove_inode_in_tx(tx, *dst_ino)?;
+                            } else {
+                                Store::put_inode_in_tx(tx, *dst_ino, &t)?;
+                            }
+                        }
+                    }
+                }
+            }
+            crate::store::epoch::MutationOp::Write {
+                ino,
+                size,
+                chunks,
+                inode_id,
+            } => {
+                for (off, cid, desc_bytes) in chunks {
+                    let rep = crate::format::descriptor::decode(
+                        desc_bytes,
+                        limits.max_descriptor_bytes,
+                        limits.max_inline_bytes,
+                        limits.max_palette,
+                        limits.max_period,
+                        limits.max_chunk_size,
+                    )?;
+                    Store::put_chunk_in_tx(tx, cid, &rep)?;
+                    Store::put_extent_in_tx(tx, *ino, *off, &rep)?;
+                }
+                // The log-staged inode carries the SIZE; its extent_root
+                // is stale (the epoch never rebuilt the extent tree), so
+                // apply the size to the tx's current inode (whose
+                // extent_root the put_extent_in_tx calls just built).
+                let fin = fetch_inode(tx, inode_id)?;
+                let mut cur = Store::inode_for_tx(tx, *ino)?;
+                cur.size = fin.size;
+                cur.ctime = fin.ctime;
+                Store::put_inode_in_tx(tx, *ino, &cur)?;
+                let _ = size;
+            }
+        }
+        Ok(())
+    }
+
+    /// Flush the epoch before GC / background optimization / the
+    /// durability barrier: the epoch's staged objects are only referenced
+    /// by the log, which those walkers do not see as roots.
+    pub fn ensure_epoch_flushed(&self, hooks: &CrashHooks) -> Result<(), StoreError> {
+        self.epoch_checkpoint(hooks)
+    }
+
+    /// Phase-10D size cap: close the epoch when it has accumulated too
+    /// many ops (bounded log tail + bounded recovery scope + bounded
+    /// memory). Called after each op's log append; the checkpoint merges
+    /// the frozen overlay in ONE tree build, so the cap does not fight
+    /// the batching win.
+    fn maybe_checkpoint_epoch(&self) -> Result<(), StoreError> {
+        /// Pending ops per epoch before an automatic close.
+        const EPOCH_MAX_OPS: u64 = 1024;
+        if self.epoch().seq >= EPOCH_MAX_OPS {
+            self.epoch_checkpoint(&CrashHooks::none())?;
+        }
+        Ok(())
+    }
 }
 
 // Re-exports for the fuse layer.

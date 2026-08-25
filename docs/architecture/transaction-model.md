@@ -29,6 +29,35 @@
 Bracketed names are crash-court injection points
 (`docs/recovery/crash-consistency.md`).
 
+## 2a. Metadata writeback epoch (Phase-10D)
+
+The foreground write path batches acknowledged namespace/writeback
+mutations into an ACTIVE EPOCH (`src/store/epoch.rs`) instead of running
+one immutable transaction per operation. Each op appends its staged
+objects (inodes, model/enc payloads) plus a `MUTATION_LOG` envelope — the
+recoverable dirty state — and flushes to the page cache BEFORE the ack,
+then leaves the committed trees untouched. The per-op path is therefore:
+
+```text
+1. append the op's staged records + its MUTATION_LOG envelope
+2. flush(segment)                          (page cache; process-crash durable)
+3. ack to the caller                       (no root build, no superblock write)
+```
+
+On checkpoint (fsync / syncfs / unmount / GC / optimizer / size cap), the
+frozen overlay is merged into the immutable trees ONCE — bulk-load for the
+small per-directory trees, `apply_sorted_batch` (bulk COW: each affected
+leaf/ancestor rewritten once, unchanged subtrees keep their ids) for the
+global inode index and the chunk index — and ONE root publication carries
+the merged state plus the consumed log sequence (`root.log_seq`).
+
+Recovery replays every `MUTATION_LOG` envelope with `seq > root.log_seq`
+(in seq order, one transaction) against the checkpoint root, so an
+acknowledged op survives a process crash exactly as the deferred-commit
+path always guaranteed. The consumed envelopes and any objects they
+referenced are unreachable after the checkpoint and GC reclaims them; the
+physical convergence invariants (Phase-9H) are unchanged.
+
 ## 3. Superblock slots
 
 Two slots at fixed offsets (A, B). Each slot: magic, format version,

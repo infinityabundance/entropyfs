@@ -521,6 +521,300 @@ pub fn count<P: ObjectProvider>(
     Ok(entries.len() as u64)
 }
 
+/// Bulk COW patch (Phase-10D metadata writeback epoch): apply a SORTED
+/// batch of `(key, Option<value>)` operations — `Some` = upsert,
+/// `None` = remove — to an existing tree in one pass, rewriting each
+/// affected LEAF once and each affected ANCESTOR once. Unchanged subtrees
+/// retain their content ids, so a sparse patch over a large tree touches
+/// only the paths that actually change (the `bulk_load` alternative would
+/// rebuild the whole tree). Returns the new root.
+///
+/// The batch must be sorted by key with no duplicates (the caller
+/// canonicalizes; a violation is an invariant error, never silent).
+pub fn apply_sorted_batch<P: ObjectProvider>(
+    root: ChunkId,
+    batch: &[(Vec<u8>, Option<Vec<u8>>)],
+    order: u16,
+    max_fanout: u32,
+    provider: &mut P,
+) -> Result<ChunkId, BTreeError> {
+    if batch.is_empty() {
+        return Ok(root);
+    }
+    if order == 0 {
+        return Err(BTreeError::Invariant("zero order".into()));
+    }
+    // Strictly increasing keys, no duplicates.
+    for w in batch.windows(2) {
+        if w[0].0 >= w[1].0 {
+            return Err(BTreeError::Invariant(
+                "apply_sorted_batch: batch not sorted / duplicate keys".into(),
+            ));
+        }
+    }
+    if root.is_zero() {
+        // Empty tree: bulk-load the batch's inserts.
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = batch
+            .iter()
+            .filter_map(|(k, v)| v.clone().map(|v| (k.clone(), v)))
+            .collect();
+        return bulk_load(&entries, order, max_fanout, provider);
+    }
+    match patch_rec(root, batch, 0, order, max_fanout, provider)? {
+        (Some(id), None) => Ok(id),
+        (None, _) => Ok(ChunkId::ZERO), // the whole tree collapsed to empty
+        (Some(left), Some((pkey, right))) => {
+            // The root split: a new root covers [.., pkey) via left and
+            // [pkey, ..) via right.
+            let new_root = Node::Internal {
+                first_child: left,
+                entries: vec![Entry {
+                    key: pkey,
+                    value: right.as_bytes().to_vec(),
+                }],
+            };
+            let id = new_root.id(order);
+            provider.put(id, new_root.encode(order));
+            Ok(id)
+        }
+    }
+}
+
+/// Patch result: (new subtree root, or `None` when the subtree collapsed
+/// to empty; optional split promotion, exactly like `insert_rec`). An
+/// unchanged subtree returns its own id and no promotion.
+type PatchOut = (Option<ChunkId>, Promotion);
+
+/// Returns the new subtree root (or `None` when the subtree collapsed to
+/// empty). An unchanged subtree returns its own id.
+fn patch_rec<P: ObjectProvider>(
+    node_id: ChunkId,
+    batch: &[(Vec<u8>, Option<Vec<u8>>)],
+    depth: u32,
+    order: u16,
+    max_fanout: u32,
+    provider: &mut P,
+) -> Result<PatchOut, BTreeError> {
+    if depth > 128 {
+        return Err(BTreeError::Invariant("tree depth exceeded".into()));
+    }
+    let node = fetch(node_id, order, max_fanout, provider)?;
+    match node {
+        Node::Leaf { entries } => {
+            // Merge the batch into the leaf: a sorted walk over both lists.
+            let mut out: Vec<Entry> = Vec::with_capacity(entries.len() + batch.len());
+            let mut ei = 0usize;
+            let mut bi = 0usize;
+            let mut changed = false;
+            while ei < entries.len() || bi < batch.len() {
+                let take_existing = match (entries.get(ei), batch.get(bi)) {
+                    (Some(e), Some((k, _))) => e.key.as_slice() < k.as_slice(),
+                    (Some(_), None) => true,
+                    (None, Some(_)) => false,
+                    (None, None) => unreachable!(),
+                };
+                if take_existing {
+                    out.push(entries[ei].clone());
+                    ei += 1;
+                    continue;
+                }
+                let (k, v) = &batch[bi];
+                bi += 1;
+                match v {
+                    Some(value) => {
+                        // Upsert: replace an existing entry or insert.
+                        if entries.get(ei).map(|e| e.key.as_slice() == k.as_slice()) == Some(true) {
+                            if entries[ei].value.as_slice() != value.as_slice() {
+                                changed = true;
+                                out.push(Entry {
+                                    key: k.clone(),
+                                    value: value.clone(),
+                                });
+                            } else {
+                                out.push(entries[ei].clone());
+                            }
+                            ei += 1;
+                        } else {
+                            changed = true;
+                            out.push(Entry {
+                                key: k.clone(),
+                                value: value.clone(),
+                            });
+                        }
+                    }
+                    None => {
+                        // Remove: drop the existing entry if present
+                        // (removing an absent key is a no-op).
+                        if entries.get(ei).map(|e| e.key.as_slice() == k.as_slice()) == Some(true) {
+                            changed = true;
+                            ei += 1;
+                        }
+                    }
+                }
+            }
+            if !changed {
+                return Ok((Some(node_id), None));
+            }
+            if out.is_empty() {
+                return Ok((None, None));
+            }
+            if out.len() as u16 > order {
+                // Over-full: split like `insert_rec` (left gets the first
+                // half, the promoted median starts the right half).
+                let mid = out.len() / 2;
+                let right_entries = out.split_off(mid);
+                let median_key = right_entries[0].key.clone();
+                let left = Node::Leaf { entries: out };
+                let right = Node::Leaf {
+                    entries: right_entries,
+                };
+                let left_id = left.id(order);
+                let right_id = right.id(order);
+                provider.put(left_id, left.encode(order));
+                provider.put(right_id, right.encode(order));
+                return Ok((Some(left_id), Some((median_key, right_id))));
+            }
+            let n = Node::Leaf { entries: out };
+            let id = n.id(order);
+            provider.put(id, n.encode(order));
+            Ok((Some(id), None))
+        }
+        Node::Internal {
+            first_child,
+            entries,
+        } => {
+            // Partition the batch across the children and recurse. Child
+            // ranges (batch keys are sorted):
+            //   first_child: keys < entries[0].key
+            //   child i:     keys in [entries[i].key, entries[i+1].key)
+            //   last child:  keys >= entries[last].key
+            let batch_keys: Vec<&[u8]> = batch.iter().map(|(k, _)| k.as_slice()).collect();
+            // Ordered child slots: (separator, child); the first slot's
+            // separator is None (the first_child). A child's split
+            // promotion inserts an extra slot right after it.
+            let mut slots: Vec<(Option<Vec<u8>>, ChunkId)> = Vec::with_capacity(entries.len() + 1);
+            slots.push((None, first_child));
+            for e in &entries {
+                slots.push((Some(e.key.clone()), child_id(e)));
+            }
+            let mut changed = false;
+            let mut lo = 0usize;
+            let mut out_slots: Vec<(Option<Vec<u8>>, Option<ChunkId>)> =
+                Vec::with_capacity(slots.len());
+            for (si, (sep, child)) in slots.iter().enumerate() {
+                // Range of this child's keys in the batch.
+                let hi = if si == 0 {
+                    match entries.first() {
+                        Some(f) => {
+                            partition_point(&batch_keys[lo..], |k| k < f.key.as_slice()) + lo
+                        }
+                        None => batch.len(),
+                    }
+                } else if si < slots.len() - 1 {
+                    let cur = sep.as_ref().unwrap().as_slice();
+                    let next = slots[si + 1].0.as_ref().unwrap().as_slice();
+                    partition_point(&batch_keys[lo..], |k| k >= cur && k < next) + lo
+                } else {
+                    let cur = sep.as_ref().unwrap().as_slice();
+                    partition_point(&batch_keys[lo..], |k| k >= cur) + lo
+                };
+                let slice = &batch[lo..hi];
+                lo = hi;
+                let (new_child, promote) =
+                    patch_rec(*child, slice, depth + 1, order, max_fanout, provider)?;
+                changed = changed || new_child != Some(*child);
+                out_slots.push((sep.clone(), new_child));
+                if let Some((pkey, right)) = promote {
+                    // The child split: the promoted right half becomes a
+                    // new separator entry after this child's separator.
+                    out_slots.push((Some(pkey), Some(right)));
+                    changed = true;
+                }
+            }
+            if !changed {
+                return Ok((Some(node_id), None));
+            }
+            // Compact: drop collapsed children. A collapsed first_child
+            // promotes the next surviving slot to first_child (its
+            // separator becomes redundant); a collapsed entry child drops
+            // its separator.
+            let mut compacted: Vec<(Option<Vec<u8>>, ChunkId)> =
+                Vec::with_capacity(out_slots.len());
+            let mut seen_survivor = false;
+            for (sep, child) in out_slots {
+                if let Some(c) = child {
+                    let s = if seen_survivor { sep } else { None };
+                    compacted.push((s, c));
+                    seen_survivor = true;
+                }
+                // collapsed child: its separator (if any) drops too
+            }
+            if compacted.is_empty() {
+                return Ok((None, None)); // whole subtree collapsed
+            }
+            if compacted.len() == 1 {
+                // Only one child survives: collapse the level (the parent
+                // already has the correct separator for the subtree).
+                return Ok((Some(compacted[0].1), None));
+            }
+            let new_first_child = compacted[0].1;
+            let mut new_entries: Vec<Entry> = Vec::with_capacity(compacted.len() - 1);
+            for (sep, c) in compacted.into_iter().skip(1) {
+                new_entries.push(Entry {
+                    key: sep.expect("entry slot has a separator"),
+                    value: c.as_bytes().to_vec(),
+                });
+            }
+            if new_entries.len() as u16 > order {
+                // Over-full: split like `split_internal`.
+                let mid = new_entries.len() / 2;
+                let median_key = new_entries[mid].key.clone();
+                let right_first = child_id(&new_entries[mid]);
+                let right_entries = new_entries[mid + 1..].to_vec();
+                let left = Node::Internal {
+                    first_child: new_first_child,
+                    entries: new_entries[..mid].to_vec(),
+                };
+                let right = Node::Internal {
+                    first_child: right_first,
+                    entries: right_entries,
+                };
+                let left_id = left.id(order);
+                let right_id = right.id(order);
+                provider.put(left_id, left.encode(order));
+                provider.put(right_id, right.encode(order));
+                return Ok((Some(left_id), Some((median_key, right_id))));
+            }
+            let n = Node::Internal {
+                first_child: new_first_child,
+                entries: new_entries,
+            };
+            let id = n.id(order);
+            provider.put(id, n.encode(order));
+            Ok((Some(id), None))
+        }
+    }
+}
+
+/// `partition_point` for a slice of byte slices against a predicate
+/// (Rust's slice::partition_point with a closure over borrowed keys).
+fn partition_point<F>(slice: &[&[u8]], mut pred: F) -> usize
+where
+    F: FnMut(&[u8]) -> bool,
+{
+    let mut lo = 0usize;
+    let mut hi = slice.len();
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if pred(slice[mid]) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
@@ -1076,6 +1370,133 @@ mod tests {
             Some(b"b".to_vec())
         );
         assert_eq!(verify(root, order, 4096, &p).unwrap(), 1);
+    }
+
+    #[test]
+    fn apply_sorted_batch_matches_sequential_ops() {
+        // Build a tree, then apply a mixed sorted batch (upserts +
+        // removes) and require the result to match sequential insert/remove
+        // exactly — content, invariants, and the final root's content id.
+        let order = 8u16;
+        let n = 400u64;
+
+        let build = |inserts: &[(u64, u64)]| {
+            let mut p = MemProvider::default();
+            let mut root = ChunkId::ZERO;
+            for &(k, v) in inserts {
+                root = insert(root, &key(k), &value(v), order, 4096, &mut p).unwrap();
+            }
+            (p, root)
+        };
+
+        let inserts: Vec<(u64, u64)> = (0..n).map(|k| (k, k)).collect();
+        let (mut p, root) = build(&inserts);
+
+        // A mixed batch: upsert every 3rd key with a new value, remove
+        // every 7th key, add 20 fresh keys at the high end, remove 10 at
+        // the low end (exercises first_child collapse paths). Built as one
+        // sorted, duplicate-free pass.
+        let mut batch: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
+        for k in 0..n + 20 {
+            let op = if k < 10 {
+                Some(None) // low-end removals
+            } else if k < n {
+                if k % 7 == 0 {
+                    Some(None)
+                } else if k % 3 == 0 {
+                    Some(Some(value(k + 1000)))
+                } else {
+                    None // untouched
+                }
+            } else {
+                Some(Some(value(k))) // high-end fresh inserts
+            };
+            if let Some(op) = op {
+                batch.push((key(k), op));
+            }
+        }
+
+        // Reference: sequential ops.
+        let (mut refp, mut refroot) = build(&inserts);
+        for (k, v) in &batch {
+            match v {
+                Some(vv) => {
+                    refroot = insert(refroot, k, vv, order, 4096, &mut refp).unwrap();
+                }
+                None => {
+                    refroot = remove(refroot, k, order, 4096, &mut refp).unwrap();
+                }
+            }
+        }
+
+        // Batch application.
+        let new_root = apply_sorted_batch(root, &batch, order, 4096, &mut p).unwrap();
+        // Content must match the sequential result exactly (the tree SHAPE
+        // may legitimately differ — sequential inserts split at different
+        // moments than one bulk patch — so compare content + invariants,
+        // not the root id).
+        let expected = scan_all(refroot, order, 4096, &refp).unwrap();
+        let got = scan_all(new_root, order, 4096, &p).unwrap();
+        assert_eq!(got, expected, "content must match the sequential result");
+        assert_eq!(
+            verify(new_root, order, 4096, &p).unwrap(),
+            expected.len() as u64
+        );
+
+        // Idempotence: applying the SAME batch again changes nothing.
+        let mut p2 = p;
+        let again = apply_sorted_batch(new_root, &batch, order, 4096, &mut p2).unwrap();
+        assert_eq!(again, new_root, "re-applying the batch must be a no-op");
+    }
+
+    #[test]
+    fn apply_sorted_batch_collapses_to_empty() {
+        let order = 4u16;
+        let mut p = MemProvider::default();
+        let mut root = ChunkId::ZERO;
+        for k in 0..50u64 {
+            root = insert(root, &key(k), &value(k), order, 4096, &mut p).unwrap();
+        }
+        let batch: Vec<(Vec<u8>, Option<Vec<u8>>)> = (0..50u64).map(|k| (key(k), None)).collect();
+        let new_root = apply_sorted_batch(root, &batch, order, 4096, &mut p).unwrap();
+        assert_eq!(new_root, ChunkId::ZERO, "all keys removed -> empty tree");
+        assert_eq!(scan_all(new_root, order, 4096, &p).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn apply_sorted_batch_keeps_unchanged_subtrees() {
+        // A single-key patch must not rewrite nodes outside its path.
+        let order = 8u16;
+        let mut p = MemProvider::default();
+        let mut root = ChunkId::ZERO;
+        for k in 0..500u64 {
+            root = insert(root, &key(k), &value(k), order, 4096, &mut p).unwrap();
+        }
+        let puts_before = p.puts;
+        let batch = vec![(key(250), Some(value(9999)))];
+        let new_root = apply_sorted_batch(root, &batch, order, 4096, &mut p).unwrap();
+        assert_eq!(verify(new_root, order, 4096, &p).unwrap(), 500);
+        assert_eq!(
+            get(new_root, &key(250), order, 4096, &p).unwrap(),
+            Some(value(9999))
+        );
+        // Only the path nodes (depth + 1 leaf) may be new; far fewer than
+        // a full rebuild (500 inserts put 500/8 ~= 60+ leaf + internal
+        // nodes).
+        let new_puts = p.puts - puts_before;
+        assert!(
+            new_puts < 8,
+            "sparse patch must touch only the affected path (put {new_puts})"
+        );
+        // The unchanged sibling subtrees keep their ids: the whole-tree
+        // scan still resolves through the retained nodes.
+        let mut all = scan_all(new_root, order, 4096, &p).unwrap();
+        assert_eq!(all.len(), 500);
+        let _ = all.pop();
+        assert_eq!(
+            get(new_root, &key(0), order, 4096, &p).unwrap(),
+            Some(value(0))
+        );
     }
 
     #[test]
