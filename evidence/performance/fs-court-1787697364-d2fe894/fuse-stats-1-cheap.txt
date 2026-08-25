@@ -1,0 +1,40 @@
+fuse requests: max concurrency 1
+  write        n=     309 total=    171.75 ms   p50=    541.2 p95=   1039.8 p99=   1442.2 us
+  read         n=    1352 total=    102.62 ms   p50=     70.5 p95=    121.8 p99=    186.5 us
+  setattr      n=     292 total=      2.36 ms   p50=      7.6 p95=     13.5 p99=     16.0 us
+  getxattr     n=     650 total=      2.06 ms   p50=      2.3 p95=      9.1 p99=     10.9 us
+  getattr      n=     643 total=      1.63 ms   p50=      2.0 p95=      4.0 p99=     12.2 us
+  create       n=     139 total=      1.45 ms   p50=      9.9 p95=     14.2 p99=     29.4 us
+  opendir      n=      74 total=      1.25 ms   p50=      2.0 p95=      9.3 p99=     20.3 us
+  lookup       n=     317 total=      0.86 ms   p50=      2.0 p95=      3.7 p99=     18.3 us
+  readdir      n=     144 total=      0.80 ms   p50=      4.4 p95=      9.7 p99=     19.5 us
+  open         n=     278 total=      0.66 ms   p50=      1.9 p95=      3.5 p99=     11.5 us
+  mkdir        n=      18 total=      0.40 ms   p50=     11.3 p95=     15.5 p99=    214.3 us
+  flush        n=     423 total=      0.22 ms   p50=      0.5 p95=      1.0 p99=      1.7 us
+  release      n=     417 total=      0.20 ms   p50=      0.4 p95=      1.1 p99=      1.9 us
+  releasedir   n=      74 total=      0.04 ms   p50=      0.4 p95=      0.9 p99=      1.5 us
+  statfs       n=       2 total=      0.02 ms   p50=     11.4 p95=     11.4 p99=     11.4 us
+  init         n=       1 total=      0.00 ms   p50=      0.1 p95=      0.1 p99=      0.1 us
+write request size histogram:
+         <4K: 51
+       4-16K: 63
+      16-64K: 19
+     64-256K: 3
+     256K-1M: 173
+         =1M: 0
+         >1M: 0
+
+phase timings (cumulative ms, per-sample us p50/p95/p99):
+  search                       n=    2206 total=    142.80 ms   p50=     52.8 p95=    107.3 p99=    404.1 us
+  search_zero_fill             n=    2206 total=     36.25 ms   p50=      0.0 p95=     48.3 p99=     55.2 us
+  epoch_append                 n=     758 total=     33.15 ms   p50=      2.5 p95=    353.0 p99=    390.4 us
+  validation                   n=    2206 total=     23.46 ms   p50=      9.1 p95=     19.8 p99=     50.2 us
+  search_sequence_rans         n=     140 total=     16.54 ms   p50=     68.0 p95=    527.8 p99=    634.1 us
+  hash                         n=    2206 total=     11.83 ms   p50=      5.4 p95=      5.7 p99=      8.9 us
+  search_byte_rans             n=     140 total=      7.40 ms   p50=     31.6 p95=    218.8 p99=    257.3 us
+  search_dedup                 n=    2206 total=      4.66 ms   p50=      0.3 p95=      5.3 p99=      9.3 us
+  search_sequence_dict         n=       4 total=      3.18 ms   p50=    871.8 p95=    993.1 p99=    993.1 us
+  search_configurational       n=     140 total=      3.07 ms   p50=     10.5 p95=     85.6 p99=    135.2 us
+  append_flush                 n=       1 total=      0.53 ms   p50=    526.0 p95=    526.0 p99=    526.0 us
+  prune                        n=       1 total=      0.52 ms   p50=    519.4 p95=    519.4 p99=    519.4 us
+  superblock                   n=       1 total=      0.01 ms   p50=     11.2 p95=     11.2 p99=     11.2 us

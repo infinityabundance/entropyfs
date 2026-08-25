@@ -1,0 +1,22 @@
+fuse requests: max concurrency 1
+  read         n=     676 total=     86.86 ms   p50=    139.6 p95=    175.6 p99=    212.4 us
+  readdir      n=      72 total=      3.76 ms   p50=     50.9 p95=     57.6 p99=     72.4 us
+  lookup       n=     157 total=      2.84 ms   p50=     17.2 p95=     20.6 p99=     36.2 us
+  getattr      n=     173 total=      1.58 ms   p50=      8.4 p95=     10.8 p99=     18.9 us
+  open         n=     139 total=      1.26 ms   p50=      8.4 p95=     11.9 p99=     20.9 us
+  opendir      n=      37 total=      0.33 ms   p50=      8.1 p95=     13.8 p99=     17.4 us
+  flush        n=     142 total=      0.07 ms   p50=      0.5 p95=      0.8 p99=      1.5 us
+  release      n=     139 total=      0.06 ms   p50=      0.4 p95=      0.7 p99=      1.4 us
+  releasedir   n=      37 total=      0.02 ms   p50=      0.4 p95=      1.2 p99=      1.6 us
+  statfs       n=       1 total=      0.01 ms   p50=     11.2 p95=     11.2 p99=     11.2 us
+  init         n=       1 total=      0.00 ms   p50=      0.1 p95=      0.1 p99=      0.1 us
+write request size histogram:
+         <4K: 0
+       4-16K: 0
+      16-64K: 0
+     64-256K: 0
+     256K-1M: 0
+         =1M: 0
+         >1M: 0
+
+phase timings (cumulative ms, per-sample us p50/p95/p99):
