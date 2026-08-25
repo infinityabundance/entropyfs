@@ -148,6 +148,9 @@ impl<'a> Tx<'a> {
 
     /// Commit: append records, sync, flip the superblock (ADR-0008).
     pub fn commit(mut self, hooks: &CrashHooks) -> Result<(), StoreError> {
+        // 0. ENOSPC guard: refuse before staging anything (the watermark
+        //    keeps the GC emergency reserve untouched).
+        self.store.ensure_commit_space(&self.records)?;
         // 1. finalize the root and stage its record WITH the other records
         //    so the whole commit is one flush (the superblock must never
         //    reference a root record that is not durable).

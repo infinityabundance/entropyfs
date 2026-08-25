@@ -60,8 +60,8 @@ pub enum StoreError {
     Config(String),
     /// Resource limit exceeded.
     Limit(String),
-    /// Store is full (ENOSPC equivalent).
-    Full,
+    /// Store is full (ENOSPC equivalent), with context.
+    Full(String),
     /// I/O failure.
     Io(String),
     /// Commit protocol violation (crash-court simulation).
@@ -119,6 +119,11 @@ pub struct StoreConfig {
     pub limits: Limits,
     /// Cost policy.
     pub policy: Policy,
+    /// Capacity override (tests/embedded): caps the reported physical
+    /// capacity below the real device so watermark/ENOSPC logic can be
+    /// exercised deterministically. Never exceeds the physical device
+    /// (honesty rule, §22).
+    pub capacity_override: Option<u64>,
 }
 
 impl Default for StoreConfig {
@@ -131,6 +136,7 @@ impl Default for StoreConfig {
             max_records_per_segment: 10_000_000,
             limits: Limits::default(),
             policy: Policy::balanced(),
+            capacity_override: None,
         }
     }
 }
@@ -367,6 +373,48 @@ impl Store {
     fn open_segment(&mut self, seq: u64) -> Result<(), StoreError> {
         let w = SegmentWriter::open(&self.dir, seq)?;
         self.current_segment = Some(w);
+        Ok(())
+    }
+
+    /// ENOSPC guard: refuse a commit before staging anything when the
+    /// projected physical usage would exceed the high watermark (§21/§22).
+    /// The watermark leaves the GC emergency reserve untouched so recovery
+    /// never needs space it cannot have.
+    pub(crate) fn ensure_commit_space(
+        &self,
+        records: &[crate::store::transaction::PendingRecord],
+    ) -> Result<(), StoreError> {
+        let capacity = self.physical_capacity();
+        if capacity == 0 {
+            // No statvfs info (unusual); do not refuse writes on that basis
+            // alone — the segment append still bounds them.
+            return Ok(());
+        }
+        let mut projected = self.physical_used();
+        if let Some(w) = &self.current_segment {
+            projected = projected.saturating_add(w.buffered_len());
+        }
+        for pending in records {
+            let flags = if pending.materialized_len.is_some() {
+                FLAG_HAS_MATERIALIZED_LEN
+            } else {
+                0
+            };
+            let encoded = encode_record(
+                pending.tag,
+                flags,
+                pending.materialized_len,
+                &pending.payload,
+            );
+            projected = projected.saturating_add(encoded.len() as u64);
+        }
+        let watermark = (capacity as f64 * self.config.gc_high_watermark) as u64;
+        if projected > watermark {
+            return Err(StoreError::Full(format!(
+                "commit would use {projected} of {capacity} bytes (watermark {watermark}); \
+                 delete data or run GC first"
+            )));
+        }
         Ok(())
     }
 
@@ -840,18 +888,17 @@ impl Store {
         self.read_file(ino, offset, chunk_class)
     }
 
-    /// Physical capacity of the backing directory (statfs basis).
+    /// Physical capacity of the backing store (statfs basis; capped by
+    /// `capacity_override` when set — never above the real device, §22).
     pub fn physical_capacity(&self) -> u64 {
-        // Best-effort statvfs of the store dir.
-        let md = std::fs::metadata(&self.dir);
-        if let Ok(md) = md {
-            let _ = md;
-        }
-        // Use the segments dir's filesystem via statvfs through rustix.
         use rustix::fs::statvfs;
-        match statvfs(&self.dir) {
+        let physical = match statvfs(&self.dir) {
             Ok(s) => s.f_blocks.saturating_mul(s.f_frsize),
             Err(_) => 0,
+        };
+        match self.config.capacity_override {
+            Some(o) => o.min(physical),
+            None => physical,
         }
     }
 

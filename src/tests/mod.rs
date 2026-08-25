@@ -6,6 +6,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod crash_recovery;
+pub mod enospc;
+pub mod fsck;
 pub mod helpers;
 pub mod persistent_store;
 pub mod rank_roundtrip;
