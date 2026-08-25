@@ -47,7 +47,7 @@ physical storage (RAW fallback) — that is a success condition, not a failure.
 | 4 | Entropy-native optimization: DSFB-guided search (P0-P5 channels, trust-ordered budget), exact dedup, base+residual with rebase-on-write, background optimizer (CAS-protected, resumable) + idle daemon worker, ablation benchmarks | ✅ implemented (ablation table + live H2 drift verified) |
 | 5 | Snapshots, GC, robustness: snapshot create/list/delete/restore (live verified), GC pins snapshot roots, chunk-index reachability fix (deleted data reclaimable), near-full GC recovery from the emergency reserve, shrink-write extent fix, snapshot crash-court matrix | ✅ implemented (live + fsck verified) |
 | 6 | Performance: deferred durability (logical commit + fsync barrier; process-crash safe, power-loss falls back to the newest root record), search fast path (P0 from RMW bytes, decisive-win early exit, rANS-coded residuals), oversized-descriptor validation fix (SIGBUS root cause), fsck corrupt-descriptor resilience, multi-threaded FUSE verified. Measured: 4K writes 35→47 MB/s, 1M writes 601→721 MB/s, bindgen build 4m14s→1m13s | ✅ implemented (live verified) |
-| 7 | Experimental ublk frontend (internal module) | ⏳ |
+| 7 | Experimental ublk frontend: `src/ublk/` over the same engine — BlockStore adapter (4K blocks, read/write/flush/discard via the entropy engine, device = hidden store file), libublk target glue + `ublk run` CLI (root + `ublk_drv` required), `ublk bench` (kernel-free), unit tests, ADR-0020 | ✅ implemented (adapter live-verified; kernel binding needs root) |
 
 ## One crate
 

@@ -55,5 +55,9 @@ pub mod evidence;
 // Narrowly isolated Linux-specific machinery.
 pub mod platform;
 
+// Experimental ublk block-device frontend (Phase 7; requires root +
+// CONFIG_BLK_DEV_UBLK to run; the BlockStore adapter is kernel-free).
+pub mod ublk;
+
 #[cfg(test)]
 mod tests;

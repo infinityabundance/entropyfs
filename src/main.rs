@@ -12,7 +12,7 @@ mod cli;
 // The binary re-exports the library modules the CLI addresses as
 // `crate::…` (bin + lib share the crate name `entropyfs`).
 #[allow(unused_imports)]
-use entropyfs::{core, dsfb, entropy, format, fsck, fuse, optimizer, platform, rans, store};
+use entropyfs::{core, dsfb, entropy, format, fsck, fuse, optimizer, platform, rans, store, ublk};
 
 /// The entropy-native Linux filesystem.
 #[derive(Parser)]
@@ -60,6 +60,19 @@ enum Command {
     Benchmark(cli::benchmark::BenchmarkArgs),
     /// Compiled-in capabilities and environment.
     Capabilities,
+    /// Experimental ublk block-device frontend (Phase 7).
+    Ublk {
+        #[command(subcommand)]
+        action: UblkAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum UblkAction {
+    /// Register a ublk device backed by the entropy store (root required).
+    Run(cli::ublk::UblkRunArgs),
+    /// Benchmark the block adapter directly (no kernel).
+    Bench(cli::ublk::UblkBenchArgs),
 }
 
 #[derive(Subcommand)]
@@ -93,6 +106,10 @@ fn main() {
         Command::Optimize(a) => cli::optimize::run(a),
         Command::Benchmark(a) => cli::benchmark::run(a),
         Command::Capabilities => cli::capabilities::run(),
+        Command::Ublk { action } => match action {
+            UblkAction::Run(a) => cli::ublk::run(a),
+            UblkAction::Bench(a) => cli::ublk::bench(a),
+        },
     };
     if let Err(e) = result {
         eprintln!("entropyfs: {e}");

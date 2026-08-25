@@ -23,3 +23,4 @@ Architecture Decision Records. Statuses: `accepted`, `superseded`, `proposed`.
 | [0017](0017-dependencies.md) | Intentional dependency posture; no database, no tokio | accepted |
 | [0018](0018-statfs.md) | Conservative `statfs`; opt-in logical overcommit | accepted |
 | [0019](0019-kernel-cache-invalidation.md) | FUSE kernel-cache invalidation from a dedicated notifier thread | accepted |
+| [0020](0020-ublk-frontend.md) | Experimental ublk block frontend over the same storage engine | accepted |

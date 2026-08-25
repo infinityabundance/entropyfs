@@ -15,4 +15,5 @@ pub mod mount;
 pub mod optimize;
 pub mod snapshot;
 pub mod status;
+pub mod ublk;
 pub mod unmount;
