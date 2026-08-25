@@ -62,5 +62,14 @@ pub fn run(args: &StatusArgs) -> Result<(), String> {
         "gc reclaimable: {} bytes ({} objects)",
         report.leaked_bytes, report.leaked_objects
     );
+    let dsfb = store.dsfb_stats();
+    println!(
+        "dsfb:           {} chunks tracked, {} steps, {} drift, {} slew, {} narrowed",
+        dsfb.tracked_chunks,
+        dsfb.steps,
+        dsfb.drift_events,
+        dsfb.slew_events,
+        dsfb.narrowed_searches
+    );
     Ok(())
 }

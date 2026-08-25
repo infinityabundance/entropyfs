@@ -109,14 +109,22 @@ fn spawn_notifier(notifier: Arc<Mutex<Option<Notifier>>>) -> mpsc::SyncSender<No
 
 /// Shared filesystem state.
 pub struct EntropyFs {
-    /// The store (single write coordinator).
-    store: Mutex<Store>,
+    /// The store (single write coordinator), shared with the background
+    /// optimizer worker (which only takes it when idle).
+    store: Arc<Mutex<Store>>,
     /// Open file handles: fh → state.
     handles: Mutex<HashMap<u64, OpenFile>>,
     /// Advisory POSIX record locks.
     locks: Mutex<LockTable>,
     /// Next handle number.
     next_handle: std::sync::atomic::AtomicU64,
+    /// Operation counter (any store lock = one op); the background
+    /// optimizer uses it to detect idle periods.
+    ops: Arc<std::sync::atomic::AtomicU64>,
+    /// Set when the filesystem instance is dropped; the background
+    /// optimizer worker exits on it (the store lock file must be released
+    /// when the session ends).
+    worker_stop: Arc<std::sync::atomic::AtomicBool>,
     /// Kernel invalidation queue (see `NotifyReq`).
     notify_tx: mpsc::SyncSender<NotifyReq>,
     /// Notifier handle slot, seeded by the mount once the session exists
@@ -127,17 +135,40 @@ pub struct EntropyFs {
 
 impl EntropyFs {
     /// Wrap a store into a filesystem.
-    pub fn new(store: Store) -> Self {
+    pub fn new(store: Arc<Mutex<Store>>) -> Self {
         let notifier = Arc::new(Mutex::new(None));
         let notify_tx = spawn_notifier(Arc::clone(&notifier));
         Self {
-            store: Mutex::new(store),
+            store,
             handles: Mutex::new(HashMap::new()),
             locks: Mutex::new(LockTable::new()),
             next_handle: std::sync::atomic::AtomicU64::new(1),
+            ops: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            worker_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             notify_tx,
             notifier,
         }
+    }
+
+    /// The op counter (for the background optimizer's idle detection).
+    pub fn ops(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        Arc::clone(&self.ops)
+    }
+
+    /// The shared store (for the background optimizer worker).
+    pub fn shared_store(&self) -> Arc<Mutex<Store>> {
+        Arc::clone(&self.store)
+    }
+
+    /// The worker stop flag (set when this instance drops).
+    pub fn worker_stop(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.worker_stop)
+    }
+
+    /// Lock the store.
+    fn store(&self) -> MutexGuard<'_, Store> {
+        self.ops.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.store.lock().expect("store mutex poisoned")
     }
 
     /// The notifier slot, for the mount to seed (§24).
@@ -171,11 +202,6 @@ impl EntropyFs {
                 // shutting down; also safe.
             }
         }
-    }
-
-    /// Lock the store.
-    fn store(&self) -> MutexGuard<'_, Store> {
-        self.store.lock().expect("store mutex poisoned")
     }
 
     /// Look up an inode's attributes.
@@ -229,6 +255,15 @@ const ENTRY_TTL: Duration = Duration::from_secs(1);
 
 fn inon(v: INodeNo) -> u64 {
     v.0
+}
+
+impl Drop for EntropyFs {
+    fn drop(&mut self) {
+        // Tell the background optimizer worker to exit so the store's
+        // advisory lock is released when the session ends.
+        self.worker_stop
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl Filesystem for EntropyFs {

@@ -50,10 +50,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Ctrl-C handling for the mount daemon (small, standard; no tokio).
 ctrlc = "3"
+# Isolated scratch stores for benchmarks and tests (never the host filesystem).
+tempfile = "3"
 
 [dev-dependencies]
 proptest = "1"  # property tests: rank/unrank round trips, materialization, store invariants
-tempfile = "3"  # isolated scratch stores for tests (never the host filesystem)
 
 [profile.release]
 lto = "thin"

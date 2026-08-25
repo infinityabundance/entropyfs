@@ -146,18 +146,23 @@ impl StorageObserver {
     /// Feed one write-observation for a chunk. `measurements` maps each
     /// evaluated channel to its bounded measurement; unevaluated channels
     /// are fed 0.0 (no evidence) so evaluated channels dominate trust.
+    /// `outcome_quality` is the quality of the winning representation
+    /// (1.0 for a perfect structural/generated win, the channel's
+    /// measurement for base/rANS/RAW-driven wins); the regime tracker
+    /// consumes it so structural wins never look like a regime break.
     pub fn observe(
         &mut self,
         key: ChunkKey,
         measurements: &[(Channel, f64)],
         winner: Channel,
+        outcome_quality: f64,
     ) -> Regime {
         self.stats.steps += 1;
         let mut m = [0.0f64; 8];
         for &(c, v) in measurements {
             m[c as usize] = v.clamp(0.0, 1.0);
         }
-        let winner_measurement = m[winner as usize];
+        let winner_measurement = outcome_quality.clamp(0.0, 1.0);
         let entry = self.chunks.entry(key).or_insert_with(|| ChunkObserver {
             inner: dsfb::DsfbObserver::new(self.params.dsfb_params(), 8),
             tracker: MeasurementTracker::default(),
@@ -287,7 +292,7 @@ mod tests {
         let mut regime = Regime::Unknown;
         for _ in 0..50 {
             // channel P0 predicts perfectly every time
-            regime = obs.observe(k, &[(Channel::PrevVersion, 1.0)], Channel::PrevVersion);
+            regime = obs.observe(k, &[(Channel::PrevVersion, 1.0)], Channel::PrevVersion, 1.0);
         }
         assert_eq!(regime, Regime::Stable);
         // P0 must dominate trust (relative ordering is what matters).
@@ -304,10 +309,10 @@ mod tests {
         let k = key(2, 0);
         // stable for a while, then a violent regime break
         for _ in 0..10 {
-            obs.observe(k, &[(Channel::PrevVersion, 1.0)], Channel::PrevVersion);
+            obs.observe(k, &[(Channel::PrevVersion, 1.0)], Channel::PrevVersion, 1.0);
         }
         assert_eq!(
-            obs.observe(k, &[(Channel::PrevVersion, 0.0)], Channel::Raw),
+            obs.observe(k, &[(Channel::PrevVersion, 0.0)], Channel::Raw, 0.0),
             Regime::Slew
         );
         // The plan during the slew window is Broad.
@@ -316,7 +321,7 @@ mod tests {
         // After the window expires the tracker re-baselines; search must
         // not snap back to Narrow while the new baseline is unstable.
         for _ in 0..20 {
-            obs.observe(k, &[(Channel::PrevVersion, 0.0)], Channel::Raw);
+            obs.observe(k, &[(Channel::PrevVersion, 0.0)], Channel::Raw, 0.5);
         }
         let final_plan = obs.plan(&k);
         assert_ne!(final_plan.strategy, SearchStrategy::Narrow);
@@ -330,7 +335,7 @@ mod tests {
         // slow degradation: measurement drifts down gently
         let mut v = 1.0f64;
         for _ in 0..40 {
-            obs.observe(k, &[(Channel::PrevVersion, v)], Channel::PrevVersion);
+            obs.observe(k, &[(Channel::PrevVersion, v)], Channel::PrevVersion, v);
             v = (v - 0.01).max(0.8);
         }
         assert!(obs.stats.drift_events > 0);
@@ -340,7 +345,7 @@ mod tests {
     fn eviction_bounds_state() {
         let mut obs = StorageObserver::default();
         for i in 0..100 {
-            obs.observe(key(i, 0), &[], Channel::Raw);
+            obs.observe(key(i, 0), &[], Channel::Raw, 0.5);
         }
         assert_eq!(obs.len(), 100);
         for _ in 0..100 {

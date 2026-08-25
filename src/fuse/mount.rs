@@ -59,6 +59,9 @@ pub struct MountParams {
     pub threads: usize,
     /// FUSE filesystem name shown in mtab.
     pub fs_name: String,
+    /// Run the background optimizer worker while mounted (§16; disabled
+    /// with `--no-background-optimize`).
+    pub background_optimize: bool,
 }
 
 /// Preflight: validate the environment and the mount configuration (§47).
@@ -101,7 +104,7 @@ pub fn preflight(params: &MountParams) -> Result<(), MountError> {
 /// Mount the store and return a background session (drop to unmount).
 pub fn mount(params: &MountParams, store: Store) -> Result<fuser::BackgroundSession, MountError> {
     preflight(params)?;
-    let fs = EntropyFs::new(store);
+    let fs = EntropyFs::new(std::sync::Arc::new(std::sync::Mutex::new(store)));
     mount_fs(fs, params)
 }
 
@@ -135,10 +138,25 @@ pub fn mount_fs(
     // (§24): the filesystem needs it to drop stale dentries after
     // unlink/rmdir/rename.
     let notifier_slot = fs.notifier_slot();
+    // Capture the worker inputs before `fs` moves into the session.
+    let worker_store = fs.shared_store();
+    let worker_ops = fs.ops();
+    let worker_stop = fs.worker_stop();
     let session = spawn_mount(fs, &params.mountpoint, &config)
         .map_err(|e| MountError::Mount(e.to_string()))?;
     if let Ok(mut slot) = notifier_slot.lock() {
         *slot = Some(session.notifier());
+    }
+    // Background densification while idle (§16, §44-H4). The worker exits
+    // when the session drops the filesystem (worker_stop) and never takes
+    // the store while a request is in flight (try_lock + idle gate).
+    if params.background_optimize {
+        let _ = crate::optimizer::background::spawn_background_worker(
+            worker_store,
+            worker_ops,
+            worker_stop,
+            crate::optimizer::policy::OptimizeOptions::default(),
+        );
     }
     Ok(session)
 }

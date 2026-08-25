@@ -35,6 +35,10 @@ pub struct MountArgs {
     /// FUSE filesystem name.
     #[arg(long, default_value = "entropyfs")]
     pub fs_name: String,
+    /// Disable the background optimizer worker (densifies cold data while
+    /// the mount is idle; default on).
+    #[arg(long)]
+    pub no_background_optimize: bool,
 }
 
 /// Run the mount daemon.
@@ -48,6 +52,7 @@ pub fn run(args: &MountArgs) -> Result<(), String> {
         allow_other: args.allow_other,
         threads: args.threads,
         fs_name: args.fs_name.clone(),
+        background_optimize: !args.no_background_optimize,
     };
     let session = do_mount(&params, store).map_err(|e| e.to_string())?;
     println!(

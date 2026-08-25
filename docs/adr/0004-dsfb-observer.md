@@ -50,3 +50,9 @@ reduce trust, broaden candidate search, establish a new baseline.
   ablation science).
 - `src/dsfb/` depends on `core` types (evidence features) but `core` never
   depends on `dsfb`.
+- Phase 4 wiring (implemented): the store holds one `StorageObserver`
+  (bounded, evicted at 100k chunks); the guided search
+  (`src/optimizer/search.rs`) feeds per-channel measurements and consumes
+  the trust-ordered, budget-bounded plan. The observer is in-memory only —
+  unmounting and remounting resets it, which never affects decodability.
+  See `docs/theory/dsfb-selection.md` §7.

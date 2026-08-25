@@ -150,6 +150,10 @@ impl Default for StoreConfig {
 /// B-tree fanout (order).
 pub const BTREE_ORDER: u16 = 64;
 
+/// Maximum tracked DSFB chunks before eviction (performance-only state;
+/// dropping it never affects bytes).
+pub const DSFB_MAX_CHUNKS: usize = 100_000;
+
 /// One extent update within a file-region commit.
 #[derive(Debug, Clone)]
 pub struct ExtentUpdate {
@@ -188,6 +192,10 @@ pub struct Store {
     superblock_path: PathBuf,
     /// Bounded decoded-model cache (performance only).
     model_cache: std::sync::Mutex<crate::cache::model::ModelCache>,
+    /// DSFB storage observer (performance-only; zero decoding authority).
+    /// Bounded by `DSFB_MAX_CHUNKS`; dropping it affects only search
+    /// ordering, never bytes (ADR-0004).
+    dsfb: crate::dsfb::observer::StorageObserver,
 }
 
 impl std::fmt::Debug for Store {
@@ -243,6 +251,7 @@ impl Store {
             _lock: lock,
             superblock_path: sb_path,
             model_cache: std::sync::Mutex::new(crate::cache::model::ModelCache::new(64)),
+            dsfb: crate::dsfb::observer::StorageObserver::default(),
         };
         store.open_segment(0)?;
         // Create the root directory inode (ino 1) and commit the initial
@@ -310,6 +319,7 @@ impl Store {
             _lock: lock,
             superblock_path: sb_path,
             model_cache: std::sync::Mutex::new(crate::cache::model::ModelCache::new(64)),
+            dsfb: crate::dsfb::observer::StorageObserver::default(),
         };
         store.stats.physical_capacity = store.physical_capacity();
         store.open_segment(sb.segment_seq)?;
@@ -376,6 +386,108 @@ impl Store {
     /// Feature bits in use.
     pub fn features_in_use(&self) -> u64 {
         self.features_in_use
+    }
+
+    /// The DSFB search plan for a chunk (trust-ordered, budget-bounded).
+    pub fn dsfb_plan(
+        &self,
+        key: &crate::dsfb::features::ChunkKey,
+    ) -> crate::dsfb::selection::SearchPlan {
+        self.dsfb.plan(key)
+    }
+
+    /// DSFB trust for one channel of a chunk.
+    pub fn dsfb_trust(
+        &self,
+        key: &crate::dsfb::features::ChunkKey,
+        channel: crate::dsfb::features::Channel,
+    ) -> f64 {
+        self.dsfb.trust(key, channel)
+    }
+
+    /// Feed the DSFB observer (performance-only state). Bounded eviction
+    /// keeps the observer from growing without limit.
+    pub fn dsfb_observe(
+        &mut self,
+        key: crate::dsfb::features::ChunkKey,
+        measurements: &[(crate::dsfb::features::Channel, f64)],
+        winner: crate::dsfb::features::Channel,
+        outcome_quality: f64,
+    ) -> crate::dsfb::drift::Regime {
+        let regime = self
+            .dsfb
+            .observe(key, measurements, winner, outcome_quality);
+        if self.dsfb.len() > DSFB_MAX_CHUNKS {
+            self.dsfb.evict_one();
+        }
+        regime
+    }
+
+    /// Observer statistics (for `status`).
+    pub fn dsfb_stats(&self) -> crate::dsfb::observer::ObserverStats {
+        self.dsfb.stats
+    }
+
+    /// Materialize the chunk at `offset` of `ino` as a candidate base, but
+    /// only when its content id resolves in the chunk index (a future
+    /// reader resolves `BaseResidual.base` through the chunk index, so an
+    /// unresolvable base would be undecodable). Depth reflects the base
+    /// chunk's own reference depth so chains are cost-accounted.
+    pub fn base_chunk_at(
+        &self,
+        ino: u64,
+        offset: u64,
+        len: usize,
+    ) -> Result<Option<crate::core::candidate::BaseChunk>, StoreError> {
+        if len == 0 {
+            return Ok(None);
+        }
+        let bytes = self.read_file(ino, offset, len as u64)?;
+        if bytes.len() != len {
+            return Ok(None); // shorter than requested: hole/tail at EOF
+        }
+        let id = crate::core::extent::ChunkId::of(&bytes);
+        let Some(desc_bytes) = self.chunk_descriptor(&id)? else {
+            return Ok(None);
+        };
+        let limits = self.config.limits;
+        let desc = match crate::format::descriptor::decode(
+            &desc_bytes,
+            limits.max_descriptor_bytes,
+            limits.max_inline_bytes,
+            limits.max_palette,
+            limits.max_period,
+            limits.max_chunk_size,
+        ) {
+            Ok(d) => d,
+            Err(_) => return Ok(None),
+        };
+        let depth = crate::optimizer::rebase::chain_depth(self, &desc);
+        Ok(Some(crate::core::candidate::BaseChunk { id, bytes, depth }))
+    }
+
+    /// The current descriptor bytes of the extent covering `offset` of
+    /// `ino` (None when the region is a hole). Used as the CAS token by
+    /// the background optimizer (§25).
+    pub fn extent_descriptor(&self, ino: u64, offset: u64) -> Result<Option<Vec<u8>>, StoreError> {
+        let inode = self
+            .get_inode(ino)?
+            .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
+        let extent_root = match inode.data {
+            InodeData::File { extent_root } => extent_root,
+            _ => return Err(StoreError::Invariant("not a regular file".into())),
+        };
+        if extent_root.is_zero() {
+            return Ok(None);
+        }
+        let entry = crate::store::extent_tree::covering(
+            extent_root,
+            offset,
+            BTREE_ORDER,
+            self.config.limits.max_fanout,
+            self,
+        )?;
+        Ok(entry.map(|(_, bytes)| bytes))
     }
 
     // ------------------------------------------------------------------
@@ -677,6 +789,16 @@ impl Store {
     ) -> Result<(), StoreError> {
         if descriptor.validate(&tx.store.config.limits).is_err() {
             return Err(StoreError::Descriptor("invalid descriptor".into()));
+        }
+        // The chunk index must never resolve a content id to a descriptor
+        // that references the same content id: `EXACT_REF{target: cid}`
+        // inserted for `cid` loops forever at decode (the self-aliasing
+        // extent stays valid — it resolves through the retained terminal
+        // entry).
+        if let Representation::ExactRef { target, .. } = descriptor {
+            if *target == *cid {
+                return Ok(());
+            }
         }
         // Track incompat features.
         let mut features = tx.store.features_in_use;
@@ -1752,11 +1874,26 @@ impl Store {
     /// Write `data` at `offset` of file `ino` (chunk-aligned
     /// read-modify-write; one transaction; extends the file size).
     pub fn write_region(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<(), StoreError> {
+        self.write_region_with(
+            ino,
+            offset,
+            data,
+            crate::optimizer::policy::OptimizeOptions::default(),
+        )
+    }
+
+    /// Write with explicit optimization options (ablation benchmarks, §43).
+    pub fn write_region_with(
+        &mut self,
+        ino: u64,
+        offset: u64,
+        data: &[u8],
+        options: crate::optimizer::policy::OptimizeOptions,
+    ) -> Result<(), StoreError> {
         if data.is_empty() {
             return Ok(());
         }
         let limits = self.config.limits;
-        let policy = self.config.policy;
         let chunk_class = limits.chunk_class;
         let end = offset.saturating_add(data.len() as u64);
         let first_chunk = offset / chunk_class;
@@ -1799,9 +1936,46 @@ impl Store {
             let chunk_end = chunk_off.saturating_add(chunk_class).min(new_size);
             let chunk_len = (chunk_end - chunk_off) as usize;
             let chunk_bytes = &chunk_bytes[..chunk_len];
-            let cid = crate::core::extent::ChunkId::of(chunk_bytes);
-            let update = Store::encode_chunk(chunk_bytes, chunk_off, cid, &limits, &policy)?;
-            updates.push(update);
+
+            // Phase 4: the guided search (DSFB-ordered, §16). P0 is the
+            // previous version of this chunk (the natural edit base for
+            // versioned data, H2); it is only usable when the old extent
+            // resolves in the chunk index.
+            let mut prev_version = if old_size > chunk_off {
+                self.base_chunk_at(ino, chunk_off, chunk_len)?
+            } else {
+                None
+            };
+            // Rebase-on-write (§11): drift workloads edit the same chunk
+            // repeatedly, and each edit would otherwise nest another
+            // BaseResidual until the depth cap collapses the strategy to
+            // RAW. When the previous version is itself a deep chain,
+            // re-encode it at depth 0 in the same transaction (the flat
+            // extent update lands first; the edit's update replaces it),
+            // so the new base+residual stays shallow and decodable.
+            let mut flatten_updates: Vec<ExtentUpdate> = Vec::new();
+            if let Some(p) = &prev_version {
+                if p.depth >= crate::optimizer::rebase::REBASE_DEPTH_THRESHOLD {
+                    let policy = self.config.policy;
+                    let flat = Store::encode_chunk(&p.bytes, chunk_off, p.id, &limits, &policy)?;
+                    flatten_updates.push(flat);
+                    prev_version = Some(crate::core::candidate::BaseChunk {
+                        id: p.id,
+                        bytes: p.bytes.clone(),
+                        depth: 0,
+                    });
+                }
+            }
+            let ctx = crate::optimizer::search::GuidedContext {
+                ino,
+                offset: chunk_off,
+                target: chunk_bytes,
+                prev_version,
+                mode: crate::optimizer::search::SearchMode::Foreground,
+            };
+            let outcome = crate::optimizer::search::encode_guided(self, &ctx, options)?;
+            updates.extend(flatten_updates);
+            updates.push(outcome.update);
             chunk += 1;
         }
 
@@ -2216,8 +2390,9 @@ impl DecoderContext for Store {
 }
 
 impl Store {
-    /// Internal fetch helper for the DecoderContext impl.
-    fn fetch_object_impl(&self, id: &ChunkId) -> Result<Vec<u8>, MaterializeError> {
+    /// Internal fetch helper for the DecoderContext impl (pub(crate) for
+    /// the optimizer's validation resolver).
+    pub(crate) fn fetch_object_impl(&self, id: &ChunkId) -> Result<Vec<u8>, MaterializeError> {
         self.fetch_object(id)
             .map_err(|e| MaterializeError::Universe(e.to_string()))?
             .ok_or(MaterializeError::MissingObject(*id))

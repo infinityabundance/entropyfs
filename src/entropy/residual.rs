@@ -58,7 +58,11 @@ impl Encoder for BaseResidualEncoder {
                     reference: 32,
                     ..Default::default()
                 };
-                let cost = crate::core::cost::estimate(&rep, &split, 0);
+                let mut cost = crate::core::cost::estimate(&rep, &split, 0);
+                // The candidate's reference depth includes the base's own
+                // chain depth (§15: λ_depth penalizes deep chains; the
+                // decode-time cap is enforced in `materialize`).
+                cost.depth = cost.depth.saturating_add(base.depth);
                 out.push(Candidate {
                     representation: rep,
                     objects: Vec::new(),

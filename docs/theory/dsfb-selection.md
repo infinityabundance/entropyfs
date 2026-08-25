@@ -86,3 +86,46 @@ rANS savings.
 `trust.rs` (trust bookkeeping), `selection.rs` (ordered candidate plan +
 budget). The optimizer (`src/optimizer/`) consumes `Selection` and performs
 the exact-cost evaluation; `core` never imports `dsfb`.
+
+## 7. Phase 4 wiring (implemented)
+
+The guided search (`src/optimizer/search.rs`) is the only place that turns a
+target chunk into a committed representation:
+
+1. **P2 exact dedup** — always first in the write path (§12), verified by
+   materializing the existing chunk and comparing exact bytes. The
+   background optimizer never dedups: a rewrite of the same extent cannot
+   dedup profitably (the aliased chunk-index entry must stay for
+   decodability, so the apparent savings are vacuous).
+2. **Cheap structural families + rANS + RAW** — always evaluated in the
+   foreground (§16).
+3. **P0/P1/P3/P4 bases + P5 universe** — evaluated in DSFB trust order,
+   bounded by the plan budget. Foreground only tries P0 (in hand) plus at
+   most one high-trust extra base; the background pass evaluates the full
+   plan.
+
+Correctness invariants enforced by the search:
+
+- **Validation** (§32): every candidate is materialized and compared
+  byte-exact against the target before it may win; a candidate's own new
+  objects are visible to the validator.
+- **Reference cycles are impossible**: a base whose chain transitively
+  references the target chunk's own content id is rejected
+  (`rebase::chain_contains`) — otherwise two chunks could reference each
+  other and become undecodable.
+- **The chunk index never self-aliases**: `put_chunk_in_tx` refuses to
+  store `EXACT_REF{target: cid}` for `cid` (a self-referencing descriptor
+  loops at decode).
+- **Shallow chains**: `base_chunk_at` reports true chain depth; the
+  encoder skips bases at the depth cap, and `write_region` performs
+  rebase-on-write — when the previous version is itself a deep chain it is
+  flattened to depth 0 in the same transaction (drift workloads stay
+  shallow instead of collapsing to RAW).
+
+Background densification (§16, H4): `src/optimizer/background.rs` runs a
+resumable, bounded pass (`PassCursor`) over file extents with the full
+plan, plus `rebase::flatten_if_deep` for chains at the depth threshold.
+Every rewrite is byte-validated and CAS-checked (§25: the extent must
+still hold the descriptor we read). The mount daemon spawns an idle-only
+worker (`--no-background-optimize` disables it) that runs a bounded slice
+when the store has been silent for 3 s.

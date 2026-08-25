@@ -1,0 +1,19 @@
+ablation: 16 MiB synthetic corpus (text/zeros/low-cardinality/random)
+mode            logical       physical      ratio write MB/s
+full           16777216         994164    16.876x      257.3
+raw            16777216       17776920     0.944x      493.3
+raw-rans       16777216       13585624     1.235x      278.8
+no-dedup       16777216        5139816     3.264x      276.3
+no-base        16777216         994164    16.876x      274.4
+no-config      16777216        1143189    14.676x      255.4
+no-rans        16777216         994164    16.876x      357.6
+no-dsfb        16777216         994164    16.876x      170.8
+
+savings attributable to each component (physical bytes vs full):
+  all structure (RAW alone)       +16782756 bytes (17.881275121609715x)
+  rANS over RAW                   +12591460 bytes (13.665375129254329x)
+  exact dedup                      +4145652 bytes (5.169988050261325x)
+  base+residual channels                 +0 bytes (1x)
+  configurational coding            +149025 bytes (1.1498998153222204x)
+  rANS                                   +0 bytes (1x)
+  DSFB ranking                           +0 bytes (1x)

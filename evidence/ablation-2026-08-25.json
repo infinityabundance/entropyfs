@@ -1,0 +1,31 @@
+{
+  "artifact": "ablation-benchmark",
+  "date": "2026-08-25",
+  "corpus": "synthetic-4-pattern-16MiB (text/zeros/low-cardinality/random, 64 KiB chunks)",
+  "corpus_hash": "deterministic-by-construction (patterns defined in src/cli/benchmark.rs)",
+  "entropyfs_revision": "c1463ce+uncommitted-phase4",
+  "kernel": "7.2.0-1-cachyos",
+  "cpu": "AMD Ryzen 7 9800X3D 8-Core Processor",
+  "mount_config": "unmounted; benchmark CLI on fresh store per mode",
+  "command": "entropyfs benchmark <store> --size-mib 16 --ablation-all",
+  "results": {
+    "full":      { "logical": 16777216, "physical": 994164,   "ratio": 16.876, "write_mbps": 257.3 },
+    "raw":       { "logical": 16777216, "physical": 17776920, "ratio": 0.944,  "write_mbps": 493.3 },
+    "raw-rans":  { "logical": 16777216, "physical": 13585624, "ratio": 1.235,  "write_mbps": 278.8 },
+    "no-dedup":  { "logical": 16777216, "physical": 5139816,  "ratio": 3.264,  "write_mbps": 276.3 },
+    "no-base":   { "logical": 16777216, "physical": 994164,   "ratio": 16.876, "write_mbps": 274.4 },
+    "no-config": { "logical": 16777216, "physical": 1143189,  "ratio": 14.676, "write_mbps": 255.4 },
+    "no-rans":   { "logical": 16777216, "physical": 994164,   "ratio": 16.876, "write_mbps": 357.6 },
+    "no-dsfb":   { "logical": 16777216, "physical": 994164,   "ratio": 16.876, "write_mbps": 170.8 }
+  },
+  "attribution_notes": [
+    "exact dedup: 4.1 MiB (5.17x) on this corpus — the 4 patterns repeat every 1 MiB",
+    "configurational coding: 149 KB (1.15x) — zero/low-cardinality chunks",
+    "base+residual channels: 0 on this corpus (no versioned/gradual-drift structure);",
+    "  covered by store-level tests (tests/optimizer.rs: drift_workload_stays_shallow_and_exact, live H2 drift on a mount: BASE_RESIDUAL)",
+    "rANS: 0 on this corpus (text chunks are deduped/periodic; near-uniform random stays RAW)",
+    "DSFB ranking: identical final representation; write throughput 170.8 -> 257.3 MiB/s (ranking narrows search, saves CPU)",
+    "raw alone: 0.944x — honest: metadata overhead makes RAW slightly worse than 1:1"
+  ],
+  "result_hashes": "see evidence/ablation-run-2026-08-25.txt (raw CLI output)"
+}
