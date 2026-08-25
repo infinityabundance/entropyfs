@@ -53,7 +53,7 @@ the campaigns:
 
 | Criterion | Target | Measured | Verdict |
 |-----------|--------|----------|---------|
-| materially lower physical storage | clear double-digit % over best conventional baseline | structured corpus 845×–989× (structural/configurational — ZERO/FILL/PERIODIC/rANS; dedup measures 0 on this single-batch corpus, see `d04227f`); duplicated trees dedup via EXACT_REF at ~40 B/extent | ✅ demonstrated for structural + content-addressed dedup content (attribution now measured, not labeled) |
+| materially lower physical storage | clear double-digit % over best conventional baseline | structured corpus 845×–1,235× (structural/configurational + in-batch dedup; attribution now measured: A2-dedup contributes 1.25×, configurational the rest — `b165d60`); duplicated trees dedup via EXACT_REF at ~40 B/extent | ✅ demonstrated for structural + content-addressed dedup content (attribution measured, not labeled) |
 | versioned/base+residual advantage | temporal savings | H2 series: +7.2% (RANS-era) → −24% (SequenceRans floor, positional residuals only) → **+35.0%** with BASE_SEQUENCE deltas (sequential 2.745× vs shuffled 1.784×); Phase-8B post-GC permanent footprint: sequential full 1,528,175 → **1,366,816 B** (10.6% historical index metadata pruned) | ✅ met with the delta family (the −24% intermediate campaign isolates the positional-residual cost; the post-GC gap is the real base-chain cost, not index bloat) |
 
 **Honest summary:** the FLOOR is substantially met (reads, RAW overhead,
@@ -62,6 +62,29 @@ ahead; the deeper matcher is the next engineering step); the ADVANTAGE
 gate is met for dedup/configurational content and — with the BASE_SEQUENCE
 delta family — for versioned content (the H2 series is the controlled
 record). These are the current measured states.
+
+## 4. Competitive filesystem court (Phase 8H)
+
+The root-capable court is `tools/fs-court.sh`; its first run is archived as
+`fs-court-1787669946-b165d60` (same machine, same corpora: source tree,
+64 MiB random, 64 MiB zeros, tar.gz control).
+
+- **ext4 (host):** full allocation (ratio 1.000×); write 0.4–5.7 GiB/s.
+- **zstd standalone:** src 3.92× (−1) / 4.40× (−3) / 5.71× (−19);
+  random 1.000×; zeros ~29,000×; tar.gz 1.000× (already compressed).
+- **EntropyFS (FUSE, unprivileged):** effective density **1.488×**
+  (135.7 MB apparent / 91.2 MB store post-GC) including the 64 MB
+  incompressible random control; per-corpus: src write 1.7 / read 1288
+  MiB/s, random 85 / 3532 MiB/s, zeros 453 / 4374 MiB/s, tar.gz 33 /
+  342 MiB/s; fsck clean after copy + GC.
+- **Waivers (need a root-capable VM — exact commands recorded in the
+  archive):** XFS, Btrfs (plain and zstd:1), EROFS, SquashFS. The
+  waivers are legitimate per methodology §3/§8; clearing them is the
+  Phase-8H VM task.
+
+The court measures allocation and throughput on the same corpora;
+EntropyFS's authoritative exact byte accounting remains the campaign
+artifacts.
 
 ## 3. Expected behavior by data class (updated with SequenceRans)
 

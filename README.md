@@ -57,6 +57,8 @@ physical storage (RAW fallback) — that is a success condition, not a failure.
 | 8 (M5) | **SparseBlock64** — blockwise-64 enumerative sparse coding (tag 0x0E, feature bit 11): per-word popcount + `C(64,k)` rank (fits u64) + literals, three-stream rANS/raw codec. Removes the plain-SPARSE `u128` cliff (`10 ≤ k ≤ n−10` at 64 KiB). The campaign caught a 3× write-throughput regression from missing dense-input pre-gating; a `k ≥ n/2` density gate fixed it (regression-tested) | ✅ implemented (evidence-sealed `campaign-1787666589-e895fcf/`) |
 | 8 (8A) | Evidence-protocol correction: the strict cumulative ladder A0–A8 (each step adds one mechanism, A8 = +background pass) now runs beside the leave-one-out table (spec §43, methodology §4); both are kept forever. The first campaign's nine-row table is amended as the leave-one-out table (protocol note, never rewritten) | ✅ implemented + evidence-sealed (`campaign-1787668526-d04227f/`) |
 | 8 (8B) | Derived chunk-index rebuild: GC rebuilds the chunk index to exactly the reachable set (live extents + transitive reference closure), so overwritten unsnapshotted content cannot grow it permanently. H2 post-GC permanent footprint: sequential full 1,528,175 → **1,366,816 B** (10.6% pruned); regression-tested invariant `chunk_index_entries ≤ reachable + closure`, repeated GC never regrows the index, remount + fsck clean | ✅ implemented + evidence-sealed (`campaign-1787668526-d04227f/`) |
+| 8 (8C) | In-batch dedup visibility (write aggregation): a group-commit batch now dedups against its own pending entries (first-occurrence-wins descriptors + staged objects, pending-aware §32 validation). The ladder's A2-dedup step drops 115,976 → **64,976 B** on the structured corpus; the background pass densifies A8 to **50,528 B**; the ablation CLI now measures reachable bytes on batch writes, matching the campaign (the old per-chunk `physical_used` reporting made RAW look like a 0.944× loss) | ✅ implemented + evidence-sealed (`campaign-1787669923-b165d60/`) |
+| 8 (8H) | Competitive filesystem court: `tools/fs-court.sh` measures the same corpora across ext4, zstd -1/-3/-19, and mounted EntropyFS; XFS/Btrfs±zstd/EROFS/SquashFS recorded as explicit waivers with the exact root-capable-VM commands. First run `fs-court-1787669946-b165d60`: EntropyFS effective density 1.488× incl. a 64 MiB incompressible control; zeros 453/4374 MiB/s write/read, random 85/3532 MiB/s, fsck clean | ✅ tooling + first run sealed (VM run clears the loop-mount waivers) |
 
 ## Measured results
 
@@ -82,12 +84,13 @@ oversized-descriptor fix (Phase 6) eliminated.
 - The synthetic ablation fixture (`evidence/ablation-2026-08-25.json`) is an
   *ablation fixture*, never a headline: on a corpus containing four unique
   64 KiB chunks its 16.876× is dominated by content-addressed dedup. The
-  campaign's structured-corpus ratios (up to 989× on that same corpus) are
-  *structural/configurational* — the `d04227f` campaign measures the dedup
-  contribution at 0 on that corpus (one group-commit batch: pending index
-  entries are invisible to the dedup lookup, and the uniform zones are
-  already structurally cheap), correcting the earlier “dedup-dominated”
-  labels. Both are presented as ablation data only.
+  campaign's structured-corpus ratios (up to 1,235×) are
+  *structural/configurational + in-batch dedup* — the `d04227f` campaign
+  measured dedup at 0 on that corpus (one group-commit batch; pending
+  index entries invisible to the dedup lookup), which became the Phase-8C
+  fix; `b165d60` shows dedup's marginal contribution at 1.25× and the
+  ladder's A2-dedup step at 64,976 B. The old “dedup-dominated” labels
+  were speculation and are corrected. Both are ablation data only.
 - The campaign's ablation evidence is two tables, both kept forever: the
   **strict cumulative ladder A0–A8** (each step adds one mechanism) and the
   **leave-one-out table** (one mechanism disabled at a time). The first

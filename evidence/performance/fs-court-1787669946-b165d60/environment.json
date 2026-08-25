@@ -1,0 +1,8 @@
+{
+ "revision": "b165d60",
+ "created_unix": 1787669946,
+ "kernel": "7.2.0-1-cachyos",
+ "cpu": "x86_64",
+ "store_device": "/dev/nvme1n1p1",
+ "uname": "vanir"
+}

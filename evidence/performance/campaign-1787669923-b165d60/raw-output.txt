@@ -1,0 +1,64 @@
+entropyfs evidence campaign — 1787669923
+revision: b165d60
+  structured [full] 5 runs: write 762.6 MiB/s (p50 79074µs, p95 95040µs, p99 95040µs) read 2872.7 MiB/s fsync p50 1660µs p95 3582µs p99 6931µs physical median 54353 ratio 1234.686x
+  src [full] 3 runs: write 57.4 MiB/s (p50 31541µs, p95 32021µs, p99 32021µs) read 401.5 MiB/s fsync p50 1657µs p95 3876µs p99 3876µs physical median 542189 ratio 3.514x
+  urandom [full] 3 runs: write 89.4 MiB/s (p50 355477µs, p95 356922µs, p99 356922µs) read 3828.4 MiB/s fsync p50 1649µs p95 13523µs p99 13523µs physical median 33652515 ratio 0.997x
+  compressed-z19 [full] 3 runs: write 93.6 MiB/s (p50 3075µs, p95 3102µs, p99 3102µs) read 3539.2 MiB/s fsync p50 1650µs p95 2283µs p99 2283µs physical median 305239 ratio 0.994x
+
+== leave-one-out ablation (structured) ==
+  full       physical        54353 ratio 1234.686x write    765.6 MiB/s cpu 0.080+0.000s (p95 write 78247µs)
+  raw        physical       319070 ratio 210.326x write    466.4 MiB/s cpu 0.110+0.020s (p95 write 132119µs)
+  raw-rans   physical       115976 ratio 578.644x write    253.2 MiB/s cpu 0.240+0.000s (p95 write 246924µs)
+  no-dedup   physical        67868 ratio 988.815x write    338.7 MiB/s cpu 0.180+0.000s (p95 write 184137µs)
+  no-base    physical        54353 ratio 1234.686x write    775.4 MiB/s cpu 0.080+0.000s (p95 write 77148µs)
+  no-temporal physical        54353 ratio 1234.686x write    766.7 MiB/s cpu 0.080+0.000s (p95 write 77880µs)
+  no-config  physical        64976 ratio 1032.825x write    471.8 MiB/s cpu 0.140+0.010s (p95 write 130992µs)
+  no-rans    physical       117146 ratio 572.865x write    809.1 MiB/s cpu 0.070+0.000s (p95 write 72799µs)
+  no-universe physical        54353 ratio 1234.686x write    769.9 MiB/s cpu 0.080+0.000s (p95 write 78302µs)
+  no-dsfb    physical        54353 ratio 1234.686x write    727.2 MiB/s cpu 0.090+0.010s (p95 write 83118µs)
+
+== cumulative ladder A0-A8 (structured) ==
+  A0-raw             physical       319070 ratio 210.326x write    478.8 MiB/s cpu 0.100+0.030s (p95 write 128473µs)
+  A1-rans            physical       115976 ratio 578.644x write    255.0 MiB/s cpu 0.240+0.010s (p95 write 245010µs)
+  A2-dedup           physical        64976 ratio 1032.825x write    470.4 MiB/s cpu 0.130+0.000s (p95 write 130880µs)
+  A3-base-residual   physical        64976 ratio 1032.825x write    460.8 MiB/s cpu 0.140+0.010s (p95 write 133591µs)
+  A4-config          physical        54353 ratio 1234.686x write    776.0 MiB/s cpu 0.080+0.000s (p95 write 77432µs)
+  A5-temporal-bases  physical        54353 ratio 1234.686x write    723.0 MiB/s cpu 0.070+0.010s (p95 write 83365µs)
+  A6-universe        physical        54353 ratio 1234.686x write    721.0 MiB/s cpu 0.090+0.010s (p95 write 83757µs)
+  A7-dsfb            physical        54353 ratio 1234.686x write    753.0 MiB/s cpu 0.080+0.000s (p95 write 80189µs)
+  A8-full+background physical        50528 ratio 1328.152x write    780.5 MiB/s cpu 0.080+0.010s (p95 write 76753µs)
+
+== DSFB search-budget investigation (structured) ==
+  full      write median   773.9 MiB/s (min 767.5, max 793.8) cpu median 0.080s physical [54353, 54353, 54353, 54353, 54353]
+  no-dsfb   write median   717.1 MiB/s (min 707.8, max 720.4) cpu median 0.080s physical [54353, 54353, 54353, 54353, 54353]
+  physical identical across modes: true
+
+== versioned experiment (H2) ==
+  versioned [full] 3 runs: write 79.4 MiB/s (p50 36713µs, p95 94101µs, p99 95057µs) read 1148.3 MiB/s fsync p50 1665µs p95 18047µs p99 18047µs physical median 1528175 ratio 2.745x
+  versioned [no-base] 3 runs: write 113.0 MiB/s (p50 37629µs, p95 40252µs, p99 40275µs) read 1547.5 MiB/s fsync p50 1646µs p95 6976µs p99 6976µs physical median 1214754 ratio 3.453x
+  shuffled [full] 3 runs: write 78.6 MiB/s (p50 50964µs, p95 67630µs, p99 68782µs) read 873.0 MiB/s fsync p50 1652µs p95 9625µs p99 9625µs physical median 2351510 ratio 1.784x
+  sequential median reachable: 1528175 bytes (2.745x)
+  shuffled    median reachable: 2351510 bytes (1.784x)
+  base+residual savings vs shuffled: 823335 bytes (35.0% of shuffled reachable)
+  post-GC reachable: sequential full 1366816 (3.069x) / no-base 1165681 (3.598x) / shuffled 2287928 (1.833x)
+
+== GC and optimizer traffic ==
+  unreachable before 59543856 → reclaimed 47980088 → after 13953950; physical 93501163 → 47607009; gc 0.015s; optimizer scanned 512 rewrote 0 saved 0
+
+== baselines ==
+  waived: btrfs with compression: waived — writable compressed-FS baseline requires root for loop-mounting a test image
+  waived: EROFS/SquashFS: waived — read-only compressed-image baseline deferred (requires root and/or mkfs.erofs)
+  raw file (ext4): 4581.9 MiB/s write, ratio 1.000x
+  zstd -1: 1905413 → 440421 bytes (4.326x), 0.005s
+  zstd -19: 1905413 → 303394 bytes (6.280x), 0.266s
+  direct rANS (same backend, src corpus): 1905413 → 542189 bytes (3.514x)
+device nvme1n1p1: 1036824 sectors written (530853888 bytes), 112 sectors read (57344 bytes)
+
+== admission checklist (methodology §8) ==
+  [OK ] benchmark context complete (revision, Cargo.lock, kernel, CPU, governor, device, cache state, command) — environment.json (revision, cargo_lock_hash, kernel_*, cpu_*, governor, store_device, cache_state, command) + corpus-manifest.json archived in this directory
+  [OK ] every required byte is counted (payload/models/residuals/descriptors/metadata/integrity/allocator/unreclaimed) — per-run Accounting tables pass the reachable-bytes cross-check
+  [OK ] all listed baselines run or explicitly waived — raw file present; zstd present; direct rANS present; waivers: 2
+  [OK ] ablations identify which mechanism caused the gain (cumulative ladder A0-A8 + leave-one-out) — leave-one-out table 10 rows; cumulative ladder 9 rows (A0-A8)
+  [OK ] negative controls included (random → RAW, compressed → no gain, shuffled history → temporal gains disappear) — urandom ratio 0.997x (expected ≤1.5x); compressed present true; shuffled present true
+  [OK ] materialized output hashes match the input corpus hashes — result-hashes.json: all runs match corpus content hashes
+  [OK ] raw result artifacts are archived — raw-output.txt, results.json, results.csv, environment.json, corpus-manifest.json, result-hashes.json, report.md

@@ -1,0 +1,38 @@
+== corpus construction ==
+== ext4 (host directory) ==
+  src: apparent 1146400 allocated 1478656 write 413.9 MiB/s
+  random.bin: apparent 67108864 allocated 67108864 write 5033.2 MiB/s
+  zeros.bin: apparent 67108864 allocated 67108864 write 5688.2 MiB/s
+  compressed.tgz: apparent 322276 allocated 323584 write 409.9 MiB/s
+== xfs (loop image) ==
+  WAIVER: xfs requires root + loop devices; run in a root-capable VM:
+    mkfs.xfs -f <image> && mount -o loop <image> <mnt>
+== btrfs (loop image) ==
+  WAIVER: btrfs requires root + loop devices; run in a root-capable VM:
+    mkfs.btrfs -f <image> && mount -o loop <image> <mnt>
+== btrfs-zstd (loop image) ==
+  WAIVER: btrfs-zstd requires root + loop devices; run in a root-capable VM:
+    mkfs.btrfs -f <image> && mount -o loop,compress=zstd:1 <image> <mnt>
+== squashfs: WAIVER (mksquashfs not installed) ==
+== erofs: WAIVER (mkfs.erofs not installed) ==
+== zstd standalone ==
+  zstd -1 src: apparent 1146400 image 292368 ratio 3.921x 238.1 MiB/s
+  zstd -1 random.bin: apparent 67108864 image 67110414 ratio 1.000x 4666.3 MiB/s
+  zstd -1 zeros.bin: apparent 67108864 image 2288 ratio 29330.797x 13207.5 MiB/s
+  zstd -1 compressed.tgz: apparent 322276 image 322298 ratio 1.000x 236.0 MiB/s
+  zstd -3 src: apparent 1146400 image 260731 ratio 4.397x 205.8 MiB/s
+  zstd -3 random.bin: apparent 67108864 image 67110414 ratio 1.000x 3477.9 MiB/s
+  zstd -3 zeros.bin: apparent 67108864 image 2120 ratio 31655.125x 8706.8 MiB/s
+  zstd -3 compressed.tgz: apparent 322276 image 322298 ratio 1.000x 215.5 MiB/s
+  zstd -19 src: apparent 1146400 image 200610 ratio 5.715x 5.6 MiB/s
+  zstd -19 random.bin: apparent 67108864 image 67110414 ratio 1.000x 11.5 MiB/s
+  zstd -19 zeros.bin: apparent 67108864 image 2077 ratio 32310.479x 2332.8 MiB/s
+  zstd -19 compressed.tgz: apparent 322276 image 322298 ratio 1.000x 32.6 MiB/s
+== entropyfs (FUSE store) ==
+  src: apparent 1146400 write 1.7 MiB/s read 1288.5 MiB/s
+  random.bin: apparent 67108864 write 85.2 MiB/s read 3532.3 MiB/s
+  zeros.bin: apparent 67108864 write 453.4 MiB/s read 4373.8 MiB/s
+  compressed.tgz: apparent 322276 write 32.9 MiB/s read 342.4 MiB/s
+  fsck: clean
+  store physical used (post-GC): 91156616 bytes; total apparent: 135686404
+  entropyfs effective density: 1.488x (apparent / store physical)

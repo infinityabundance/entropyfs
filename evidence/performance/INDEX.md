@@ -13,9 +13,11 @@ they document are admitted — nothing more.
 | `campaign-1787666589-e895fcf/` | `e895fcf` | Same campaign with **SPARSE_BLOCK64** (blockwise-64 enumerative sparse coding, Phase-8 §6) in the pipeline. Physical results stable (H2 +35.0%); the campaign caught and the fix sealed a ~3× write-throughput regression from missing dense-input pre-gating (structured 394 → 135 MiB/s with the bug, restored to 360 MiB/s after the k ≥ n/2 density gate). All §8 admission rules OK. |
 | `campaign-1787668313-0a7d800/` | `0a7d800` | **Phase-8A**: the same campaign with the strict cumulative ladder A0–A8 (methodology §4, spec §43) running alongside the leave-one-out table. Immediate predecessor of `d04227f`; superseded by it (which adds the post-GC H2 footprint). All §8 admission rules OK. |
 | `campaign-1787668526-d04227f/` | `d04227f` | **Phase 8A + 8B sealed**: cumulative ladder A0–A8 + leave-one-out tables; the derived chunk-index rebuild in GC (8B) evidenced by the post-GC permanent footprint in the H2 experiment. All §8 admission rules OK. |
+| `campaign-1787669923-b165d60/` | `b165d60` | **Phase 8C sealed**: in-batch dedup visibility (group-commit batches now dedup against their own pending entries). The ladder's A2-dedup step drops from 115,976 B to 64,976 B on the structured corpus; A8 (background pass) densifies 54,353 → 50,528 B; full = 54,353 B (1,234.7×). The `d04227f` “dedup measures 0” finding was the pre-fix measurement and is superseded by this campaign (the controlled before/after of the fix). All §8 admission rules OK. |
 | `fuse-court-1787659785-027c959-head/` | `027c959` | FUSE-frontend perf court, **after** Phase 6 (current main). |
 | `fuse-court-1787659914-709a710-before/` | `709a710` | FUSE-frontend perf court, **before** Phase 6 (same workloads, same workload hash `82442892…`). |
 | `fuse-court-1787664579-d90772c/` | `d90772c` | FUSE-frontend perf court, **Phase 8** (concurrency refactor + writeback negotiation + batch group commit + SequenceRans floor; same deterministic shake_128 payload, same bindgen workload `82442892…`). |
+| `fs-court-1787669946-b165d60/` | `b165d60` | **Phase-8H competitive filesystem court** (`tools/fs-court.sh`): same corpora across ext4 (host), zstd -1/-3/-19, and mounted EntropyFS (FUSE). XFS/Btrfs±zstd/EROFS/SquashFS recorded as explicit waivers with the exact root-capable-VM commands (this environment has no root/loop devices; the methodology permits waivers, the goal is to clear them in a disposable root-capable VM). EntropyFS effective density 1.488× (apparent 135.7 MB / store 91.2 MB post-GC) including a 64 MB incompressible control; src write 1.7 MiB/s (tiny files) / read 1288 MiB/s; random 85/3532 MiB/s; zeros 453/4374 MiB/s; fsck clean. |
 
 ## FUSE court pair (Phase 6 before/after)
 
@@ -248,6 +250,47 @@ remains search-budget intelligence, not bytes.
 urandom 0.997×, compressed 0.994×; GC traffic 59.5 MB unreachable →
 48.0 MB reclaimed, physical 93.5 MB → 47.6 MB, 0.015 s; btrfs/EROFS waived
 as before.
+
+## Campaign highlights (`campaign-1787669923-b165d60` — Phase 8C in-batch dedup)
+
+Same methodology, same machine, same corpora. This campaign seals the
+write-aggregation density fix and supersedes the `d04227f` “dedup measures
+0” finding (which was the controlled pre-fix measurement):
+
+```text
+leave-one-out:  no-dedup 67,868 B  vs  full 54,353 B   (dedup: −13,515 B, 1.25×)
+cumulative:     A1-rans 115,976 B
+                A2-dedup  64,976 B   ← in-batch dedup now hits (1,032.8×)
+                A4-config 54,353 B
+                A8-full+background 50,528 B   ← background pass densifies
+                                                 the dedup structure (1,328.2×)
+```
+
+- The structured corpus is one group-commit batch; before 8C its pending
+  chunk-index entries were invisible to the dedup lookup, so A2 == A1 and
+  the 845×–989× ratio was structural/configurational only. With 8C the
+  batch dedups against itself: A2 drops 51,000 B, and the leave-one-out
+  no-dedup row now isolates dedup's marginal contribution (1.25×). The
+  fix is regression-tested (`group_commit_batch_dedups_within_the_batch`,
+  `group_commit_batch_dedup_survives_in_batch_overwrite`).
+- A8 (background re-optimization) is now a genuine densifier on this
+  corpus (54,353 → 50,528 B, −3,825 B): with aliases present, the pass
+  rewrites the owner structure; the earlier A8 == A7 flatness was the
+  absence of alias structure, not pass uselessness. The background pass
+  never grows reachable bytes (gate: strictly cheaper, CAS-checked).
+- The ablation CLI (`benchmark --ablation*`) now writes one group-commit
+  batch, runs the A8 pass when requested, GCs, and reports REACHABLE
+  bytes — the old per-chunk-transaction `physical_used` reporting made
+  RAW look like a 0.944× loss and has been corrected to match the
+  campaign methodology.
+- H2 unchanged (2.745× vs 1.784×, +35.0%; post-GC permanent 3.069×) —
+  the versioned corpus writes per-version batches, where cross-version
+  dedup already worked; the 8B index rebuild evidence stands.
+- Everything else stable: src 3.514× (new source pack at this revision;
+  zstd -1 4.09×, zstd -19 5.92×), urandom 0.997×, compressed 0.994×,
+  GC 59.5 MB → 48.0 MB reclaimed in 0.015 s; DSFB physical identical
+  (54,353 B), write 773.9 vs 339.9 MiB/s (DSFB still halves search CPU
+  budget work; bytes unchanged).
 
 ## Admission status
 
