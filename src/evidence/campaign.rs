@@ -270,6 +270,15 @@ pub struct VersionedExperiment {
     pub sequential_no_base: Vec<u64>,
     /// Reachable bytes per shuffled full run.
     pub shuffled_full: Vec<u64>,
+    /// Reachable bytes AFTER a GC pass (Phase-8B: the derived chunk index
+    /// is pruned to the reachable set, so the post-GC state is the
+    /// permanent footprint — overwritten unsnapshotted content must not
+    /// cause permanent index growth).
+    pub sequential_full_post_gc: u64,
+    /// Post-GC reachable for the no-base control.
+    pub sequential_no_base_post_gc: u64,
+    /// Post-GC reachable for the shuffled control.
+    pub shuffled_full_post_gc: u64,
     /// Sequential logical/reachable ratio (median).
     pub sequential_ratio: f64,
     /// Shuffled logical/reachable ratio (median).
@@ -454,6 +463,9 @@ pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
             sequential_full: Vec::new(),
             sequential_no_base: Vec::new(),
             shuffled_full: Vec::new(),
+            sequential_full_post_gc: 0,
+            sequential_no_base_post_gc: 0,
+            shuffled_full_post_gc: 0,
             sequential_ratio: 0.0,
             shuffled_ratio: 0.0,
             base_savings_reachable_bytes: 0,
@@ -694,6 +706,26 @@ pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
             "  base+residual savings vs shuffled: {} bytes ({:.1}% of shuffled reachable)",
             results.versioned_experiment.base_savings_reachable_bytes,
             results.versioned_experiment.base_savings_pct
+        ),
+    );
+    // Phase-8B: the permanent (post-GC) footprint. The derived chunk
+    // index is pruned to the reachable set during GC, so the post-GC
+    // reachable bytes measure what overwritten unsnapshotted history may
+    // not grow permanently (the pre-GC reachable above includes the
+    // append-only records awaiting reclaim).
+    let sg = write_gc_reachable(opts, vseq, OptimizeOptions::default())?;
+    let ng = write_gc_reachable(opts, vseq, options_for("no-base")?)?;
+    let shg = write_gc_reachable(opts, vshuf, OptimizeOptions::default())?;
+    results.versioned_experiment.sequential_full_post_gc = sg;
+    results.versioned_experiment.sequential_no_base_post_gc = ng;
+    results.versioned_experiment.shuffled_full_post_gc = shg;
+    line(
+        &mut log,
+        &format!(
+            "  post-GC reachable: sequential full {sg} ({:.3}x) / no-base {ng} ({:.3}x) / shuffled {shg} ({:.3}x)",
+            vseq.logical_bytes() as f64 / sg.max(1) as f64,
+            vseq.logical_bytes() as f64 / ng.max(1) as f64,
+            vshuf.logical_bytes() as f64 / shg.max(1) as f64,
         ),
     );
 
@@ -1039,6 +1071,24 @@ fn write_only(
         latencies: lats,
         families,
     })
+}
+
+/// Write a corpus through the given options, run a GC pass, and return
+/// the post-GC reachable bytes: the *permanent* footprint (Phase-8B — the
+/// derived chunk index is pruned to the reachable set during GC, so
+/// overwritten unsnapshotted content cannot grow it forever).
+fn write_gc_reachable(
+    opts: &CampaignOptions,
+    corpus: &Corpus,
+    options: OptimizeOptions,
+) -> Result<u64, String> {
+    let tmp = scratch_tempdir(&opts.scratch_dir, "h2gc-")?;
+    let store = fresh_store(tmp.path())?;
+    write_only(&store, 3, corpus, options)?;
+    crate::store::gc::collect(&store, &crate::store::transaction::CrashHooks::none())
+        .map_err(|e| e.to_string())?;
+    let n = store_numbers(&store)?;
+    Ok(n.reachable)
 }
 
 // ---------------------------------------------------------------------------
