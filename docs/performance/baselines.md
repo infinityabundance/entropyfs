@@ -1,8 +1,8 @@
 # Baselines and expected regimes
 
-Status: **measured evidence** (campaign `campaign-1787665094-a6641d1`,
-FUSE court `fuse-court-1787664579-d90772c`, both in
-`evidence/performance/INDEX.md`). Machines differ → re-measure per
+Status: **measured evidence** (campaigns `campaign-1787665094-a6641d1` …
+`campaign-1787668526-d04227f`, FUSE court `fuse-court-1787664579-d90772c`,
+all in `evidence/performance/INDEX.md`). Machines differ → re-measure per
 machine; the numbers here are the admission-baseline for this project's
 current state.
 
@@ -53,8 +53,8 @@ the campaigns:
 
 | Criterion | Target | Measured | Verdict |
 |-----------|--------|----------|---------|
-| materially lower physical storage | clear double-digit % over best conventional baseline | structured corpus 845× (dedup-dominated: 4 unique chunks — not a general claim); duplicated trees dedup via EXACT_REF at ~40 B/extent | ✅ demonstrated for content-addressed dedup only |
-| versioned/base+residual advantage | temporal savings | H2 series: +7.2% (RANS-era) → −24% (SequenceRans floor, positional residuals only) → **+35.2%** with BASE_SEQUENCE deltas (sequential 2.752× vs shuffled 1.784×) | ✅ met with the delta family (the −24% intermediate campaign isolates the positional-residual cost) |
+| materially lower physical storage | clear double-digit % over best conventional baseline | structured corpus 845×–989× (structural/configurational — ZERO/FILL/PERIODIC/rANS; dedup measures 0 on this single-batch corpus, see `d04227f`); duplicated trees dedup via EXACT_REF at ~40 B/extent | ✅ demonstrated for structural + content-addressed dedup content (attribution now measured, not labeled) |
+| versioned/base+residual advantage | temporal savings | H2 series: +7.2% (RANS-era) → −24% (SequenceRans floor, positional residuals only) → **+35.0%** with BASE_SEQUENCE deltas (sequential 2.745× vs shuffled 1.784×); Phase-8B post-GC permanent footprint: sequential full 1,528,175 → **1,366,816 B** (10.6% historical index metadata pruned) | ✅ met with the delta family (the −24% intermediate campaign isolates the positional-residual cost; the post-GC gap is the real base-chain cost, not index bloat) |
 
 **Honest summary:** the FLOOR is substantially met (reads, RAW overhead,
 negative controls); the BASELINE density gate is not yet met (zstd is

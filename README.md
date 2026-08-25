@@ -55,6 +55,8 @@ physical storage (RAW fallback) — that is a success condition, not a failure.
 | 8 (M3) | **SequenceRans** — the general-purpose compression floor: bounded LZ77 hash-chain matcher + three rANS-coded (or raw) streams over `ryg-rans-rs` (tag 0x0D, feature bit 10). Fixes two real defects found by the H2 campaign: encoder tail-remainder bug (`0x7F` corruption for 1–3-byte copy tails) and the flatten-on-write §32 validation gap; also fixed the store GC reachability walk (it under-counted SequenceRans objects — a withdrawn campaign caught it). src corpus density 1.636× → **3.344×** (at parity with direct rANS; zstd -1 3.83× — the deeper matcher is the measured next step); urandom still 0.997× | ✅ implemented (evidence-sealed `campaign-1787665094-a6641d1/`) |
 | 8 (M4) | **BaseSequence** — shift-aware copy/literal delta residuals (residual kind 0x04 inside BASE_RESIDUAL): `COPY(base_offset, len)` / `LITERAL(run)` commands, three-stream rANS/raw codec shared with SequenceRans. Inserted/deleted regions cost only their own bytes. H2 flips back to **+35.2%** (sequential 2.752× vs shuffled 1.784×); the shuffled control grows because deltas also capture structural similarity — recorded as the finding | ✅ implemented (evidence-sealed `campaign-1787666036-43bf17e/`) |
 | 8 (M5) | **SparseBlock64** — blockwise-64 enumerative sparse coding (tag 0x0E, feature bit 11): per-word popcount + `C(64,k)` rank (fits u64) + literals, three-stream rANS/raw codec. Removes the plain-SPARSE `u128` cliff (`10 ≤ k ≤ n−10` at 64 KiB). The campaign caught a 3× write-throughput regression from missing dense-input pre-gating; a `k ≥ n/2` density gate fixed it (regression-tested) | ✅ implemented (evidence-sealed `campaign-1787666589-e895fcf/`) |
+| 8 (8A) | Evidence-protocol correction: the strict cumulative ladder A0–A8 (each step adds one mechanism, A8 = +background pass) now runs beside the leave-one-out table (spec §43, methodology §4); both are kept forever. The first campaign's nine-row table is amended as the leave-one-out table (protocol note, never rewritten) | ✅ implemented + evidence-sealed (`campaign-1787668526-d04227f/`) |
+| 8 (8B) | Derived chunk-index rebuild: GC rebuilds the chunk index to exactly the reachable set (live extents + transitive reference closure), so overwritten unsnapshotted content cannot grow it permanently. H2 post-GC permanent footprint: sequential full 1,528,175 → **1,366,816 B** (10.6% pruned); regression-tested invariant `chunk_index_entries ≤ reachable + closure`, repeated GC never regrows the index, remount + fsck clean | ✅ implemented + evidence-sealed (`campaign-1787668526-d04227f/`) |
 
 ## Measured results
 
@@ -80,8 +82,12 @@ oversized-descriptor fix (Phase 6) eliminated.
 - The synthetic ablation fixture (`evidence/ablation-2026-08-25.json`) is an
   *ablation fixture*, never a headline: on a corpus containing four unique
   64 KiB chunks its 16.876× is dominated by content-addressed dedup. The
-  campaign's structured-corpus ratios (up to 211× on that same corpus)
-  have the same corpus property and are presented as ablation data only.
+  campaign's structured-corpus ratios (up to 989× on that same corpus) are
+  *structural/configurational* — the `d04227f` campaign measures the dedup
+  contribution at 0 on that corpus (one group-commit batch: pending index
+  entries are invisible to the dedup lookup, and the uniform zones are
+  already structurally cheap), correcting the earlier “dedup-dominated”
+  labels. Both are presented as ablation data only.
 - The campaign's ablation evidence is two tables, both kept forever: the
   **strict cumulative ladder A0–A8** (each step adds one mechanism) and the
   **leave-one-out table** (one mechanism disabled at a time). The first

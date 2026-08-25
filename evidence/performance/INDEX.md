@@ -7,10 +7,12 @@ they document are admitted — nothing more.
 
 | Artifact | Revision | What it seals |
 | --- | --- | --- |
-| `campaign-1787658658-67d977a/` | `67d977a` | Store-level evidence campaign (methodology §1–§9): repeated runs, exact byte accounting, p50/p95/p99, fsync latency, CPU, device writes, GC traffic, ablation ladder, DSFB investigation, negative controls, baselines. All §8 admission rules OK. |
+| `campaign-1787658658-67d977a/` | `67d977a` | Store-level evidence campaign (methodology §1–§9): repeated runs, exact byte accounting, p50/p95/p99, fsync latency, CPU, device writes, GC traffic, ablation ladder, DSFB investigation, negative controls, baselines. All §8 admission rules OK. Its nine-row “ablation ladder” table is the leave-one-out table (protocol amendment below). |
 | `campaign-1787665094-a6641d1/` | `a6641d1` | Same campaign with the **SequenceRans floor** (Phase 8 §4), the write-batch group-commit path, and a corrected GC reachability walk for SequenceRans objects (an earlier run under-counted reachable bytes and was withdrawn; the admission rule is that withdrawn artifacts are replaced, never kept as claims). All §8 admission rules OK. |
 | `campaign-1787666036-43bf17e/` | `43bf17e` | Same campaign with the **BASE_SEQUENCE shift-aware delta** residuals (Phase 8 §5) active on base channels. H2 flips back to positive: sequential 2.752× vs shuffled 1.784× (+35.2% base savings). The shuffled control grows (1.23 MB → 2.35 MB) because copy/literal deltas exploit structural similarity between unrelated-history chunks (class-2 chunks share a period-7 skeleton), not just temporal adjacency — that confounding is the finding. All §8 admission rules OK. |
 | `campaign-1787666589-e895fcf/` | `e895fcf` | Same campaign with **SPARSE_BLOCK64** (blockwise-64 enumerative sparse coding, Phase-8 §6) in the pipeline. Physical results stable (H2 +35.0%); the campaign caught and the fix sealed a ~3× write-throughput regression from missing dense-input pre-gating (structured 394 → 135 MiB/s with the bug, restored to 360 MiB/s after the k ≥ n/2 density gate). All §8 admission rules OK. |
+| `campaign-1787668313-0a7d800/` | `0a7d800` | **Phase-8A**: the same campaign with the strict cumulative ladder A0–A8 (methodology §4, spec §43) running alongside the leave-one-out table. Immediate predecessor of `d04227f`; superseded by it (which adds the post-GC H2 footprint). All §8 admission rules OK. |
+| `campaign-1787668526-d04227f/` | `d04227f` | **Phase 8A + 8B sealed**: cumulative ladder A0–A8 + leave-one-out tables; the derived chunk-index rebuild in GC (8B) evidenced by the post-GC permanent footprint in the H2 experiment. All §8 admission rules OK. |
 | `fuse-court-1787659785-027c959-head/` | `027c959` | FUSE-frontend perf court, **after** Phase 6 (current main). |
 | `fuse-court-1787659914-709a710-before/` | `709a710` | FUSE-frontend perf court, **before** Phase 6 (same workloads, same workload hash `82442892…`). |
 | `fuse-court-1787664579-d90772c/` | `d90772c` | FUSE-frontend perf court, **Phase 8** (concurrency refactor + writeback negotiation + batch group commit + SequenceRans floor; same deterministic shake_128 payload, same bindgen workload `82442892…`). |
@@ -83,8 +85,9 @@ channel.
   shuffled control no longer isolates *temporal* causality — copy/literal
   deltas capture *structural* similarity too. That confounding is the
   finding: BASE_SEQUENCE gains are not purely temporal.
-- **Everything else is stable:** src 3.346×, structured 845× (dedup-
-  dominated, labeled), urandom 0.997×, compressed 0.993×; DSFB gap and
+- **Everything else is stable:** src 3.346×, structured 845× (structural/
+  configurational-dominated — dedup measures 0 on this corpus, see the
+  `d04227f` highlights), urandom 0.997×, compressed 0.993×; DSFB gap and
   ablation ladder unchanged in shape.
 - **Baselines:** raw ext4 1.000×; zstd -1 3.832×; zstd -19 5.502×;
   direct rANS 3.344×; btrfs/EROFS waived (root loop mounts).
@@ -150,9 +153,10 @@ corrected run.
   reduces base+residual savings (H2 negative control behaves as expected).
 - **Ablation ladder (structured corpus, 9 modes):** full 79,298 B vs raw
   277,382 B vs no-config 209,161 B. Caveat: the structured corpus contains
-  only 4 unique 64 KiB chunks, so content-addressed object aliasing already
-  absorbs most dedup; the ladder's incremental rows must be read with that
-  corpus property in mind.
+  only 4 unique 64 KiB chunks, so the ratio is structural/configurational
+  (ZERO/FILL/PERIODIC/rANS), not dedup — the `d04227f` campaign measures
+  the dedup contribution at 0 on this corpus and corrects the earlier
+  “content-addressed aliasing absorbs most dedup” speculation here.
 
   **Protocol amendment (Phase-8A):** this table is the *leave-one-out*
   table (one mechanism disabled at a time). It predates the two-table rule
@@ -172,6 +176,78 @@ corrected run.
 - **Baselines:** raw file (ext4) 1.000×; zstd -1 3.604×; zstd -19 5.175×;
   direct rANS (same backend) on the source pack 1.636×; btrfs/EROFS/
   SquashFS explicitly waived (require root for loop mounts).
+
+## Campaign highlights (`campaign-1787668526-d04227f` — Phase 8A ladder + 8B index rebuild)
+
+Same methodology, same machine, same corpora. This campaign seals the two
+Phase-8 protocol/architecture corrections:
+
+**8A — the strict cumulative ladder A0–A8 now runs beside the leave-one-out
+table (both kept forever):**
+
+```text
+A0-raw             319,070 B  210.3×
+A1-rans            115,976 B  578.6×   ← rANS floor: 2.75× over RAW
+A2-dedup           115,976 B  578.6×   ← dedup: 0 on this corpus (below)
+A3-base-residual   115,976 B  578.6×   ← no P0 base available on a fresh
+                                           single-batch write
+A4-config           67,868 B  988.8×   ← configurational: 1.71× over A3
+A5-temporal-bases    67,868 B  988.8×
+A6-universe          67,868 B  988.8×   ← negative control: 0 (correct)
+A7-dsfb              67,868 B  988.8×   ← budget changes cost, not bytes
+A8-full+background   67,868 B  988.8×   ← background pass: nothing to gain
+                                           on a cold single-batch corpus
+```
+
+**Dedup measures 0 on the structured corpus, and the earlier “dedup-
+dominated” label is corrected.** The corpus is one 64 MiB version written
+as a single group-commit batch; the dedup lookup reads the committed chunk
+index, so the batch's own pending entries are invisible to it (an
+identified Phase-8C write-aggregation item), and the uniform zones are
+already structurally cheap (ZERO/FILL/PERIODIC). The 845×–989× structured
+ratio is structural/configurational, not dedup — the old INDEX/README
+labels are amended here. The versioned corpus's cross-version dedup is
+separately verified (drift chunks that repeat exactly across versions
+still alias via EXACT_REF).
+
+**8B — the derived chunk-index rebuild is evidenced by the post-GC
+(permanent) H2 footprint.** The chunk index is a derived structure (§34);
+GC now rebuilds it to exactly the reachable set (live extents + transitive
+reference closure), so overwritten unsnapshotted content cannot grow it
+permanently:
+
+```text
+H2 pre-GC reachable:   sequential full 1,528,175 B (2.745×)
+                       no-base        1,214,754 B (3.453×)
+                       shuffled       2,351,510 B (1.784×)
+H2 post-GC reachable:  sequential full 1,366,816 B (3.069×)   ← −161,359 B pruned
+                       no-base        1,165,681 B (3.598×)
+                       shuffled       2,287,928 B (1.833×)
+base+residual savings vs shuffled (pre-GC): 823,335 B (35.0%)
+```
+
+The temporal signal is unchanged (sequential ≪ shuffled); what 8B removes
+is the permanent index metadata for overwritten history: 10.6% of the
+sequential full footprint was historical descriptor entries that GC now
+reclaims. Post-GC, the remaining full-vs-no-base gap (1,366,816 vs
+1,165,681 B) is the actual base-chain cost, not index bloat — the honest
+“accept whatever number comes out” outcome the reviewer prescribed: the
+next cost is real. The regression test
+(`gc_rebuilds_derived_chunk_index_without_history_growth`) asserts the
+invariant `chunk_index_entries ≤ reachable logical content + reference
+closure` and that repeated GC never regrows the index.
+
+**DSFB investigation (5+5, structured):** physical byte-identical across
+modes (67,868 B); write median 345.5 vs 339.4 MiB/s, CPU 0.180 s both —
+the RANS-era 2.3× gap (765 vs 335 MiB/s) has converged as the
+SequenceRans floor handles the heavy lifting; DSFB's measured role
+remains search-budget intelligence, not bytes.
+
+**Everything else stable:** src 3.455× (== direct rANS 3.455×; zstd -1
+4.090×, zstd -19 5.924× — the matcher floor is still the identified gap),
+urandom 0.997×, compressed 0.994×; GC traffic 59.5 MB unreachable →
+48.0 MB reclaimed, physical 93.5 MB → 47.6 MB, 0.015 s; btrfs/EROFS waived
+as before.
 
 ## Admission status
 
