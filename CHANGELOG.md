@@ -1,16 +1,33 @@
 # EntropyFS changelog
 
-## Unreleased (Phase 9B — SequenceDict)
+## v0.3.0 (2026-08-25)
 
-- `SEQUENCE_DICT` (tag 0x0F, feature bit 12): cross-chunk dictionary match
-  coding. The previous same-file chunk is used as an external ≤64 KiB
-  dictionary alongside local history: a fourth *copy-source* stream says
-  whether each u16 is a LOCAL backward distance (byte-progressive) or a
-  DICT absolute offset; a DICT match longer than 131 bytes advances the
-  offset across continuation commands. Depth-capped like base chains
-  (`dictionary chain + 1 ≤ max_reference_depth`), so cross-chunk
-  dictionary references can never defeat bounded random access; periodic
-  terminal anchors emerge automatically at the depth cap.
+**Format note:** v0.3.0 retains **format version v1** (no format-version
+bump) and adds one new **incompat representation feature** as an explicit
+on-disk feature bit — `SEQUENCE_DICT` (bit 12). An implementation that
+does not understand that bit must refuse the store (the superblock's
+feature-bit gate, `docs/format/compatibility.md`). This follows the same
+additive, feature-gated pattern as the v0.2.0 correction
+(`SEQUENCE_RANS` bit 10, `SPARSE_BLOCK64` bit 11).
+
+Milestone content (Phase 9A + 9B):
+
+- Phase 9A — the incompressible physical floor: `Tx::commit_deferred`
+  prunes transaction-local COW intermediates (B-tree nodes and inode
+  objects unreachable from the final root) before append; ENOSPC guard on
+  the pruned footprint; `unreachable_bytes_by_record_tag` evidence.
+  urandom reaches 0.997× reachable / 1.00× total backing / 1.00×
+  allocated blocks.
+- Phase 9B — `SEQUENCE_DICT` (tag 0x0F, feature bit 12): cross-chunk
+  dictionary match coding. The previous same-file chunk is used as an
+  external ≤64 KiB dictionary alongside local history: a fourth
+  *copy-source* stream says whether each u16 is a LOCAL backward distance
+  (byte-progressive) or a DICT absolute offset; a DICT match longer than
+  131 bytes advances the offset across continuation commands. Reference
+  depth is accounted like a base chain (`dictionary chain + 1 ≤
+  max_reference_depth`), so cross-chunk dictionary references can never
+  defeat bounded random access; periodic terminal anchors emerge
+  automatically at the depth cap.
 - Write-path integration: the batch overlay provides the previous chunk's
   bytes nearly free (`PendingBatch.depths` registers in-batch reference
   depths); the background optimizer re-encodes RAW extents to
@@ -29,6 +46,11 @@
     replacement.
 - Ablation: `allow_sequence_dict` gate, `no-sequence-dict` leave-one-out
   mode, cumulative-ladder step E2 (post-registration extension).
+- Evidence: `campaign-1787674068-4892644` (9A floor) and
+  `campaign-1787676607-8250f6b` (9B, 7/7 admission — src corpus 4.070×
+  with SequenceDict vs standalone SequenceRans 3.627× and
+  zstd-per-64KiB -1 3.848×). Archived under `evidence/performance/`
+  (`INDEX.md` is authoritative).
 
 ## v0.2.0 (2026-08-25)
 
