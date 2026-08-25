@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Competitive filesystem court v2 (Phase 8H + 9A floor evidence).
+# Competitive filesystem court v2 (Phase 8H + 9A + 9H).
 #
 # Measures the same corpora across:
 #   - ext4 / XFS / Btrfs (raw) / Btrfs (zstd:1)   — writable, loop images
@@ -7,6 +7,13 @@
 #   - EROFS / SquashFS                            — read-only images
 #   - zstd standalone (whole + per-64KiB)
 #   - EntropyFS (FUSE mount, unprivileged)
+#
+# Phase-9H: EntropyFS is reported in TWO storage states:
+#   - foreground: immediately after the workload + fsync (post-GC)
+#   - settled   : + background optimize (full search + shared dicts +
+#                 amortized models) + full compaction (`gc --compact`),
+#                 with the elapsed settle time and the physical write
+#                 amplification required to get from one to the other.
 #
 # Measurement rules (symmetric across writable filesystems):
 #   - buffered write  : cp completion time
@@ -342,6 +349,49 @@ print(a)")
             log "  entropyfs effective density (apparent / allocated backing): ${ratio}x"
             record entropyfs "density" "{\"apparent\": $total_apparent, \"backing_apparent\": $backing_apparent, \"backing_allocated\": $backing_alloc, \"ratio\": $ratio}"
         fi
+
+        # Phase-9H: the SETTLED state — background optimize (full search +
+        # shared dictionaries + amortized models) then full compaction —
+        # with the elapsed time and physical write amplification needed to
+        # get from the foreground state to it. The store is unmounted, so
+        # the offline passes can run.
+        log "  settle: foreground -> settled (optimize + compact)"
+        fg_apparent=$backing_apparent
+        fg_alloc=$backing_alloc
+        t0=$(date +%s%N)
+        OPT_OUT="$("$ENTROPYFS_BIN" optimize "$WORKDIR/efs-store" 2>&1 || true)"
+        t1=$(date +%s%N)
+        opt_wall=$(python3 -c "print(f'{($t1-$t0)/1e9:.2f}')")
+        opt_apparent=$(du_bytes "$WORKDIR/efs-store")
+        log "  settle: optimize ${opt_wall}s (backing $fg_apparent -> $opt_apparent)"
+        log "    $(echo "$OPT_OUT" | tr '\n' ' ' | cut -c1-500)"
+        t0=$(date +%s%N)
+        COMP_OUT="$("$ENTROPYFS_BIN" gc --compact "$WORKDIR/efs-store" 2>&1 || true)"
+        t1=$(date +%s%N)
+        comp_wall=$(python3 -c "print(f'{($t1-$t0)/1e9:.2f}')")
+        settled_apparent=$(du_bytes "$WORKDIR/efs-store")
+        settled_alloc=$(du_alloc "$WORKDIR/efs-store")
+        log "  settle: full compaction ${comp_wall}s (backing $opt_apparent -> $settled_apparent)"
+        log "    $(echo "$COMP_OUT" | tr '\n' ' ' | cut -c1-300)"
+        # Physical write amplification to settle: bytes appended during
+        # settle / settled live bytes. Optimize appends ~(opt - fg); full
+        # compaction copies ~all live bytes into a fresh segment.
+        opt_appended=$((opt_apparent > fg_apparent ? opt_apparent - fg_apparent : 0))
+        compact_appended=$settled_apparent
+        settle_appended=$((opt_appended + compact_appended))
+        settle_amp=$(python3 -c "print(f'{$settle_appended/max($settled_apparent,1):.3f}')")
+        settle_wall=$(python3 -c "print(f'{($opt_wall + $comp_wall):.2f}')")
+        if [[ "$total_apparent" -gt 0 ]]; then
+            settled_ratio=$(python3 -c "print(f'{$total_apparent/$settled_apparent:.3f}')")
+            settled_density=$(python3 -c "print(f'{$total_apparent/max($settled_alloc,1):.3f}')")
+        else
+            settled_ratio="0"
+            settled_density="0"
+        fi
+        log "  settled store: apparent $settled_apparent allocated $settled_alloc; density (apparent/backing) ${settled_ratio}x, (apparent/allocated) ${settled_density}x"
+        log "  settle cost: ${settle_wall}s elapsed, ${settle_amp}x physical write amplification (appended $settle_appended B)"
+        record entropyfs "settled" "{\"foreground_apparent\": $fg_apparent, \"foreground_allocated\": $fg_alloc, \"settled_apparent\": $settled_apparent, \"settled_allocated\": $settled_alloc, \"settle_elapsed_s\": $settle_wall, \"optimize_wall_s\": $opt_wall, \"compact_wall_s\": $comp_wall, \"settle_appended_bytes\": $settle_appended, \"settle_write_amp\": $settle_amp, \"settled_density\": $settled_density}"
+        "$ENTROPYFS_BIN" fsck "$WORKDIR/efs-store" >/dev/null 2>&1 && log "  settled fsck: clean"
     else
         log "  WAIVER: entropyfs mount failed"
         record entropyfs "waived" "mount failed"
@@ -373,10 +423,21 @@ import json, sys
 results, out = sys.argv[1], sys.argv[2]
 r = json.load(open(results))
 with open(f"{out}/report.md", "w") as f:
-    f.write("# Filesystem court v2\n\n")
+    f.write("# Filesystem court v2 (Phase 8H + 9A + 9H)\n\n")
     f.write(f"Archive: {out}\n\n")
     f.write("Corpus artifact: the structured corpus contains only 4 unique\n")
     f.write("64 KiB chunks — a corpus property, not a claim (methodology §8).\n\n")
+    if "settled" in r.get("entropyfs", {}):
+        s = r["entropyfs"]["settled"]
+        f.write("## EntropyFS storage states (Phase-9H)\n\n")
+        f.write(f"- foreground (post-GC): apparent {s['foreground_apparent']} B, "
+                f"allocated {s['foreground_allocated']} B\n")
+        f.write(f"- settled (+optimize +full compaction): apparent {s['settled_apparent']} B, "
+                f"allocated {s['settled_allocated']} B (density {s['settled_density']}x)\n")
+        f.write(f"- settle cost: {s['settle_elapsed_s']} s elapsed "
+                f"(optimize {s['optimize_wall_s']} s + compact {s['compact_wall_s']} s), "
+                f"{s['settle_write_amp']}x physical write amplification "
+                f"({s['settle_appended_bytes']} B appended)\n\n")
     for section in ("fs", "zstd", "entropyfs"):
         f.write(f"## {section}\n\n")
         for k, v in sorted(r[section].items()):

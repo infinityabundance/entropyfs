@@ -1,5 +1,38 @@
 # EntropyFS changelog
 
+## v0.5.2 (2026-08-25)
+
+**9H — physical convergence (GC + compaction; no format change, no new
+feature bit):**
+
+- **Physical scanner** (`store/physical.rs`): reconciles every segment
+  byte independent of the derived object index — live / dead-indexed /
+  index-hidden / unindexed / torn / padding / format — with the invariant
+  `file_bytes = Σ categories` (unexplained must be 0).
+- **Root cause found by measurement**: on the real-tree court the
+  post-GC dead bytes (2.66 MB) were `BtreeNode` records staged by the GC
+  chunk-index REBUILD, which rebuilt the tree with repeated COW inserts
+  — every intermediate path version was physically written and indexed.
+  The index-hidden-duplicate hypothesis was falsified (index-hidden = 0).
+- **GC victim selection** now uses the scanned PHYSICAL occupancy
+  (`physical_ratios`): segments whose disk bytes are dominated by garbage
+  are compacted even when the index's one-location view calls them live.
+- **`index::bulk_load`**: the chunk-index rebuild bulk-loads the tree
+  bottom-up from sorted reachable entries, staging each FINAL node
+  exactly once (no COW intermediates).
+- **`entropyfs gc --compact`** (`compact_full`): every segment is a
+  victim; backing converges to reachable + bounded format overhead;
+  idempotent. The current root record is not re-copied (snapshot roots
+  are Root records too and still are).
+- Sealed (`campaign-1787688017-0a03ece/`, 7/7 admission): tree court
+  backing **9,129,988 → 1,100,161 B**; post-GC reconciliation = reachable
+  1,100,157 B + 0 B dead + 0 B index-hidden + 0 B unindexed + 4 B format
+  overhead; full compaction = reachable + 4 B (0.00% of logical); second
+  compaction reclaims 0. GC-traffic H2 store: unreachable-after
+  2,274,864 → 201,033 B. The 2.88× representation win is now a real
+  ~2.9× filesystem capacity win. Regressions: real-tree convergence +
+  idempotence + snapshot-root preservation; crash courts + fsck green.
+
 ## v0.5.1 (2026-08-25)
 
 **9G0 + 9G — amortized entropy models (codec fix + background pass; no
