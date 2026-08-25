@@ -1,28 +1,32 @@
 # Baselines and expected regimes
 
 Status: **measured evidence** (campaigns `campaign-1787665094-a6641d1` …
-`campaign-1787668526-d04227f`, FUSE court `fuse-court-1787664579-d90772c`,
+`campaign-1787671040-923df7b`, FUSE court `fuse-court-1787664579-d90772c`,
 all in `evidence/performance/INDEX.md`). Machines differ → re-measure per
 machine; the numbers here are the admission-baseline for this project's
 current state.
 
 ## 1. Measured baselines (current floor)
 
-Source pack (EntropyFS repo, length-prefixed; 1,471,135 bytes):
+Source pack (EntropyFS repo, length-prefixed; 2,030,799 bytes at
+`923df7b`):
 
 | Baseline | Output bytes | Ratio | Notes |
 |----------|--------------|-------|-------|
-| raw file (ext4) | 1,471,135 | 1.000× | write 5901.2 MiB/s (single dd, warm cache) |
-| zstd -1 | 383,949 | 3.832× | 0.004 s |
-| zstd -19 | 267,366 | 5.502× | 0.213 s |
-| direct ryg-rans-rs (store, per 64 KiB chunk) | 439,989 | 3.344× | same backend, same chunking |
-| EntropyFS (full pipeline) | 439,989 | 3.344× | == direct rANS on this pack |
+| raw file (ext4) | 2,030,799 | 1.000× | write 7802 MiB/s (single dd, warm cache) |
+| zstd -1 (whole) | 459,489 | 4.420× | 0.005 s |
+| zstd -19 (whole) | 315,758 | 6.432× | 0.279 s |
+| zstd -1 (per 64 KiB) | 543,128 | 3.739× | the dictionary-horizon diagnostic |
+| zstd -19 (per 64 KiB) | 450,339 | 4.509× | same chunking as EntropyFS |
+| direct byte rANS (A1-pure, per 64 KiB) | 1,243,242 | 1.633× | no SequenceRans |
+| standalone SequenceRans | 571,134 | 3.556× | RAW + match finder only |
+| EntropyFS (full pipeline) | 571,134 | 3.556× | == standalone SequenceRans on this pack |
 
-EntropyFS on the source pack is at parity with direct per-chunk rANS and
-behind zstd (-1 by 14%, -19 by 39% on ratio). The foreground LZ matcher
-(greedy, chain-depth 16, 131-byte copy cap, one candidate per chunk) adds
-little over entropy coding on source text; the deeper background matcher
-(Phase-8 §4) is the identified next step, not a claim.
+**Floor diagnosis (the zstd-per-64KiB experiment):** EntropyFS's
+per-extent floor (3.556×) is within 5% of zstd-per-64KiB (3.739×); the
+~19% gap to whole-file zstd -1 (4.420×) is cross-chunk dictionary
+context, NOT matcher quality. The indicated direction is a cross-chunk
+SequenceDict, not a deeper SequenceRans matcher.
 
 FUSE-frontend court (64 MiB shake_128, incompressible → RAW floor):
 4K buffered 335.2 MiB/s, 1M writes 620.8 MiB/s, warm read 2256.7 MiB/s,
@@ -53,15 +57,19 @@ the campaigns:
 
 | Criterion | Target | Measured | Verdict |
 |-----------|--------|----------|---------|
-| materially lower physical storage | clear double-digit % over best conventional baseline | structured corpus 845×–1,235× (structural/configurational + in-batch dedup; attribution now measured: A2-dedup contributes 1.25×, configurational the rest — `b165d60`); duplicated trees dedup via EXACT_REF at ~40 B/extent | ✅ demonstrated for structural + content-addressed dedup content (attribution measured, not labeled) |
+| materially lower physical storage | clear double-digit % over best conventional baseline | structured corpus 1,328× (structural + EXACT_REF aliasing + CAS object sharing; attribution measured per layer from `923df7b`); duplicated trees dedup via EXACT_REF/canonical reuse at ~40 B/extent | ✅ demonstrated for structural + dedup content (attribution measured, not labeled) |
 | versioned/base+residual advantage | temporal savings | H2 series: +7.2% (RANS-era) → −24% (SequenceRans floor, positional residuals only) → **+35.0%** with BASE_SEQUENCE deltas (sequential 2.745× vs shuffled 1.784×); Phase-8B post-GC permanent footprint: sequential full 1,528,175 → **1,366,816 B** (10.6% historical index metadata pruned) | ✅ met with the delta family (the −24% intermediate campaign isolates the positional-residual cost; the post-GC gap is the real base-chain cost, not index bloat) |
 
 **Honest summary:** the FLOOR is substantially met (reads, RAW overhead,
-negative controls); the BASELINE density gate is not yet met (zstd is
-ahead; the deeper matcher is the next engineering step); the ADVANTAGE
-gate is met for dedup/configurational content and — with the BASE_SEQUENCE
-delta family — for versioned content (the H2 series is the controlled
-record). These are the current measured states.
+negative controls); the BASELINE density gate is not yet met (zstd
+whole-file is ahead; the per-extent floor is within 5% of zstd-per-64KiB,
+so the gap is cross-chunk context — SequenceDict is the indicated next
+step, not a deeper matcher); the ADVANTAGE gate is met for
+structural/dedup content and — with the BASE_SEQUENCE delta family — for
+versioned content. Post-GC physical footprint (the usable-capacity
+metric) is now measured per corpus: structured 1,092× allocated blocks,
+src 2.88×, urandom 0.90× (the honest cost of records + index for
+incompressible data), compressed 0.95×.
 
 ## 4. Competitive filesystem court (Phase 8H)
 

@@ -94,19 +94,28 @@ Two complementary ablation tables are required for every campaign, and
 both are kept forever:
 
 **The strict cumulative ladder A0–A8** — each step adds exactly one
-mechanism on top of the previous:
+mechanism on top of the previous; A1 is pure byte-level rANS (the match
+finder is a post-registration extension, E1):
 
 ```text
 A0  RAW
-A1  RAW + rANS
-A2  + exact dedup
+A1  RAW + rANS (byte-level)
+A2  + exact dedup (EXACT_REF aliasing)
 A3  + base residuals
 A4  + sparse/configuration rank
 A5  + temporal candidate bases
 A6  + entropy universes
 A7  + DSFB candidate guidance
 A8  + background re-optimization
+E1  + SequenceRans fast floor (post-registration; the production pipeline)
 ```
+
+Note: content-addressed object sharing (identical payload → one content
+id → one physical record) is a store invariant and is NOT gated by any
+ladder step; it is accounted separately (`cas_shared_bytes_saved`),
+never as a step's mechanism. Steps measure representations: EXACT_REF
+aliasing, canonical descriptor reuse within the step's families, rANS
+families, configurational coding, and the rest.
 
 **The leave-one-out table** — the full pipeline with exactly one mechanism
 disabled at a time (`full | raw | raw-rans | no-dedup | no-base |

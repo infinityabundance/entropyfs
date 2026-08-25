@@ -13,7 +13,8 @@ they document are admitted — nothing more.
 | `campaign-1787666589-e895fcf/` | `e895fcf` | Same campaign with **SPARSE_BLOCK64** (blockwise-64 enumerative sparse coding, Phase-8 §6) in the pipeline. Physical results stable (H2 +35.0%); the campaign caught and the fix sealed a ~3× write-throughput regression from missing dense-input pre-gating (structured 394 → 135 MiB/s with the bug, restored to 360 MiB/s after the k ≥ n/2 density gate). All §8 admission rules OK. |
 | `campaign-1787668313-0a7d800/` | `0a7d800` | **Phase-8A**: the same campaign with the strict cumulative ladder A0–A8 (methodology §4, spec §43) running alongside the leave-one-out table. Immediate predecessor of `d04227f`; superseded by it (which adds the post-GC H2 footprint). All §8 admission rules OK. |
 | `campaign-1787668526-d04227f/` | `d04227f` | **Phase 8A + 8B sealed**: cumulative ladder A0–A8 + leave-one-out tables; the derived chunk-index rebuild in GC (8B) evidenced by the post-GC permanent footprint in the H2 experiment. All §8 admission rules OK. |
-| `campaign-1787669923-b165d60/` | `b165d60` | **Phase 8C sealed**: in-batch dedup visibility (group-commit batches now dedup against their own pending entries). The ladder's A2-dedup step drops from 115,976 B to 64,976 B on the structured corpus; A8 (background pass) densifies 54,353 → 50,528 B; full = 54,353 B (1,234.7×). The `d04227f` “dedup measures 0” finding was the pre-fix measurement and is superseded by this campaign (the controlled before/after of the fix). All §8 admission rules OK. |
+| `campaign-1787669923-b165d60/` | `b165d60` | **Phase 8C sealed**: in-batch dedup visibility (group-commit batches now dedup against their own pending entries). The ladder's A2-dedup step drops from 115,976 B to 64,976 B on the structured corpus; A8 (background pass) densifies 54,353 → 50,528 B; full = 54,353 B (1,234.7×). The `d04227f` “dedup measures 0” finding was the pre-fix measurement and is superseded by this campaign (the controlled before/after of the fix). All §8 admission rules OK. NOTE (amended by `923df7b`): this campaign's dedup rows measure the EXACT_REF *representation* only; content-addressed object sharing is a store invariant separately accounted from `923df7b`, and its A1-rans / “direct rANS” rows included SequenceRans (the gates were not yet split). |
+| `campaign-1787671040-923df7b/` | `923df7b` | **Attribution correction + transaction-local CAS canonicalization** (Phase-8C v2). Split gates: A1 is pure byte rANS; SequenceRans is the post-registration E1 step; `allow_exact_ref` gates only the alias representation (CAS sharing is an invariant). Physical fix: duplicate payload/B-tree/model records are never re-appended (one record per content id per transaction). Structured: E1 = 50,528 B (1,328×); **post-GC total backing 55,921 B (1,200×), allocated blocks 61,440 B (1,092×)** vs the 5.1 MB pre-GC backing of earlier campaigns. zstd-per-64KiB diagnostic: SequenceRans 3.556× within 5% of zstd-per-64K 3.739× (whole-file zstd -1 4.420×) ⇒ the gap is cross-chunk context → SequenceDict direction. All §8 admission rules OK. |
 | `fuse-court-1787659785-027c959-head/` | `027c959` | FUSE-frontend perf court, **after** Phase 6 (current main). |
 | `fuse-court-1787659914-709a710-before/` | `709a710` | FUSE-frontend perf court, **before** Phase 6 (same workloads, same workload hash `82442892…`). |
 | `fuse-court-1787664579-d90772c/` | `d90772c` | FUSE-frontend perf court, **Phase 8** (concurrency refactor + writeback negotiation + batch group commit + SequenceRans floor; same deterministic shake_128 payload, same bindgen workload `82442892…`). |
@@ -291,6 +292,72 @@ cumulative:     A1-rans 115,976 B
   GC 59.5 MB → 48.0 MB reclaimed in 0.015 s; DSFB physical identical
   (54,353 B), write 773.9 vs 339.9 MiB/s (DSFB still halves search CPU
   budget work; bytes unchanged).
+
+## Campaign highlights (`campaign-1787671040-923df7b` — attribution + CAS canonicalization)
+
+Same methodology, same machine, same corpora. This campaign seals the
+Phase-8 review corrections:
+
+**The two dedup layers are now separate, and the ladder means what it
+says.** Content-addressed object sharing (identical payload → one
+`ChunkId` → one physical record) is a store invariant, never a gate;
+EXACT_REF is the gated alias representation. Per-run accounting now
+reports `cas_shared_bytes_saved` (Σ (refcount−1) × size) and
+`exact_ref_bytes_saved`. A1 is pure byte rANS again (the original
+methodology); SequenceRans is the post-registration E1 step:
+
+```text
+A0-raw             319,070 B   210.3×   ← RAW descriptors + CAS sharing only
+A1-byte-rans       267,181 B   251.2×   ← pure byte rANS (no match finder)
+A2-exact-ref       251,881 B   266.4×   ← + EXACT_REF aliasing
+A4-config          112,301 B   597.6×
+A8-background      112,301 B   597.6×
+E1-sequence-rans    50,528 B  1328.2×   ← + SequenceRans floor (production)
+```
+
+Earlier A1-rans rows (115,976 B, 578×) and the pre-split “direct rANS”
+baseline included SequenceRans; they are amended here, never rewritten.
+
+**Transaction-local CAS canonicalization is the physical fix.** The
+structured corpus — the case that made the 988× vs 13× distinction
+visible — now persists: reachable 50,528 B / **total backing 55,921 B
+(1,200×) / allocated blocks 61,440 B (1,092×)** after GC. Earlier
+campaigns wrote up to 5.1 MB of backing for the same corpus because
+identical object records were appended repeatedly and the derived object
+index kept only the last location (the duplicates vanished into
+“allocator overhead”). Duplicate records are no longer appended at all.
+Write throughput for the batch path jumps to ~1,120 MiB/s on this corpus
+(CPU 0.05 s). urandom remains honest: backing 37.2 MB vs 33.6 MB logical
+(0.90× — the real cost of records + index for incompressible data).
+
+**The zstd-per-64KiB diagnostic answered the floor question.** On the src
+pack (2,030,799 B):
+
+```text
+direct byte rANS           1.633×
+SequenceRans standalone    3.556×  (= EntropyFS full: 3.556×)
+zstd -1 per 64 KiB         3.739×
+zstd -1 whole file         4.420×
+zstd -19 whole file        6.432×
+```
+
+SequenceRans is within 5% of zstd-per-64K; the remaining ~19% gap to
+whole-file zstd is cross-chunk dictionary context, not matcher quality.
+Per the review's decision rule, the indicated direction is a
+**SequenceDict** cross-chunk dictionary (local history + previous file
+chunk + previous-version base as bounded dictionaries), NOT a deeper
+SequenceRans matcher. Full == standalone SequenceRans on this pack: the
+other families add nothing to unique source text.
+
+**H2:** sequential 1,392,236 B (3.013×) vs shuffled 2,345,529 B (1.788×)
+= +40.6% temporal savings (up from +35.0% — marginal costing helped).
+Post-GC the base chain still costs more than no-base (1,265,786 vs
+1,165,681 B): the index artifact is gone, the base-chain cost is real.
+
+**DSFB:** physical identical (50,528 B); write median 1,120.8 MiB/s, CPU
+0.050 s both modes — the search landscape is simpler under the
+SequenceRans floor; DSFB stays out of the spotlight with its counters
+deferred.
 
 ## Admission status
 
