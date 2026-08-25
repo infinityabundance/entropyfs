@@ -359,10 +359,126 @@ fn gc_reclaims_and_preserves_live_data() {
     // Live data intact and the store remounts.
     let read2 = store.read_file(3, 0, final_content.len() as u64).unwrap();
     assert_eq!(read2, final_content);
+    let report = crate::fsck::fsck(dir.path(), &Default::default()).unwrap();
+    assert!(
+        report.is_clean(),
+        "gc must leave a clean image:\n{}",
+        report.render()
+    );
+}
+
+#[test]
+fn gc_rebuilds_derived_chunk_index_without_history_growth() {
+    // Phase-8B (§34): the chunk index is a *derived* structure. Overwritten,
+    // unsnapshotted content ids must not accumulate descriptor entries in
+    // root-reachable index nodes forever: GC rebuilds the index to exactly
+    // the reachable set (live extents + the transitive reference closure).
+    let dir = TempDir::new().unwrap();
+    let store = create_store(&dir);
+    create_file(&store, 3);
+
+    // A drift corpus: 16 versions of byte edits in chunk 0 (chunk 1 stays
+    // identical, so it dedups). Every version inserts a new chunk-index
+    // entry for chunk 0 until GC prunes it.
+    let mut current: Vec<u8> = (0..131072u64)
+        .map(|i| ((i.wrapping_mul(2654435761)) >> 8) as u8)
+        .collect();
+    store.write_region(3, 0, &current).unwrap();
+    for v in 0..16u64 {
+        for j in 0..8u64 {
+            let pos = (j * 997) % 131072;
+            let val = (v + j) as u8;
+            store.write_region(3, pos, &[val]).unwrap();
+            current[pos as usize] = val;
+        }
+    }
+    let got = store.read_file(3, 0, 131072).unwrap();
+    assert_eq!(got, current);
+    let index_before = crate::store::index::count(
+        store.current_root().chunk_index_root,
+        crate::store::BTREE_ORDER,
+        store.limits().max_fanout,
+        &store,
+    )
+    .unwrap();
+    assert!(
+        index_before > 8,
+        "history must accumulate index entries, got {index_before}"
+    );
+
+    let reclaimed = crate::store::gc::collect(&store, &CrashHooks::none()).unwrap();
+    assert!(reclaimed > 0, "drift history must be reclaimable");
+
+    // The index must shrink to the reachable set: two live extents plus
+    // the shallow base chain the final drifted chunk keeps. Never the
+    // full 16-version history.
+    let index_after = crate::store::index::count(
+        store.current_root().chunk_index_root,
+        crate::store::BTREE_ORDER,
+        store.limits().max_fanout,
+        &store,
+    )
+    .unwrap();
+    assert!(
+        index_after <= 8,
+        "rebuilt index must be the reachable set (live extents + closure), got {index_after}"
+    );
+    assert!(
+        index_after < index_before,
+        "GC must prune historical index entries: before {index_before}, after {index_after}"
+    );
+
+    // Every surviving entry must still resolve, and the file must be
+    // byte-exact after the rebuild (bases stay decodable).
+    let read = store.read_file(3, 0, 131072).unwrap();
+    assert_eq!(read, current, "index rebuild changed logical bytes");
+    let mark = crate::store::gc::mark_live_full(&store).unwrap();
+    assert!(
+        mark.referenced
+            .iter()
+            .all(|cid| store.chunk_descriptor(cid).unwrap().is_some()),
+        "every closure cid must resolve after the rebuild"
+    );
+
+    // The invariant: overwritten unsnapshotted content must not cause
+    // PERMANENT index growth. More versions + GC must return to the same
+    // reachable size, never accumulate again.
+    for v in 16..22u64 {
+        for j in 0..8u64 {
+            let pos = (j * 997) % 131072;
+            let val = (v + j) as u8;
+            store.write_region(3, pos, &[val]).unwrap();
+            current[pos as usize] = val;
+        }
+    }
+    crate::store::gc::collect(&store, &CrashHooks::none()).unwrap();
+    let index_after2 = crate::store::index::count(
+        store.current_root().chunk_index_root,
+        crate::store::BTREE_ORDER,
+        store.limits().max_fanout,
+        &store,
+    )
+    .unwrap();
+    assert!(
+        index_after2 <= index_after,
+        "repeated GC must not regrow the index: {index_after} -> {index_after2}"
+    );
+    assert_eq!(
+        store.read_file(3, 0, 131072).unwrap(),
+        current,
+        "second GC round changed logical bytes"
+    );
+
+    // The rebuilt index survives a remount and fsck stays clean.
     drop(store);
-    let store2 = Store::open(dir.path(), &StoreConfig::default()).unwrap();
-    let read3 = store2.read_file(3, 0, final_content.len() as u64).unwrap();
-    assert_eq!(read3, final_content);
+    let store = Store::open(dir.path(), &StoreConfig::default()).unwrap();
+    assert_eq!(store.read_file(3, 0, 131072).unwrap(), current);
+    let report = crate::fsck::fsck(dir.path(), &Default::default()).unwrap();
+    assert!(
+        report.is_clean(),
+        "fsck after the index rebuild:\n{}",
+        report.render()
+    );
 }
 
 #[test]

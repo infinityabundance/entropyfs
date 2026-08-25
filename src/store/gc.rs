@@ -42,6 +42,28 @@ enum MarkKind {
     Object,
 }
 
+/// The result of the mark walk: the live object set plus the two derived
+/// sets needed to rebuild the chunk index from reachability (Phase-8B,
+/// §34):
+///
+/// - `referenced`: the transitive closure of content ids that live extents
+///   reference (EXACT_REF targets, BASE_RESIDUAL bases, transitively
+///   through their descriptors). These entries must survive for
+///   decodability.
+/// - `live_descriptors`: the descriptor bytes of every live extent. These
+///   entries must survive so future identical writes still dedup.
+///
+/// Everything else in the chunk index is historical metadata from
+/// overwritten, unsnapshotted content and must not persist past GC.
+pub struct LiveMark {
+    /// The live object set (data, models, tree nodes, roots).
+    pub live: HashSet<ChunkId>,
+    /// Content ids that must resolve through the chunk index.
+    pub referenced: HashSet<ChunkId>,
+    /// Descriptor bytes of every live extent.
+    pub live_descriptors: HashSet<Vec<u8>>,
+}
+
 /// Mark the live object set from all roots.
 ///
 /// The chunk index is a *derived* structure (§34): its tree nodes are
@@ -51,12 +73,19 @@ enum MarkKind {
 /// data stays pinned by the ever-growing index and GC could never reclaim
 /// it.
 pub fn mark_live(store: &Store) -> Result<HashSet<ChunkId>, StoreError> {
+    Ok(mark_live_full(store)?.live)
+}
+
+/// The full mark walk (see [`LiveMark`]).
+pub fn mark_live_full(store: &Store) -> Result<LiveMark, StoreError> {
     let mut live: HashSet<ChunkId> = HashSet::new();
     let mut worklist: Vec<(ChunkId, MarkKind)> = Vec::new();
     // Content ids referenced by live extents (through EXACT_REF targets
     // and BASE_RESIDUAL bases). Resolved through the chunk index after the
     // main walk.
     let mut referenced: HashSet<ChunkId> = HashSet::new();
+    // Descriptor bytes of every live extent (for the index rebuild).
+    let mut live_descriptors: HashSet<Vec<u8>> = HashSet::new();
 
     // Roots: current root object + snapshot roots.
     worklist.push((store.current_root().id(), MarkKind::Root));
@@ -108,6 +137,7 @@ pub fn mark_live(store: &Store) -> Result<HashSet<ChunkId>, StoreError> {
                 &mut live,
                 &mut worklist,
                 &mut referenced,
+                &mut live_descriptors,
             )?,
             MarkKind::TreeDirectory => walk_tree(
                 store,
@@ -116,6 +146,7 @@ pub fn mark_live(store: &Store) -> Result<HashSet<ChunkId>, StoreError> {
                 &mut live,
                 &mut worklist,
                 &mut referenced,
+                &mut live_descriptors,
             )?,
             MarkKind::TreeExtent => walk_tree(
                 store,
@@ -124,6 +155,7 @@ pub fn mark_live(store: &Store) -> Result<HashSet<ChunkId>, StoreError> {
                 &mut live,
                 &mut worklist,
                 &mut referenced,
+                &mut live_descriptors,
             )?,
             MarkKind::TreeChunkIndex => walk_tree(
                 store,
@@ -132,6 +164,7 @@ pub fn mark_live(store: &Store) -> Result<HashSet<ChunkId>, StoreError> {
                 &mut live,
                 &mut worklist,
                 &mut referenced,
+                &mut live_descriptors,
             )?,
             MarkKind::TreeSnapshot => walk_tree(
                 store,
@@ -140,6 +173,7 @@ pub fn mark_live(store: &Store) -> Result<HashSet<ChunkId>, StoreError> {
                 &mut live,
                 &mut worklist,
                 &mut referenced,
+                &mut live_descriptors,
             )?,
             MarkKind::TreeXattr => walk_tree(
                 store,
@@ -148,6 +182,7 @@ pub fn mark_live(store: &Store) -> Result<HashSet<ChunkId>, StoreError> {
                 &mut live,
                 &mut worklist,
                 &mut referenced,
+                &mut live_descriptors,
             )?,
             MarkKind::Object => {}
         }
@@ -190,7 +225,11 @@ pub fn mark_live(store: &Store) -> Result<HashSet<ChunkId>, StoreError> {
             }
         }
     }
-    Ok(live)
+    Ok(LiveMark {
+        live,
+        referenced: seen,
+        live_descriptors,
+    })
 }
 
 /// How tree leaf values are interpreted during the mark walk.
@@ -211,6 +250,7 @@ fn walk_tree(
     live: &mut HashSet<ChunkId>,
     worklist: &mut Vec<(ChunkId, MarkKind)>,
     referenced: &mut HashSet<ChunkId>,
+    live_descriptors: &mut HashSet<Vec<u8>>,
 ) -> Result<(), StoreError> {
     if node_id.is_zero() {
         return Ok(());
@@ -257,6 +297,10 @@ fn walk_tree(
                     TreeValue::ExtentDescriptor => {
                         mark_descriptor_refs(&e.value, store, live, worklist)?;
                         collect_descriptor_refs(&e.value, store, referenced)?;
+                        // Retain the exact descriptor bytes: the rebuilt
+                        // chunk index must keep this content id so future
+                        // identical writes still dedup (Phase-8B).
+                        live_descriptors.insert(e.value.clone());
                     }
                     TreeValue::Snapshot => {
                         let entry = crate::store::snapshot::SnapshotEntry::decode(&e.value)
@@ -398,6 +442,178 @@ pub fn live_ratios(
     Ok(map)
 }
 
+/// Collect the object ids of every node in a committed B-tree (for the
+/// old chunk index, whose nodes the rebuild replaces).
+fn collect_tree_node_ids(
+    store: &Store,
+    root: &ChunkId,
+    out: &mut HashSet<ChunkId>,
+) -> Result<(), StoreError> {
+    if root.is_zero() {
+        return Ok(());
+    }
+    let mut stack = vec![*root];
+    while let Some(id) = stack.pop() {
+        if !out.insert(id) {
+            continue;
+        }
+        let payload = store
+            .fetch_object(&id)?
+            .ok_or_else(|| StoreError::Invariant(format!("missing tree node {id}")))?;
+        let node = crate::store::index::Node::decode(
+            &payload,
+            crate::store::BTREE_ORDER,
+            store.config().limits.max_fanout,
+        )
+        .map_err(|e| StoreError::Index(e.to_string()))?;
+        match node {
+            crate::store::index::Node::Internal {
+                first_child,
+                entries,
+            } => {
+                stack.push(first_child);
+                for e in entries {
+                    let child = ChunkId::new(e.value.as_slice().try_into().expect("32-byte id"));
+                    stack.push(child);
+                }
+            }
+            crate::store::index::Node::Leaf { .. } => {}
+        }
+    }
+    Ok(())
+}
+
+/// Staging provider for the rebuilt chunk-index B-tree: `put` appends a
+/// BtreeNode record to the GC segment (and registers its location); `get`
+/// serves the nodes staged earlier in this pass. Content-addressed: a
+/// payload already staged this pass is not appended twice.
+struct RebuildProvider<'a> {
+    writer: &'a mut SegmentWriter,
+    new_seq: u64,
+    pending: HashMap<ChunkId, Vec<u8>>,
+    new_locations: &'a mut Vec<(ChunkId, Location)>,
+}
+
+impl crate::store::index::ObjectProvider for RebuildProvider<'_> {
+    fn get(&self, id: &ChunkId) -> Result<Option<Vec<u8>>, crate::store::index::BTreeError> {
+        Ok(self.pending.get(id).cloned())
+    }
+
+    fn put(&mut self, id: ChunkId, bytes: Vec<u8>) {
+        if self.pending.contains_key(&id) {
+            return;
+        }
+        let encoded = crate::format::record::encode(
+            crate::format::version::RecordTag::BtreeNode,
+            0,
+            None,
+            &bytes,
+        );
+        let offset = self.writer.durable_end() + self.writer.buffered_len();
+        self.writer.append(encoded);
+        self.new_locations.push((
+            id,
+            Location {
+                segment_seq: self.new_seq,
+                offset,
+                stored_len: bytes.len() as u64,
+                materialized_len: None,
+                tag: crate::format::version::RecordTag::BtreeNode,
+            },
+        ));
+        self.pending.insert(id, bytes);
+    }
+}
+
+/// The rebuilt chunk index (Phase-8B): its root plus the old-node bookkeeping
+/// the compaction loop needs.
+struct RebuiltIndex {
+    /// New chunk-index tree root (ZERO for an empty index).
+    root: ChunkId,
+    /// Old index nodes the rebuilt tree does not reuse: dropped from the
+    /// object index (their records die with the victim segments).
+    old_only: HashSet<ChunkId>,
+    /// Every old index node. The copy loop skips all of them: the rebuild
+    /// already staged a fresh record in the new segment for every node the
+    /// new tree contains, so copying an old index node would duplicate it.
+    old_nodes: HashSet<ChunkId>,
+}
+
+/// Phase-8B: rebuild the derived chunk index from reachability.
+///
+/// The chunk index (`content id → descriptor`) is a derived structure
+/// (§34): overwritten, unsnapshotted content ids must not accumulate
+/// descriptor entries inside root-reachable index nodes forever. The
+/// rebuilt tree contains exactly the necessary reachable set:
+///
+/// - live extents' descriptors (dedup hit-ability for still-live content);
+/// - the transitive reference closure (EXACT_REF targets, BASE_RESIDUAL
+///   bases — decodability);
+///
+/// Old index nodes that the rebuilt tree does not reuse become ordinary
+/// GC garbage. Returns the new index root and the old-node bookkeeping.
+fn rebuild_chunk_index(
+    store: &Store,
+    writer: &mut SegmentWriter,
+    new_seq: u64,
+    mark: &LiveMark,
+    new_locations: &mut Vec<(ChunkId, Location)>,
+) -> Result<RebuiltIndex, StoreError> {
+    let limits = store.config().limits;
+    let old_root = store.current_root().chunk_index_root;
+    let mut old_nodes: HashSet<ChunkId> = HashSet::new();
+    if !old_root.is_zero() {
+        collect_tree_node_ids(store, &old_root, &mut old_nodes)?;
+    }
+    // Surviving entries in key order (scan_all is in-order), so the new
+    // tree is built deterministically from the same content.
+    let mut kept: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    if !old_root.is_zero() {
+        let entries = crate::store::index::scan_all(
+            old_root,
+            crate::store::BTREE_ORDER,
+            limits.max_fanout,
+            store,
+        )?;
+        for (key, value) in entries {
+            let cid = ChunkId::new(
+                key.as_slice()
+                    .try_into()
+                    .map_err(|_| StoreError::Invariant("chunk index key not 32 bytes".into()))?,
+            );
+            if mark.referenced.contains(&cid) || mark.live_descriptors.contains(&value) {
+                kept.push((key, value));
+            }
+        }
+    }
+    let mut provider = RebuildProvider {
+        writer,
+        new_seq,
+        pending: HashMap::new(),
+        new_locations,
+    };
+    let mut new_root = ChunkId::ZERO;
+    for (key, value) in &kept {
+        new_root = crate::store::index::insert(
+            new_root,
+            key,
+            value,
+            crate::store::BTREE_ORDER,
+            limits.max_fanout,
+            &mut provider,
+        )?;
+    }
+    // Every staged node is part of the new tree (insert only stages nodes
+    // on the new root's path).
+    let new_nodes: HashSet<ChunkId> = provider.pending.keys().copied().collect();
+    let old_only: HashSet<ChunkId> = old_nodes.difference(&new_nodes).copied().collect();
+    Ok(RebuiltIndex {
+        root: new_root,
+        old_only,
+        old_nodes,
+    })
+}
+
 /// Run GC: mark, compact victims, commit, delete old segments.
 ///
 /// Returns the number of bytes reclaimed.
@@ -405,8 +621,9 @@ pub fn collect(
     store: &Store,
     hooks: &crate::store::transaction::CrashHooks,
 ) -> Result<u64, StoreError> {
-    let live = mark_live(store)?;
-    let ratios = live_ratios(store, &live)?;
+    let mark = mark_live_full(store)?;
+    let live = &mark.live;
+    let ratios = live_ratios(store, live)?;
     let target = store.config().gc_target_ratio;
     let victims: Vec<u64> = ratios
         .iter()
@@ -416,22 +633,45 @@ pub fn collect(
     if victims.is_empty() {
         return Ok(0);
     }
-    // Reclaimable estimate: unreachable bytes inside victim segments.
+
+    // Phase-8B: rebuild the derived chunk index from reachability BEFORE
+    // compacting, so overwritten unsnapshotted content ids stop
+    // accumulating descriptor entries inside root-reachable index nodes.
+    // The rebuilt tree is staged in the same segment as the copied live
+    // records and the new root, so it commits atomically with them.
+    let new_seq = store.current_segment_seq() + 1;
+    let mut writer = SegmentWriter::open(store.dir(), new_seq)?;
+    let mut new_locations: Vec<(ChunkId, Location)> = Vec::new();
+    let rebuilt = rebuild_chunk_index(store, &mut writer, new_seq, &mark, &mut new_locations)?;
+
+    // Reclaimable estimate: unreachable bytes inside victim segments,
+    // including the index nodes the rebuild replaced.
     let mut reclaimable = 0u64;
     for (id, loc) in store.object_index().iter() {
-        if victims.contains(&loc.segment_seq) && !live.contains(&id) {
+        if victims.contains(&loc.segment_seq)
+            && (!live.contains(&id) || rebuilt.old_only.contains(&id))
+        {
             reclaimable += loc.total_size();
         }
     }
 
-    // Copy live records from victim segments into a fresh segment.
-    let new_seq = store.current_segment_seq() + 1;
-    let mut writer = SegmentWriter::open(store.dir(), new_seq)?;
-    let mut new_locations: Vec<(ChunkId, Location)> = Vec::new();
-    for (id, loc) in store.object_index().iter() {
-        if !victims.contains(&loc.segment_seq) || !live.contains(&id) {
-            continue;
-        }
+    // Copy live records from victim segments into a fresh segment. The
+    // chunk-index nodes are skipped entirely: the rebuild already staged a
+    // fresh record for every node the new tree contains, and the replaced
+    // nodes die with the victims. The copy order is deterministic
+    // (segment, offset) so the physical layout is reproducible.
+    let mut copy_candidates: Vec<(ChunkId, Location)> = store
+        .object_index()
+        .iter()
+        .into_iter()
+        .filter(|(id, loc)| {
+            victims.contains(&loc.segment_seq)
+                && live.contains(id)
+                && !rebuilt.old_nodes.contains(id)
+        })
+        .collect();
+    copy_candidates.sort_by_key(|(_, loc)| (loc.segment_seq, loc.offset));
+    for (id, loc) in copy_candidates {
         let payload = store.read_payload_at(&loc)?;
         // Preserve the envelope flags/materialized length exactly.
         let flags = if loc.materialized_len.is_some() {
@@ -457,8 +697,10 @@ pub fn collect(
     writer.fdatasync()?;
     SegmentWriter::sync_dir(store.dir())?;
 
-    // Build the new root and commit it (durability barrier).
+    // Build the new root and commit it (durability barrier). The rebuilt
+    // chunk index becomes part of the published root.
     let mut root = store.current_root();
+    root.chunk_index_root = rebuilt.root;
     root.segment_seq = new_seq;
     root.index_epoch = root.index_epoch.saturating_add(1);
     root.generation = store.generation() + 1;
@@ -500,13 +742,17 @@ pub fn collect(
     for seq in &victims {
         segment::delete_segment(store.dir(), *seq)?;
     }
-    // Drop derived index entries for dead records in deleted segments so
+    // Drop derived index entries for dead records in deleted segments
+    // (unreachable objects and the replaced chunk-index nodes) so
     // reachability accounting reflects the new physical state.
     let dead: Vec<ChunkId> = store
         .object_index()
         .iter()
         .into_iter()
-        .filter(|(id, loc)| victims.contains(&loc.segment_seq) && !live.contains(id))
+        .filter(|(id, loc)| {
+            victims.contains(&loc.segment_seq)
+                && (!live.contains(id) || rebuilt.old_only.contains(id))
+        })
         .map(|(id, _)| id)
         .collect();
     for id in dead {
