@@ -35,7 +35,7 @@ pub struct OptimizeArgs {
 pub fn run(args: &OptimizeArgs) -> Result<(), String> {
     crate::fsck::ensure_unmounted(&args.store)?;
     let config = StoreConfig::default();
-    let mut store = Store::open(&args.store, &config).map_err(|e| e.to_string())?;
+    let store = Store::open(&args.store, &config).map_err(|e| e.to_string())?;
 
     let mut options = OptimizeOptions::default();
     if args.raw_only {
@@ -47,7 +47,7 @@ pub fn run(args: &OptimizeArgs) -> Result<(), String> {
         options.allow_dsfb_ranking = false;
     }
 
-    let stats = optimize_pass(&mut store, options, None, None).map_err(|e| e.to_string())?;
+    let stats = optimize_pass(&store, options, None, None).map_err(|e| e.to_string())?;
     println!(
         "optimize: scanned {} extents, rewrote {}, saved ~{} persisted bytes (stale {}, no-gain {}, errors {})",
         stats.scanned,

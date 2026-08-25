@@ -502,8 +502,8 @@ pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
     line(&mut log, "\n== ablation ladder (structured) ==");
     for (mode, options) in OptimizeOptions::ablation_modes() {
         let tmp = scratch_tempdir(&opts.scratch_dir, "abl-")?;
-        let mut store = fresh_store(tmp.path())?;
-        let o = write_only(&mut store, 3, &structured, options)?;
+        let store = fresh_store(tmp.path())?;
+        let o = write_only(&store, 3, &structured, options)?;
         let n = store_numbers(&store)?;
         let row = AblationRow {
             mode: mode.to_string(),
@@ -538,8 +538,8 @@ pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
         let mut runs = Vec::new();
         for _ in 0..opts.runs {
             let tmp = scratch_tempdir(&opts.scratch_dir, "dsfb-")?;
-            let mut store = fresh_store(tmp.path())?;
-            let o = write_only(&mut store, 3, &structured, options)?;
+            let store = fresh_store(tmp.path())?;
+            let o = write_only(&store, 3, &structured, options)?;
             let s = summary(&o.latencies);
             let n = store_numbers(&store)?;
             runs.push(DsfbRun {
@@ -791,8 +791,8 @@ fn run_repeated(
     let mut physical_all: Vec<u64> = Vec::new();
     for i in 0..runs {
         let tmp = scratch_tempdir(&opts.scratch_dir, "run-")?;
-        let mut store = fresh_store(tmp.path())?;
-        let mut m = full_run(&mut store, corpus, options)?;
+        let store = fresh_store(tmp.path())?;
+        let mut m = full_run(&store, corpus, options)?;
         m.metrics.run = i;
         m.metrics.hash_matches_input = m.metrics.result_hash == corpus.content_hash();
         write_lats.extend(m.write_latencies);
@@ -854,7 +854,7 @@ struct RunOutcome {
 }
 
 fn full_run(
-    store: &mut Store,
+    store: &Store,
     corpus: &Corpus,
     options: OptimizeOptions,
 ) -> Result<RunOutcome, String> {
@@ -956,7 +956,7 @@ struct WriteOutcome {
 }
 
 fn write_only(
-    store: &mut Store,
+    store: &Store,
     ino: u64,
     corpus: &Corpus,
     options: OptimizeOptions,
@@ -964,18 +964,23 @@ fn write_only(
     let cpu0 = cpu_ticks();
     let start = Instant::now();
     let mut lats: Vec<f64> = Vec::new();
+    // Group commit (Phase-8 write aggregation): each full version is one
+    // transaction, so the transaction/COW amplification that plagued
+    // per-chunk commits is measured away. Versions commit sequentially so
+    // P0 (previous-version) bases resolve against committed state.
     for version in &corpus.versions {
+        let mut writes: Vec<(u64, Vec<u8>)> = Vec::new();
         let mut off = 0u64;
         while off < version.len() as u64 {
             let len = 65536u64.min(version.len() as u64 - off);
-            let end = (off + len) as usize;
-            let t0 = Instant::now();
-            store
-                .write_region_with(ino, off, &version[off as usize..end], options)
-                .map_err(|e| e.to_string())?;
-            lats.push(t0.elapsed().as_secs_f64());
+            writes.push((off, version[off as usize..(off + len) as usize].to_vec()));
             off += len;
         }
+        let t0 = Instant::now();
+        store
+            .write_region_batch(ino, &writes, options)
+            .map_err(|e| e.to_string())?;
+        lats.push(t0.elapsed().as_secs_f64());
     }
     let wall = start.elapsed().as_secs_f64();
     let cpu1 = cpu_ticks();
@@ -1013,6 +1018,7 @@ fn store_numbers(store: &Store) -> Result<StoreNumbers, String> {
     let records_total: u64 = store
         .object_index()
         .iter()
+        .into_iter()
         .map(|(_, loc)| loc.total_size())
         .sum();
     let allocator_overhead = total_backing.saturating_sub(records_total);
@@ -1134,7 +1140,7 @@ fn run_gc_traffic(opts: &CampaignOptions) -> Result<GcTraffic, String> {
         ..StoreConfig::default()
     };
     let tmp = scratch_tempdir(&opts.scratch_dir, "gc-")?;
-    let mut store = Store::create(tmp.path(), &config, [0x66; 16]).map_err(|e| e.to_string())?;
+    let store = Store::create(tmp.path(), &config, [0x66; 16]).map_err(|e| e.to_string())?;
     let inode = Inode::new_file(1000, 1000, 0o644);
     {
         let mut tx = store.begin_tx().map_err(|e| e.to_string())?;
@@ -1144,24 +1150,20 @@ fn run_gc_traffic(opts: &CampaignOptions) -> Result<GcTraffic, String> {
     // Versioned drift writes create many unique objects, then an urandom
     // overwrite orphans them.
     let vseq = corpus::versioned(4, 8);
-    write_only(&mut store, 3, &vseq, OptimizeOptions::default())?;
+    write_only(&store, 3, &vseq, OptimizeOptions::default())?;
     let ur = corpus::urandom(opts.size_mib / 2, 0x1234_5678);
-    write_only(&mut store, 3, &ur, OptimizeOptions::default())?;
+    write_only(&store, 3, &ur, OptimizeOptions::default())?;
     let before = crate::store::gc::unreachable_bytes(&store).map_err(|e| e.to_string())?;
     let physical_before = store.physical_used();
     let t0 = Instant::now();
     let reclaimed =
-        crate::store::gc::collect(&mut store, &CrashHooks::none()).map_err(|e| e.to_string())?;
+        crate::store::gc::collect(&store, &CrashHooks::none()).map_err(|e| e.to_string())?;
     let gc_wall = t0.elapsed().as_secs_f64();
     let after = crate::store::gc::unreachable_bytes(&store).map_err(|e| e.to_string())?;
     let physical_after = store.physical_used();
-    let opt = crate::optimizer::background::optimize_pass(
-        &mut store,
-        OptimizeOptions::default(),
-        None,
-        None,
-    )
-    .map_err(|e| e.to_string())?;
+    let opt =
+        crate::optimizer::background::optimize_pass(&store, OptimizeOptions::default(), None, None)
+            .map_err(|e| e.to_string())?;
     Ok(GcTraffic {
         unreachable_before: before,
         reclaimed_bytes: reclaimed,
@@ -1207,8 +1209,8 @@ fn run_baselines(
     // Direct rANS (same backend) on the source corpus.
     if let Some(src) = corpora.iter().find(|c| c.name == "src") {
         let tmp = scratch_tempdir(&opts.scratch_dir, "rans-")?;
-        let mut store = fresh_store(tmp.path())?;
-        let outcome = full_run(&mut store, src, OptimizeOptions::raw_rans())?;
+        let store = fresh_store(tmp.path())?;
+        let outcome = full_run(&store, src, OptimizeOptions::raw_rans())?;
         b.direct_rans_src = Some(outcome.metrics);
     }
 
@@ -1303,7 +1305,7 @@ fn scratch_tempdir(scratch: &Path, prefix: &str) -> Result<tempfile::TempDir, St
 fn fresh_store(dir: &Path) -> Result<Store, String> {
     let config = StoreConfig::default();
     Store::create(dir, &config, [0x66; 16]).map_err(|e| e.to_string())?;
-    let mut store = Store::open(dir, &config).map_err(|e| e.to_string())?;
+    let store = Store::open(dir, &config).map_err(|e| e.to_string())?;
     let inode = Inode::new_file(1000, 1000, 0o644);
     {
         let mut tx = store.begin_tx().map_err(|e| e.to_string())?;

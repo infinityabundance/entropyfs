@@ -39,7 +39,7 @@ fn create_store(dir: &TempDir) -> Store {
 }
 
 /// Create a regular file inode and register it in the index.
-fn create_file(store: &mut Store, ino: u64) -> Inode {
+fn create_file(store: &Store, ino: u64) -> Inode {
     let inode = Inode::new_file(1000, 1000, 0o644);
     let mut tx = store.begin_tx().unwrap();
     Store::put_inode_in_tx(&mut tx, ino, &inode).unwrap();
@@ -94,7 +94,7 @@ fn encode_chunks(content: &[u8], store: &Store) -> Vec<ExtentUpdate> {
 }
 
 /// Write `content` to file `ino` through the real commit path.
-fn write_file(store: &mut Store, ino: u64, content: &[u8]) {
+fn write_file(store: &Store, ino: u64, content: &[u8]) {
     let updates = encode_chunks(content, store);
     store
         .commit_file_extents(
@@ -139,8 +139,8 @@ fn partial_tail_chunk_never_exceeds_eof() {
     // must encode the trailing chunk at its logical length, not pad it
     // to the full chunk class.
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
-    create_file(&mut store, 3);
+    let store = create_store(&dir);
+    create_file(&store, 3);
     store.write_region(3, 0, b"hello world").unwrap();
     let size = store.get_inode(3).unwrap().unwrap().size;
     assert_eq!(size, 11);
@@ -186,8 +186,8 @@ fn shrinking_write_drops_extents_past_eof() {
     // found by the near-full GC test. (POSIX write() never shrinks a file;
     // this is the commit path the ENOSPC write stress uses.)
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
-    create_file(&mut store, 3);
+    let store = create_store(&dir);
+    create_file(&store, 3);
     store
         .write_region(3, 0, vec![0xAA; 3 * 65536].as_slice())
         .unwrap();
@@ -212,8 +212,8 @@ fn shrinking_write_drops_extents_past_eof() {
 #[test]
 fn create_commit_remount_roundtrip() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
-    create_file(&mut store, 3);
+    let store = create_store(&dir);
+    create_file(&store, 3);
     // Structured content: a repeating pattern (periodic) + a zero run +
     // low-cardinality region, plus a rANS-friendly region.
     let mut content = Vec::new();
@@ -223,7 +223,7 @@ fn create_commit_remount_roundtrip() {
     for i in 0..8192 {
         content.push((i % 17) as u8); // rANS-friendly
     }
-    write_file(&mut store, 3, &content);
+    write_file(&store, 3, &content);
 
     // Read back in the live store.
     let read = store.read_file(3, 0, content.len() as u64).unwrap();
@@ -231,11 +231,11 @@ fn create_commit_remount_roundtrip() {
 
     // Remount.
     drop(store);
-    let mut store2 = Store::open(dir.path(), &StoreConfig::default()).unwrap();
+    let store2 = Store::open(dir.path(), &StoreConfig::default()).unwrap();
     let read2 = store2.read_file(3, 0, content.len() as u64).unwrap();
     assert_eq!(read2, content);
     // The store is still writable after remount.
-    write_file(&mut store2, 3, b"post-remount write".repeat(100).as_slice());
+    write_file(&store2, 3, b"post-remount write".repeat(100).as_slice());
     let read3 = store2
         .read_file(3, 0, (b"post-remount write".len() * 100) as u64)
         .unwrap();
@@ -245,8 +245,8 @@ fn create_commit_remount_roundtrip() {
 #[test]
 fn sparse_file_holes_read_as_zeros() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
-    create_file(&mut store, 3);
+    let store = create_store(&dir);
+    create_file(&store, 3);
     // Write only at offset 65536 (a hole before it).
     let content = b"data-at-64k".to_vec();
     let updates = encode_chunks(&content, &store);
@@ -286,10 +286,10 @@ fn sparse_file_holes_read_as_zeros() {
 fn crash_matrix_at_every_durability_boundary() {
     for point in all_crash_points() {
         let dir = TempDir::new().unwrap();
-        let mut store = create_store(&dir);
-        create_file(&mut store, 3);
+        let store = create_store(&dir);
+        create_file(&store, 3);
         let pre: Vec<u8> = b"pre-crash-state".repeat(200);
-        write_file(&mut store, 3, &pre);
+        write_file(&store, 3, &pre);
         let pre_len = pre.len() as u64;
 
         // Attempt a second commit with the crash armed.
@@ -327,8 +327,8 @@ fn crash_matrix_at_every_durability_boundary() {
                     post.len()
                 );
                 // The recovered store must remain writable.
-                let mut store2 = store2;
-                write_file(&mut store2, 3, b"post-recovery write".repeat(50).as_slice());
+                let store2 = store2;
+                write_file(&store2, 3, b"post-recovery write".repeat(50).as_slice());
             }
         }
     }
@@ -337,21 +337,21 @@ fn crash_matrix_at_every_durability_boundary() {
 #[test]
 fn gc_reclaims_and_preserves_live_data() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
-    create_file(&mut store, 3);
+    let store = create_store(&dir);
+    create_file(&store, 3);
     // Many overwrites create garbage records.
     for i in 0..12 {
         let content = format!("version-{i}:{}", "x".repeat(1000)).into_bytes();
-        write_file(&mut store, 3, &content);
+        write_file(&store, 3, &content);
     }
     let final_content = format!("version-{}:{}", 12, "x".repeat(1000)).into_bytes();
-    write_file(&mut store, 3, &final_content);
+    write_file(&store, 3, &final_content);
     let read = store.read_file(3, 0, final_content.len() as u64).unwrap();
     assert_eq!(read, final_content);
 
     let before_reclaim = crate::store::gc::unreachable_bytes(&store).unwrap();
     assert!(before_reclaim > 0, "overwrites must create garbage");
-    let reclaimed = crate::store::gc::collect(&mut store, &CrashHooks::none()).unwrap();
+    let reclaimed = crate::store::gc::collect(&store, &CrashHooks::none()).unwrap();
     assert!(reclaimed > 0);
     let after_reclaim = crate::store::gc::unreachable_bytes(&store).unwrap();
     assert!(after_reclaim < before_reclaim);
@@ -368,16 +368,16 @@ fn gc_reclaims_and_preserves_live_data() {
 #[test]
 fn truncate_and_rewrite() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
-    create_file(&mut store, 3);
+    let store = create_store(&dir);
+    create_file(&store, 3);
     let content: Vec<u8> = (0..30000u32).map(|i| (i % 61) as u8).collect();
-    write_file(&mut store, 3, &content);
+    write_file(&store, 3, &content);
     store.truncate_file(3, 1000).unwrap();
     let read = store.read_file(3, 0, 5000).unwrap();
     assert_eq!(read.len(), 1000);
     assert_eq!(read, &content[..1000]);
     // Extend again: the new region is a hole.
-    write_file(&mut store, 3, b"extension".repeat(200).as_slice());
+    write_file(&store, 3, b"extension".repeat(200).as_slice());
     let read2 = store.read_file(3, 0, 5000).unwrap();
     assert_eq!(read2, b"extension".repeat(200));
 }
@@ -385,15 +385,15 @@ fn truncate_and_rewrite() {
 #[test]
 fn rans_extent_survives_remount() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
-    create_file(&mut store, 3);
+    let store = create_store(&dir);
+    create_file(&store, 3);
     // 61-symbol near-uniform stream (5.93 bits/symbol): rANS beats RAW
     // decisively, but the i/4096 drift breaks exact periodicity so the
     // PERIODIC family cannot win, and 61 > 16 symbols excludes PALETTE.
     let content: Vec<u8> = (0..65536u32)
         .map(|i| ((((i * 3) % 61) + (i / 4096)) % 61) as u8)
         .collect();
-    write_file(&mut store, 3, &content);
+    write_file(&store, 3, &content);
     // The chunk must have been encoded as RANS (structured enough).
     let inode = store.get_inode(3).unwrap().unwrap();
     if let crate::store::inode::InodeData::File { extent_root } = &inode.data {
@@ -433,12 +433,12 @@ fn rans_extent_survives_remount() {
 #[test]
 fn uuid_and_features_persist() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
-    create_file(&mut store, 3);
+    let store = create_store(&dir);
+    create_file(&store, 3);
     let content: Vec<u8> = (0..65536u32)
         .map(|i| ((i * 7 + i / 32) % 211) as u8)
         .collect();
-    write_file(&mut store, 3, &content);
+    write_file(&store, 3, &content);
     drop(store);
     let store2 = Store::open(dir.path(), &StoreConfig::default()).unwrap();
     assert_eq!(store2.current_root().uuid, [0x11; 16]);

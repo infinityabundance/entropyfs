@@ -18,7 +18,7 @@ fn create_store(dir: &TempDir) -> Store {
     Store::create(dir.path(), &cfg, [0xBB; 16]).unwrap()
 }
 
-fn ino(store: &mut Store) -> u64 {
+fn ino(store: &Store) -> u64 {
     store
         .create_entry(
             1,
@@ -53,8 +53,8 @@ fn deferred_writes_survive_process_crash() {
     // lose un-fsynced data). Deferred commits flush to the page cache and
     // write the superblock slot, so a daemon kill + remount sees the data.
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
-    let f = ino(&mut store);
+    let store = create_store(&dir);
+    let f = ino(&store);
     store.write_region(f, 0, b"process-crash-safe").unwrap();
     // Drop WITHOUT a durability barrier — simulates the daemon dying.
     drop(store);
@@ -69,8 +69,8 @@ fn power_loss_keeps_only_barrier_d_data_and_never_wedges() {
     // lost (POSIX). The store must mount at the last barrier'd state and
     // fsck must be clean.
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
-    let f = ino(&mut store);
+    let store = create_store(&dir);
+    let f = ino(&store);
     store.write_region(f, 0, b"fsynced-data").unwrap();
     store.durability_barrier(&CrashHooks::none()).unwrap();
     // The durable segment size: everything at/after this is un-fsynced.
@@ -89,7 +89,7 @@ fn power_loss_keeps_only_barrier_d_data_and_never_wedges() {
         "power loss must revert to the barrier'd state"
     );
     // The store remains usable.
-    let mut store = store;
+    let store = store;
     store.write_region(f, 0, b"post-power").unwrap();
     store.durability_barrier(&CrashHooks::none()).unwrap();
     let read = store.read_file(f, 0, 64).unwrap();
@@ -108,8 +108,8 @@ fn recovery_falls_back_to_newest_valid_root_record() {
     // loss with several un-fsynced commits): recovery must scan the
     // segments for the newest valid ROOT record.
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
-    let f = ino(&mut store);
+    let store = create_store(&dir);
+    let f = ino(&store);
     store.write_region(f, 0, b"root-a").unwrap();
     store.durability_barrier(&CrashHooks::none()).unwrap();
     let seg0 = dir.path().join("segments/0000000000000000.seg");
@@ -140,7 +140,7 @@ fn recovery_falls_back_to_newest_valid_root_record() {
         "fallback must recover the last barrier'd root"
     );
     // The store remains writable after the fallback recovery.
-    let mut store = store;
+    let store = store;
     store.write_region(f, 0, b"root-d").unwrap();
     store.durability_barrier(&CrashHooks::none()).unwrap();
     let read = store.read_file(f, 0, 64).unwrap();

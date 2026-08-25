@@ -79,7 +79,10 @@ pub(crate) struct PendingRecord {
 /// A pending transaction: new immutable records + root construction.
 ///
 /// The `ObjectProvider` impl resolves node fetches from pending records
-/// first, then the committed store.
+/// first, then the committed store. The transaction holds the store's
+/// commit-coordinator lock from `begin` to commit, so transaction
+/// application and root publication are serialized while candidate
+/// encoding (the expensive part of a write) runs before `begin_tx`.
 pub struct Tx<'a> {
     /// Pending object payloads keyed by content id (for in-tx resolution).
     pending: HashMap<ChunkId, Vec<u8>>,
@@ -87,19 +90,26 @@ pub struct Tx<'a> {
     records: Vec<PendingRecord>,
     /// Root being built.
     root: Root,
-    /// The store this transaction commits to (mutably: the commit protocol
-    /// appends records and flips the superblock).
-    pub(crate) store: &'a mut crate::store::Store,
+    /// The store this transaction commits to (interior mutability: the
+    /// commit protocol appends records and flips the superblock).
+    pub(crate) store: &'a crate::store::Store,
+    /// The commit-coordinator guard (held until this transaction ends).
+    _commit_guard: std::sync::MutexGuard<'a, ()>,
 }
 
 impl<'a> Tx<'a> {
-    /// Begin a transaction from the current root.
-    pub(crate) fn begin(store: &'a mut crate::store::Store) -> Self {
+    /// Begin a transaction from the current root (the caller has taken
+    /// the store's commit lock).
+    pub(crate) fn begin(
+        store: &'a crate::store::Store,
+        guard: std::sync::MutexGuard<'a, ()>,
+    ) -> Self {
         Self {
             pending: HashMap::new(),
             records: Vec::new(),
-            root: store.current_root().clone(),
+            root: store.current_root(),
             store,
+            _commit_guard: guard,
         }
     }
 
@@ -163,11 +173,12 @@ impl<'a> Tx<'a> {
     /// only fsync'd data is power-durable). Recovery validates the chosen
     /// slot's root and falls back to the newest valid root record in the
     /// segments, so a stale slot can never wedge the filesystem. Returns
-    /// the store (for the caller to run the barrier when needed).
+    /// the store (for the caller to run the barrier when needed). The
+    /// commit-coordinator lock is released when `self` is consumed.
     pub fn commit_deferred(
         mut self,
         hooks: &CrashHooks,
-    ) -> Result<&'a mut crate::store::Store, StoreError> {
+    ) -> Result<&'a crate::store::Store, StoreError> {
         // 0. ENOSPC guard: refuse before staging anything (the watermark
         //    keeps the GC emergency reserve untouched).
         self.store.ensure_commit_space(&self.records)?;

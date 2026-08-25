@@ -376,7 +376,7 @@ pub fn live_ratios(
     for (id, loc) in store.object_index().iter() {
         let entry = map.entry(loc.segment_seq).or_insert((0, 0));
         entry.1 += loc.total_size();
-        if live.contains(id) {
+        if live.contains(&id) {
             entry.0 += loc.total_size();
         }
     }
@@ -387,7 +387,7 @@ pub fn live_ratios(
 ///
 /// Returns the number of bytes reclaimed.
 pub fn collect(
-    store: &mut Store,
+    store: &Store,
     hooks: &crate::store::transaction::CrashHooks,
 ) -> Result<u64, StoreError> {
     let live = mark_live(store)?;
@@ -404,7 +404,7 @@ pub fn collect(
     // Reclaimable estimate: unreachable bytes inside victim segments.
     let mut reclaimable = 0u64;
     for (id, loc) in store.object_index().iter() {
-        if victims.contains(&loc.segment_seq) && !live.contains(id) {
+        if victims.contains(&loc.segment_seq) && !live.contains(&id) {
             reclaimable += loc.total_size();
         }
     }
@@ -414,10 +414,10 @@ pub fn collect(
     let mut writer = SegmentWriter::open(store.dir(), new_seq)?;
     let mut new_locations: Vec<(ChunkId, Location)> = Vec::new();
     for (id, loc) in store.object_index().iter() {
-        if !victims.contains(&loc.segment_seq) || !live.contains(id) {
+        if !victims.contains(&loc.segment_seq) || !live.contains(&id) {
             continue;
         }
-        let payload = store.read_payload_at(loc)?;
+        let payload = store.read_payload_at(&loc)?;
         // Preserve the envelope flags/materialized length exactly.
         let flags = if loc.materialized_len.is_some() {
             crate::format::record::FLAG_HAS_MATERIALIZED_LEN
@@ -428,7 +428,7 @@ pub fn collect(
         let offset = writer.durable_end() + writer.buffered_len();
         writer.append(encoded);
         new_locations.push((
-            *id,
+            id,
             Location {
                 segment_seq: new_seq,
                 offset,
@@ -443,7 +443,7 @@ pub fn collect(
     SegmentWriter::sync_dir(store.dir())?;
 
     // Build the new root and commit it (durability barrier).
-    let mut root = store.current_root().clone();
+    let mut root = store.current_root();
     root.segment_seq = new_seq;
     root.index_epoch = root.index_epoch.saturating_add(1);
     root.generation = store.generation() + 1;
@@ -467,7 +467,7 @@ pub fn collect(
 
     // Publish: update the object index, root, current segment.
     for (id, loc) in new_locations {
-        store.object_index_mut().insert(id, loc);
+        store.object_index().insert(id, loc);
     }
     store.publish_commit(&root, root_id)?;
     let root_loc = Location {
@@ -477,8 +477,8 @@ pub fn collect(
         materialized_len: None,
         tag: crate::format::version::RecordTag::Root,
     };
-    store.object_index_mut().insert(root_id, root_loc);
-    store.current_segment = Some(writer);
+    store.object_index().insert(root_id, root_loc);
+    store.install_segment(writer);
 
     // Delete victims only after the new root is durable.
     hooks.hit(crate::store::transaction::CrashPoint::BeforeOldSegmentDelete)?;
@@ -490,11 +490,12 @@ pub fn collect(
     let dead: Vec<ChunkId> = store
         .object_index()
         .iter()
-        .filter(|(id, loc)| victims.contains(&loc.segment_seq) && !live.contains(*id))
-        .map(|(id, _)| *id)
+        .into_iter()
+        .filter(|(id, loc)| victims.contains(&loc.segment_seq) && !live.contains(id))
+        .map(|(id, _)| id)
         .collect();
     for id in dead {
-        store.object_index_mut().remove(&id);
+        store.object_index().remove(&id);
     }
     Ok(reclaimable)
 }
@@ -504,7 +505,7 @@ pub fn unreachable_bytes(store: &Store) -> Result<u64, StoreError> {
     let live = mark_live(store)?;
     let mut unreachable = 0u64;
     for (id, loc) in store.object_index().iter() {
-        if !live.contains(id) {
+        if !live.contains(&id) {
             unreachable += loc.total_size();
         }
     }

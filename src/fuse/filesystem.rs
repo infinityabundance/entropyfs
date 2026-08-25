@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::mpsc::{self, TrySendError};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use fuser::{
@@ -109,16 +109,18 @@ fn spawn_notifier(notifier: Arc<Mutex<Option<Notifier>>>) -> mpsc::SyncSender<No
 
 /// Shared filesystem state.
 pub struct EntropyFs {
-    /// The store (single write coordinator), shared with the background
-    /// optimizer worker (which only takes it when idle).
-    store: Arc<Mutex<Store>>,
+    /// The store (interior-mutability concurrency: reads traverse
+    /// immutable state without any lock; writes serialize only the short
+    /// commit; ADR-0013 Phase 8). Shared with the background optimizer
+    /// worker.
+    store: Arc<Store>,
     /// Open file handles: fh → state.
     handles: Mutex<HashMap<u64, OpenFile>>,
     /// Advisory POSIX record locks.
     locks: Mutex<LockTable>,
     /// Next handle number.
     next_handle: std::sync::atomic::AtomicU64,
-    /// Operation counter (any store lock = one op); the background
+    /// Operation counter (any request = one op); the background
     /// optimizer uses it to detect idle periods.
     ops: Arc<std::sync::atomic::AtomicU64>,
     /// Set when the filesystem instance is dropped; the background
@@ -135,7 +137,7 @@ pub struct EntropyFs {
 
 impl EntropyFs {
     /// Wrap a store into a filesystem.
-    pub fn new(store: Arc<Mutex<Store>>) -> Self {
+    pub fn new(store: Arc<Store>) -> Self {
         let notifier = Arc::new(Mutex::new(None));
         let notify_tx = spawn_notifier(Arc::clone(&notifier));
         Self {
@@ -156,7 +158,7 @@ impl EntropyFs {
     }
 
     /// The shared store (for the background optimizer worker).
-    pub fn shared_store(&self) -> Arc<Mutex<Store>> {
+    pub fn shared_store(&self) -> Arc<Store> {
         Arc::clone(&self.store)
     }
 
@@ -165,10 +167,10 @@ impl EntropyFs {
         Arc::clone(&self.worker_stop)
     }
 
-    /// Lock the store.
-    fn store(&self) -> MutexGuard<'_, Store> {
+    /// Access the store (counts the request for idle detection).
+    fn store(&self) -> Arc<Store> {
         self.ops.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.store.lock().expect("store mutex poisoned")
+        Arc::clone(&self.store)
     }
 
     /// The notifier slot, for the mount to seed (§24).
@@ -235,7 +237,7 @@ impl EntropyFs {
         uid: u32,
         gid: u32,
     ) -> Result<u64, StoreError> {
-        let mut store = self.store();
+        let store = self.store();
         let entry = crate::store::NewEntry {
             kind,
             mode: mode & 0o7777,
@@ -270,6 +272,33 @@ impl Filesystem for EntropyFs {
     fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> std::io::Result<()> {
         // Nanosecond timestamps.
         let _ = config.set_time_granularity(Duration::from_nanos(1));
+        // Phase-8 write aggregation (§2/§3 of the Phase-8 directive):
+        // tune the kernel queue so writeback arrives as large requests
+        // (each write() request commits its chunks in ONE transaction).
+        let _ = config.set_max_write(1024 * 1024); // 1 MiB per request
+        let _ = config.set_max_readahead(1024 * 1024);
+        let _ = config.set_max_background(64);
+        let _ = config.set_congestion_threshold(48);
+        // Writeback cache: the kernel aggregates tiny application writes
+        // into large write() requests and serves reads from its page
+        // cache, so read-your-writes never depends on the daemon's commit
+        // cadence. Async reads and parallel directory ops make the
+        // lock-free read path (Phase 8) reachable from multiple kernel
+        // threads. If the kernel does not offer writeback, we continue
+        // without it (correctness is unaffected; only aggregation is
+        // lost).
+        let available = config.capabilities();
+        let wanted = fuser::InitFlags::FUSE_WRITEBACK_CACHE
+            | fuser::InitFlags::FUSE_ASYNC_READ
+            | fuser::InitFlags::FUSE_PARALLEL_DIROPS
+            | fuser::InitFlags::FUSE_BIG_WRITES;
+        let supported = wanted & available;
+        let _ = config.add_capabilities(supported);
+        if !supported.contains(fuser::InitFlags::FUSE_WRITEBACK_CACHE) {
+            log::warn!(
+                "entropyfs: kernel does not offer FUSE_WRITEBACK_CACHE; write aggregation degraded"
+            );
+        }
         Ok(())
     }
 
@@ -326,7 +355,7 @@ impl Filesystem for EntropyFs {
             TimeOrNow::SpecificTime(t) => ts_from_system(t),
             TimeOrNow::Now => Timespec::now(),
         });
-        let mut store = self.store();
+        let store = self.store();
         let inode = match store.setattr_inode(
             ino.0,
             &crate::store::AttrUpdate {
@@ -422,7 +451,7 @@ impl Filesystem for EntropyFs {
     }
 
     fn unlink(&self, _req: &Request, parent: INodeNo, name: &std::ffi::OsStr, reply: ReplyEmpty) {
-        let mut store = self.store();
+        let store = self.store();
         match store.unlink(inon(parent), name.as_bytes(), false, &CrashHooks::none()) {
             Ok(child) => {
                 drop(store);
@@ -434,7 +463,7 @@ impl Filesystem for EntropyFs {
     }
 
     fn rmdir(&self, _req: &Request, parent: INodeNo, name: &std::ffi::OsStr, reply: ReplyEmpty) {
-        let mut store = self.store();
+        let store = self.store();
         match store.unlink(inon(parent), name.as_bytes(), true, &CrashHooks::none()) {
             Ok(child) => {
                 drop(store);
@@ -486,7 +515,7 @@ impl Filesystem for EntropyFs {
             reply.error(Errno::EINVAL);
             return;
         }
-        let mut store = self.store();
+        let store = self.store();
         match store.rename(
             inon(parent),
             name.as_bytes(),
@@ -530,7 +559,7 @@ impl Filesystem for EntropyFs {
         newname: &std::ffi::OsStr,
         reply: ReplyEntry,
     ) {
-        let mut store = self.store();
+        let store = self.store();
         match store.link(
             inon(newparent),
             newname.as_bytes(),
@@ -603,7 +632,7 @@ impl Filesystem for EntropyFs {
         _lock_owner: Option<LockOwner>,
         reply: ReplyWrite,
     ) {
-        let mut store = self.store();
+        let store = self.store();
         match store.write_region(ino.0, offset, data) {
             Ok(()) => reply.written(data.len() as u32),
             Err(StoreError::Full(_)) => reply.error(Errno::ENOSPC),
@@ -658,7 +687,7 @@ impl Filesystem for EntropyFs {
         // power-durable here (ADR-0008: records → fdatasync → superblock
         // flip → fsync). v1 applies the full barrier for both FSYNC and
         // FDATASYNC (data and metadata are interleaved in the segments).
-        let mut store = self.store();
+        let store = self.store();
         match store.durability_barrier(&CrashHooks::none()) {
             Ok(()) => reply.ok(),
             Err(e) => reply.error(Self::errno(&e)),
@@ -751,7 +780,7 @@ impl Filesystem for EntropyFs {
         if !super::xattr::supported_name(name.as_bytes()) {
             return reply.error(Errno::EOPNOTSUPP);
         }
-        let mut store = self.store();
+        let store = self.store();
         match store.set_xattr(ino.0, name.as_bytes(), value, &CrashHooks::none()) {
             Ok(()) => reply.ok(),
             Err(StoreError::Limit(_)) => reply.error(Errno::E2BIG),
@@ -805,7 +834,7 @@ impl Filesystem for EntropyFs {
     }
 
     fn removexattr(&self, _req: &Request, ino: INodeNo, name: &std::ffi::OsStr, reply: ReplyEmpty) {
-        let mut store = self.store();
+        let store = self.store();
         match store.remove_xattr(ino.0, name.as_bytes(), &CrashHooks::none()) {
             Ok(true) => reply.ok(),
             Ok(false) => reply.error(Errno::ENODATA),
@@ -930,7 +959,7 @@ impl Filesystem for EntropyFs {
         if mode & !0x03 != 0 {
             return reply.error(Errno::EOPNOTSUPP);
         }
-        let mut store = self.store();
+        let store = self.store();
         let end = offset.saturating_add(length);
         if punch_hole {
             match store.punch_hole(ino.0, offset, end, keep_size) {
@@ -1018,7 +1047,7 @@ impl Filesystem for EntropyFs {
         _flags: CopyFileRangeFlags,
         reply: ReplyWrite,
     ) {
-        let mut store = self.store();
+        let store = self.store();
         match store.copy_range(ino_in.0, offset_in, ino_out.0, offset_out, len) {
             Ok(n) => reply.written(n as u32),
             Err(e) => reply.error(Self::errno(&e)),

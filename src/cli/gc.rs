@@ -19,10 +19,10 @@ pub struct GcArgs {
 pub fn run(args: &GcArgs) -> Result<(), String> {
     crate::fsck::ensure_unmounted(&args.store)?;
     let config = StoreConfig::default();
-    let mut store = Store::open(&args.store, &config).map_err(|e| e.to_string())?;
+    let store = Store::open(&args.store, &config).map_err(|e| e.to_string())?;
     let before = crate::store::gc::unreachable_bytes(&store).map_err(|e| e.to_string())?;
     let reclaimed =
-        crate::store::gc::collect(&mut store, &CrashHooks::none()).map_err(|e| e.to_string())?;
+        crate::store::gc::collect(&store, &CrashHooks::none()).map_err(|e| e.to_string())?;
     let after = crate::store::gc::unreachable_bytes(&store).map_err(|e| e.to_string())?;
     println!("unreachable before: {before} bytes");
     println!("reclaimed: {reclaimed} bytes");

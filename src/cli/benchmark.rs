@@ -73,7 +73,7 @@ fn run_corpus(
     options: OptimizeOptions,
 ) -> Result<RunResult, String> {
     let config = StoreConfig::default();
-    let mut store = Store::open(store_dir, &config).map_err(|e| e.to_string())?;
+    let store = Store::open(store_dir, &config).map_err(|e| e.to_string())?;
     let inode = crate::store::inode::Inode::new_file(1000, 1000, 0o644);
     {
         let mut tx = store.begin_tx().map_err(|e| e.to_string())?;
@@ -214,7 +214,7 @@ pub fn run(args: &BenchmarkArgs) -> Result<(), String> {
     // Default: full optimization written to the given store (original
     // semantics: reproducible write/read benchmark over the store).
     let config = StoreConfig::default();
-    let mut store = Store::open(&store_path, &config).map_err(|e| e.to_string())?;
+    let store = Store::open(&store_path, &config).map_err(|e| e.to_string())?;
     let inode = crate::store::inode::Inode::new_file(1000, 1000, 0o644);
     {
         let mut tx = store.begin_tx().map_err(|e| e.to_string())?;

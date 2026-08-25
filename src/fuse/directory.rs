@@ -89,7 +89,7 @@ mod tests {
             segment_size: 1024 * 1024,
             ..Default::default()
         };
-        let mut store = Store::create(dir.path(), &cfg, [0x66; 16]).unwrap();
+        let store = Store::create(dir.path(), &cfg, [0x66; 16]).unwrap();
         // Root dir is ino 1 (the FUSE mount root); create "sub" and "file".
         store
             .create_entry(

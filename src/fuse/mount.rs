@@ -104,7 +104,7 @@ pub fn preflight(params: &MountParams) -> Result<(), MountError> {
 /// Mount the store and return a background session (drop to unmount).
 pub fn mount(params: &MountParams, store: Store) -> Result<fuser::BackgroundSession, MountError> {
     preflight(params)?;
-    let fs = EntropyFs::new(std::sync::Arc::new(std::sync::Mutex::new(store)));
+    let fs = EntropyFs::new(std::sync::Arc::new(store));
     mount_fs(fs, params)
 }
 

@@ -116,7 +116,7 @@ pub fn leaked(ctx: &FsckCtx, live: &HashSet<ChunkId>) -> (u64, u64) {
     let mut count = 0u64;
     let mut bytes = 0u64;
     for (id, loc) in ctx.object_index.iter() {
-        if !live.contains(id) {
+        if !live.contains(&id) {
             count += 1;
             bytes += loc.total_size();
         }

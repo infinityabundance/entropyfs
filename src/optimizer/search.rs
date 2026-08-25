@@ -88,7 +88,7 @@ const FOREGROUND_BASE_TRUST: f64 = 0.5;
 /// validation and base materialization; the DSFB observer is updated
 /// (performance-only state).
 pub fn encode_guided(
-    store: &mut Store,
+    store: &Store,
     ctx: &GuidedContext<'_>,
     options: OptimizeOptions,
 ) -> Result<SearchOutcome, StoreError> {
@@ -557,7 +557,7 @@ mod tests {
         Store::create(dir.path(), &cfg, [0x44; 16]).unwrap()
     }
 
-    fn ino(store: &mut Store) -> u64 {
+    fn ino(store: &Store) -> u64 {
         store
             .create_entry(
                 1,
@@ -568,16 +568,11 @@ mod tests {
             .unwrap()
     }
 
-    fn write(store: &mut Store, ino: u64, data: &[u8]) {
+    fn write(store: &Store, ino: u64, data: &[u8]) {
         store.write_region(ino, 0, data).unwrap();
     }
 
-    fn search(
-        store: &mut Store,
-        ino: u64,
-        target: &[u8],
-        prev: Option<BaseChunk>,
-    ) -> SearchOutcome {
+    fn search(store: &Store, ino: u64, target: &[u8], prev: Option<BaseChunk>) -> SearchOutcome {
         let ctx = GuidedContext {
             ino,
             offset: 0,
@@ -591,11 +586,11 @@ mod tests {
     #[test]
     fn guided_search_matches_exact_bytes() {
         let dir = TempDir::new().unwrap();
-        let mut store = create_store(&dir);
-        let f = ino(&mut store);
+        let store = create_store(&dir);
+        let f = ino(&store);
         let data: Vec<u8> = (0..65536u32).map(|i| (i % 61) as u8).collect();
-        write(&mut store, f, &data);
-        let out = search(&mut store, f, &data, None);
+        write(&store, f, &data);
+        let out = search(&store, f, &data, None);
         // materialize the chosen representation and compare
         let limits = *store.limits();
         let back = materialize_to_vec(&out.update.descriptor, &store, &limits).unwrap();
@@ -605,15 +600,15 @@ mod tests {
     #[test]
     fn dedup_wins_for_duplicate_content() {
         let dir = TempDir::new().unwrap();
-        let mut store = create_store(&dir);
-        let f = ino(&mut store);
+        let store = create_store(&dir);
+        let f = ino(&store);
         // Pseudo-random (incompressible): no structural family can beat
         // EXACT_REF for a second copy of the same chunk.
         let data: Vec<u8> = (0..65536u32)
             .map(|i| (i.wrapping_mul(2654435761) >> 8) as u8)
             .collect();
-        write(&mut store, f, &data);
-        let out = search(&mut store, f, &data, None);
+        write(&store, f, &data);
+        let out = search(&store, f, &data, None);
         assert!(
             matches!(out.update.descriptor, Representation::ExactRef { .. }),
             "expected EXACT_REF, got {:?}",
@@ -625,15 +620,15 @@ mod tests {
     #[test]
     fn prev_version_base_wins_for_tiny_edit() {
         let dir = TempDir::new().unwrap();
-        let mut store = create_store(&dir);
-        let f = ino(&mut store);
+        let store = create_store(&dir);
+        let f = ino(&store);
         // Base: 64 KiB of a repeating pattern (not compressible by rANS to
         // near-zero, so the sparse patch has a chance to win).
         let mut base = Vec::with_capacity(65536);
         for i in 0..65536u32 {
             base.push(((i * 7) % 251) as u8);
         }
-        write(&mut store, f, &base);
+        write(&store, f, &base);
         // Target: three single-byte edits.
         let mut target = base.clone();
         target[10] ^= 0x01;
@@ -644,7 +639,7 @@ mod tests {
             bytes: base.clone(),
             depth: 0,
         };
-        let out = search(&mut store, f, &target, Some(prev));
+        let out = search(&store, f, &target, Some(prev));
         assert!(
             matches!(out.update.descriptor, Representation::BaseResidual { .. }),
             "expected BASE_RESIDUAL, got {:?}",
@@ -658,23 +653,23 @@ mod tests {
     #[test]
     fn raw_fallback_for_random_data() {
         let dir = TempDir::new().unwrap();
-        let mut store = create_store(&dir);
-        let f = ino(&mut store);
+        let store = create_store(&dir);
+        let f = ino(&store);
         // Pseudo-random: rANS cannot beat RAW on uniform data.
         let data: Vec<u8> = (0..65536u32)
             .map(|i| (i.wrapping_mul(2654435761) >> 8) as u8)
             .collect();
-        let out = search(&mut store, f, &data, None);
+        let out = search(&store, f, &data, None);
         assert!(matches!(out.update.descriptor, Representation::Raw { .. }));
     }
 
     #[test]
     fn ablation_raw_only_never_dedups_or_compresses() {
         let dir = TempDir::new().unwrap();
-        let mut store = create_store(&dir);
-        let f = ino(&mut store);
+        let store = create_store(&dir);
+        let f = ino(&store);
         let zeros = vec![0u8; 65536];
-        write(&mut store, f, &zeros);
+        write(&store, f, &zeros);
         let ctx = GuidedContext {
             ino: f,
             offset: 0,
@@ -682,7 +677,7 @@ mod tests {
             prev_version: None,
             mode: SearchMode::Foreground,
         };
-        let out = encode_guided(&mut store, &ctx, OptimizeOptions::raw_only()).unwrap();
+        let out = encode_guided(&store, &ctx, OptimizeOptions::raw_only()).unwrap();
         assert!(matches!(out.update.descriptor, Representation::Raw { .. }));
     }
 
@@ -694,8 +689,8 @@ mod tests {
         // undecodable: EIO on read, fsck errors). Found by the Phase 6
         // cargo-build SIGBUS investigation.
         let dir = TempDir::new().unwrap();
-        let mut store = create_store(&dir);
-        let f = ino(&mut store);
+        let store = create_store(&dir);
+        let f = ino(&store);
         // Base: 64 KiB of pattern A.
         let base: Vec<u8> = (0..65536u64)
             .map(|i| (((i.wrapping_mul(7 * 2654435761)) >> 8) % 251) as u8)
@@ -772,8 +767,8 @@ mod tests {
         // (materialization loops to the depth cap). The cycle check must
         // reject a base whose chain contains the target chunk's own id.
         let dir = TempDir::new().unwrap();
-        let mut store = create_store(&dir);
-        let f = ino(&mut store);
+        let store = create_store(&dir);
+        let f = ino(&store);
         let a: Vec<u8> = (0..65536u64)
             .map(|i| (((i.wrapping_mul(11 * 2654435761)) >> 8) % 251) as u8)
             .collect();

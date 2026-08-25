@@ -23,7 +23,7 @@ fn create_store(dir: &TempDir) -> Store {
     Store::create(dir.path(), &cfg, [0x77; 16]).unwrap()
 }
 
-fn ino(store: &mut Store) -> u64 {
+fn ino(store: &Store) -> u64 {
     store
         .create_entry(
             1,
@@ -76,8 +76,8 @@ fn extents_of(store: &Store, ino: u64) -> Vec<(u64, Representation)> {
 #[test]
 fn background_pass_preserves_exact_bytes() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
-    let f = ino(&mut store);
+    let store = create_store(&dir);
+    let f = ino(&store);
     let mut content = Vec::new();
     for i in 0..8u32 {
         content.extend_from_slice(&chunk(i + 1, (i % 3) as u8));
@@ -86,7 +86,7 @@ fn background_pass_preserves_exact_bytes() {
     let before = store.read_file(f, 0, content.len() as u64).unwrap();
     assert_eq!(before, content);
 
-    let stats = optimize_pass(&mut store, OptimizeOptions::default(), None, None).unwrap();
+    let stats = optimize_pass(&store, OptimizeOptions::default(), None, None).unwrap();
     // The pass must never corrupt bytes.
     let after = store.read_file(f, 0, content.len() as u64).unwrap();
     assert_eq!(after, content);
@@ -100,8 +100,8 @@ fn drift_workload_stays_shallow_and_exact() {
     // BASE_RESIDUAL with a shallow chain (rebase-on-write flattens
     // deep previous versions, §11) and never collapse to RAW.
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
-    let f = ino(&mut store);
+    let store = create_store(&dir);
+    let f = ino(&store);
     let base: Vec<u8> = (0..65536u64).map(|i| ((i * 7) % 251) as u8).collect();
     store.write_region(f, 0, &base).unwrap();
     let mut current = base.clone();
@@ -137,8 +137,8 @@ fn background_pass_densifies_sequential_edits() {
     // bases) cannot use P3; the background pass can, and must rewrite to
     // BASE_RESIDUAL without changing bytes.
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
-    let f = ino(&mut store);
+    let store = create_store(&dir);
+    let f = ino(&store);
     let base = chunk(7, 0);
     store.write_region(f, 0, &base).unwrap();
     // Chunks 2..4 are sparse edits of the base (P3 = previous chunk).
@@ -151,13 +151,13 @@ fn background_pass_densifies_sequential_edits() {
     let before = store.read_file(f, 0, 4 * 65536).unwrap();
     let physical_before = store.physical_used();
 
-    let stats = optimize_pass(&mut store, OptimizeOptions::default(), None, None).unwrap();
+    let stats = optimize_pass(&store, OptimizeOptions::default(), None, None).unwrap();
     assert!(stats.rewritten > 0, "expected rewrites, got {stats:?}");
     let after = store.read_file(f, 0, 4 * 65536).unwrap();
     assert_eq!(after, before, "background pass changed logical bytes");
     // Densification is measured after GC: the append-only store retains
     // superseded objects until reclaim, so compare post-GC usage.
-    crate::store::gc::collect(&mut store, &CrashHooks::none()).unwrap();
+    crate::store::gc::collect(&store, &CrashHooks::none()).unwrap();
     let physical_after = store.physical_used();
     assert!(
         physical_after <= physical_before,
@@ -181,18 +181,18 @@ fn background_pass_densifies_sequential_edits() {
 #[test]
 fn background_pass_is_idempotent_and_byte_exact_after_remount() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
-    let f = ino(&mut store);
+    let store = create_store(&dir);
+    let f = ino(&store);
     let mut content = Vec::new();
     for i in 0..6u32 {
         content.extend_from_slice(&chunk(i + 1, i as u8));
     }
     store.write_region(f, 0, &content).unwrap();
-    optimize_pass(&mut store, OptimizeOptions::default(), None, None).unwrap();
+    optimize_pass(&store, OptimizeOptions::default(), None, None).unwrap();
     let after_first = store.read_file(f, 0, content.len() as u64).unwrap();
     assert_eq!(after_first, content);
     // A second pass must not regress bytes either.
-    optimize_pass(&mut store, OptimizeOptions::default(), None, None).unwrap();
+    optimize_pass(&store, OptimizeOptions::default(), None, None).unwrap();
     let after_second = store.read_file(f, 0, content.len() as u64).unwrap();
     assert_eq!(after_second, content);
     // Survives a remount, and fsck is clean.
@@ -205,8 +205,8 @@ fn background_pass_is_idempotent_and_byte_exact_after_remount() {
 #[test]
 fn resumable_cursor_advances() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
-    let f = ino(&mut store);
+    let store = create_store(&dir);
+    let f = ino(&store);
     let mut content = Vec::new();
     for i in 0..16u32 {
         content.extend_from_slice(&chunk(i + 1, i as u8));
@@ -214,7 +214,7 @@ fn resumable_cursor_advances() {
     store.write_region(f, 0, &content).unwrap();
     let mut cursor = PassCursor::default();
     let s1 = optimize_pass(
-        &mut store,
+        &store,
         OptimizeOptions::default(),
         Some(4),
         Some(&mut cursor),
@@ -223,7 +223,7 @@ fn resumable_cursor_advances() {
     assert_eq!(s1.scanned, 4);
     assert!(cursor.ino_index >= 1 || cursor.offset > 0);
     let s2 = optimize_pass(
-        &mut store,
+        &store,
         OptimizeOptions::default(),
         Some(4),
         Some(&mut cursor),
@@ -231,13 +231,7 @@ fn resumable_cursor_advances() {
     .unwrap();
     assert_eq!(s2.scanned, 4);
     // Finishing resets the cursor.
-    let s3 = optimize_pass(
-        &mut store,
-        OptimizeOptions::default(),
-        None,
-        Some(&mut cursor),
-    )
-    .unwrap();
+    let s3 = optimize_pass(&store, OptimizeOptions::default(), None, Some(&mut cursor)).unwrap();
     assert_eq!(cursor, PassCursor::default());
     let _ = s3;
 }
@@ -245,8 +239,8 @@ fn resumable_cursor_advances() {
 #[test]
 fn chain_depth_resolves_through_the_chunk_index() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
-    let f = ino(&mut store);
+    let store = create_store(&dir);
+    let f = ino(&store);
     // A depth-0 base chunk.
     let base_bytes = chunk(3, 0);
     store.write_region(f, 0, &base_bytes).unwrap();
@@ -322,8 +316,8 @@ fn chain_depth_resolves_through_the_chunk_index() {
 #[test]
 fn current_persisted_bytes_counts_objects() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
-    let f = ino(&mut store);
+    let store = create_store(&dir);
+    let f = ino(&store);
     let data = chunk(4, 0);
     store.write_region(f, 0, &data).unwrap();
     let exts = extents_of(&store, f);
@@ -343,8 +337,8 @@ fn current_persisted_bytes_counts_objects() {
 #[test]
 fn ablation_modes_preserve_bytes_and_differ() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
-    let f = ino(&mut store);
+    let store = create_store(&dir);
+    let f = ino(&store);
     let data = chunk(9, 0);
     store
         .write_region_with(f, 0, &data, OptimizeOptions::raw_only())
@@ -356,8 +350,8 @@ fn ablation_modes_preserve_bytes_and_differ() {
 
     // Full optimization of the same chunk must be at least as dense.
     let dir2 = TempDir::new().unwrap();
-    let mut store2 = create_store(&dir2);
-    let f2 = ino(&mut store2);
+    let store2 = create_store(&dir2);
+    let f2 = ino(&store2);
     store2.write_region(f2, 0, &data).unwrap();
     let exts2 = extents_of(&store2, f2);
     let raw_bytes = current_persisted_bytes(&store, &exts[0].1);

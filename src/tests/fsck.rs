@@ -68,7 +68,7 @@ fn encode_chunks(content: &[u8], store: &Store) -> Vec<ExtentUpdate> {
     updates
 }
 
-fn write_file(store: &mut Store, ino: u64, content: &[u8]) {
+fn write_file(store: &Store, ino: u64, content: &[u8]) {
     let updates = encode_chunks(content, store);
     store
         .commit_file_extents(
@@ -82,7 +82,7 @@ fn write_file(store: &mut Store, ino: u64, content: &[u8]) {
 
 /// Build a store with one file and structured content.
 fn build_store(dir: &TempDir) -> Store {
-    let mut store = create_store(dir);
+    let store = create_store(dir);
     let inode = crate::store::inode::Inode::new_file(1000, 1000, 0o644);
     let mut tx = store.begin_tx().unwrap();
     Store::put_inode_in_tx(&mut tx, 3, &inode).unwrap();
@@ -93,7 +93,7 @@ fn build_store(dir: &TempDir) -> Store {
     for i in 0..9000u32 {
         content.push((i % 23) as u8);
     }
-    write_file(&mut store, 3, &content);
+    write_file(&store, 3, &content);
     store
 }
 
@@ -249,11 +249,11 @@ fn corrupt_superblock_slot_is_ignored_with_warning() {
 #[test]
 fn overwritten_data_is_reported_as_unreachable() {
     let dir = TempDir::new().unwrap();
-    let mut store = build_store(&dir);
+    let store = build_store(&dir);
     // Overwrite repeatedly: old objects become garbage.
     for i in 0..5 {
         let content = format!("version-{i}:{}", "y".repeat(2000)).into_bytes();
-        write_file(&mut store, 3, &content);
+        write_file(&store, 3, &content);
     }
     drop(store);
     let report = fsck(dir.path(), &FsckOptions::default()).unwrap();

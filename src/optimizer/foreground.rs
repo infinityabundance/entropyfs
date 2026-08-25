@@ -22,7 +22,7 @@ use crate::store::{Store, StoreError};
 
 /// Encode one chunk for the write path (bounded foreground search).
 pub fn encode_foreground(
-    store: &mut Store,
+    store: &Store,
     ctx: &GuidedContext<'_>,
 ) -> Result<SearchOutcome, StoreError> {
     debug_assert_eq!(ctx.mode, SearchMode::Foreground);

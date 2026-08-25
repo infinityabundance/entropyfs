@@ -18,7 +18,7 @@ fn create_store(dir: &TempDir) -> Store {
     Store::create(dir.path(), &cfg, [0xAA; 16]).unwrap()
 }
 
-fn ino(store: &mut Store) -> u64 {
+fn ino(store: &Store) -> u64 {
     store
         .create_entry(
             1,
@@ -29,7 +29,7 @@ fn ino(store: &mut Store) -> u64 {
         .unwrap()
 }
 
-fn write_file(store: &mut Store, ino: u64, tag: u8) {
+fn write_file(store: &Store, ino: u64, tag: u8) {
     let content = vec![tag; 65536];
     store.write_region(ino, 0, &content).unwrap();
 }
@@ -37,9 +37,9 @@ fn write_file(store: &mut Store, ino: u64, tag: u8) {
 #[test]
 fn snapshot_lifecycle_create_list_delete_restore() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
-    let f = ino(&mut store);
-    write_file(&mut store, f, 0x11);
+    let store = create_store(&dir);
+    let f = ino(&store);
+    write_file(&store, f, 0x11);
     store.create_snapshot(b"v1", &CrashHooks::none()).unwrap();
     // The snapshot pins the root BEFORE the snapshot entry itself.
     let v1_root = store
@@ -47,7 +47,7 @@ fn snapshot_lifecycle_create_list_delete_restore() {
         .unwrap()
         .expect("snapshot exists")
         .root_id;
-    write_file(&mut store, f, 0x22);
+    write_file(&store, f, 0x22);
     assert_eq!(store.list_snapshots().unwrap().len(), 1);
 
     // Restore: the file content rolls back to v1.
@@ -73,15 +73,15 @@ fn gc_respects_snapshot_roots() {
     // The snapshot pins version 1's objects; GC must not reclaim them
     // even after the live file is overwritten many times.
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
-    let f = ino(&mut store);
-    write_file(&mut store, f, 0x11);
+    let store = create_store(&dir);
+    let f = ino(&store);
+    write_file(&store, f, 0x11);
     store.create_snapshot(b"v1", &CrashHooks::none()).unwrap();
     // Churn: many overwrites create garbage that GC can reclaim.
     for v in 0..30u8 {
-        write_file(&mut store, f, v);
+        write_file(&store, f, v);
     }
-    crate::store::gc::collect(&mut store, &CrashHooks::none()).unwrap();
+    crate::store::gc::collect(&store, &CrashHooks::none()).unwrap();
     // The snapshot's version-1 objects must still be reachable.
     let unreachable = crate::store::gc::unreachable_bytes(&store).unwrap();
     let _ = unreachable;
@@ -115,21 +115,21 @@ fn snapshot_crash_matrix_is_linearizable() {
     ];
     for point in points {
         let dir = TempDir::new().unwrap();
-        let mut store = create_store(&dir);
-        let f = ino(&mut store);
-        write_file(&mut store, f, 0x11);
+        let store = create_store(&dir);
+        let f = ino(&store);
+        write_file(&store, f, 0x11);
         let hooks = CrashHooks::crash_at(point);
         // Snapshot create with the crash armed.
         let _ = store.create_snapshot(b"v1", &hooks);
         drop(store);
-        let mut store = Store::open(dir.path(), &StoreConfig::default()).unwrap();
+        let store = Store::open(dir.path(), &StoreConfig::default()).unwrap();
         // Either the snapshot exists (commit completed) or not (crash
         // before the superblock flip) — never a corrupt tree.
         let has_snapshot = store.snapshot_lookup(b"v1").unwrap().is_some();
         let content = store.read_file(f, 0, 65536).unwrap();
         assert_eq!(content.len(), 65536);
         if has_snapshot {
-            write_file(&mut store, f, 0x22);
+            write_file(&store, f, 0x22);
             store.restore_snapshot(b"v1", &CrashHooks::none()).unwrap();
             let back = store.read_file(f, 0, 65536).unwrap();
             assert!(back.iter().all(|&b| b == 0x11));
@@ -152,14 +152,14 @@ fn snapshot_crash_matrix_is_linearizable() {
 #[test]
 fn snapshot_pins_inodes_across_remount() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
-    let f = ino(&mut store);
-    write_file(&mut store, f, 0x33);
+    let store = create_store(&dir);
+    let f = ino(&store);
+    write_file(&store, f, 0x33);
     store
         .create_snapshot(b"pre-remount", &CrashHooks::none())
         .unwrap();
     drop(store);
-    let mut store = Store::open(dir.path(), &StoreConfig::default()).unwrap();
+    let store = Store::open(dir.path(), &StoreConfig::default()).unwrap();
     assert_eq!(store.list_snapshots().unwrap().len(), 1);
     let f2 = store
         .create_entry(
@@ -169,7 +169,7 @@ fn snapshot_pins_inodes_across_remount() {
             &CrashHooks::none(),
         )
         .unwrap();
-    write_file(&mut store, f2, 0x44);
+    write_file(&store, f2, 0x44);
     store
         .restore_snapshot(b"pre-remount", &CrashHooks::none())
         .unwrap();

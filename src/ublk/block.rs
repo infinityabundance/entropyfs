@@ -53,7 +53,7 @@ impl BlockStore {
             return Err(StoreError::Config("invalid ublk device name".into()));
         }
         let dev_name = format!("{DEVICE_PREFIX}{name}");
-        let mut store = if dir.join("superblock").exists() {
+        let store = if dir.join("superblock").exists() {
             Store::open(dir, config)?
         } else {
             Store::create(
@@ -124,7 +124,7 @@ impl BlockStore {
     }
 
     /// Mutable store access (maintenance: GC, optimize).
-    pub fn store_mut(&mut self) -> &mut Store {
+    pub fn store_mut(&mut self) -> &Store {
         &mut self.store
     }
 
@@ -245,7 +245,7 @@ mod tests {
         d.write(0, b"block-data").unwrap();
         d.flush().unwrap();
         drop(d);
-        let mut store = Store::open(dir.path(), &StoreConfig::default()).unwrap();
+        let store = Store::open(dir.path(), &StoreConfig::default()).unwrap();
         let entry = store
             .dir_lookup(1, b".ublk-test0")
             .unwrap()

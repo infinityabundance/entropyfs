@@ -52,7 +52,7 @@ pub struct SnapshotsArgs {
 /// Create a snapshot.
 pub fn run_create(args: &SnapshotCreateArgs) -> Result<(), String> {
     let config = StoreConfig::default();
-    let mut store = Store::open(&args.store, &config).map_err(|e| e.to_string())?;
+    let store = Store::open(&args.store, &config).map_err(|e| e.to_string())?;
     let entry = store
         .create_snapshot(args.name.as_bytes(), &CrashHooks::none())
         .map_err(|e| e.to_string())?;
@@ -87,7 +87,7 @@ pub fn run_list(args: &SnapshotsArgs) -> Result<(), String> {
 pub fn run_delete(args: &SnapshotDeleteArgs) -> Result<(), String> {
     crate::fsck::ensure_unmounted(&args.store)?;
     let config = StoreConfig::default();
-    let mut store = Store::open(&args.store, &config).map_err(|e| e.to_string())?;
+    let store = Store::open(&args.store, &config).map_err(|e| e.to_string())?;
     let present = store
         .delete_snapshot(args.name.as_bytes(), &CrashHooks::none())
         .map_err(|e| e.to_string())?;
@@ -103,7 +103,7 @@ pub fn run_delete(args: &SnapshotDeleteArgs) -> Result<(), String> {
 pub fn run_restore(args: &SnapshotRestoreArgs) -> Result<(), String> {
     crate::fsck::ensure_unmounted(&args.store)?;
     let config = StoreConfig::default();
-    let mut store = Store::open(&args.store, &config).map_err(|e| e.to_string())?;
+    let store = Store::open(&args.store, &config).map_err(|e| e.to_string())?;
     store
         .restore_snapshot(args.name.as_bytes(), &CrashHooks::none())
         .map_err(|e| e.to_string())?;

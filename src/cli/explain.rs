@@ -87,7 +87,7 @@ pub fn run(args: &ExplainArgs) -> Result<(), String> {
     let live = crate::store::gc::mark_live(&store).unwrap_or_default();
     let mut reachable = 0u64;
     for (id, loc) in store.object_index().iter() {
-        if live.contains(id) {
+        if live.contains(&id) {
             reachable += loc.total_size();
         }
     }

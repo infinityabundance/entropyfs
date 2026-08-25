@@ -38,7 +38,7 @@ fn names(store: &Store, ino: u64) -> Vec<Vec<u8>> {
 #[test]
 fn same_parent_rename_moves_entry_exactly_once() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
+    let store = create_store(&dir);
     store
         .create_entry(1, b"a.lock", new_file_entry(0o644), &CrashHooks::none())
         .unwrap();
@@ -61,7 +61,7 @@ fn same_parent_rename_moves_entry_exactly_once() {
 #[test]
 fn same_parent_rename_over_existing_replaces_and_drops_old_inode() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
+    let store = create_store(&dir);
     let src = store
         .create_entry(1, b"new", new_file_entry(0o644), &CrashHooks::none())
         .unwrap();
@@ -83,7 +83,7 @@ fn same_parent_rename_over_existing_replaces_and_drops_old_inode() {
 #[test]
 fn same_parent_rename_onto_hardlink_preserves_nlink() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
+    let store = create_store(&dir);
     let ino = store
         .create_entry(1, b"a", new_file_entry(0o644), &CrashHooks::none())
         .unwrap();
@@ -99,7 +99,7 @@ fn same_parent_rename_onto_hardlink_preserves_nlink() {
 #[test]
 fn cross_parent_rename_moves_entry() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
+    let store = create_store(&dir);
     store
         .create_entry(1, b"d1", new_dir_entry(0o755), &CrashHooks::none())
         .unwrap();
@@ -118,7 +118,7 @@ fn cross_parent_rename_moves_entry() {
 #[test]
 fn cross_parent_dir_rename_adjusts_parent_nlinks() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
+    let store = create_store(&dir);
     store
         .create_entry(1, b"d1", new_dir_entry(0o755), &CrashHooks::none())
         .unwrap();
@@ -146,7 +146,7 @@ fn cross_parent_dir_rename_adjusts_parent_nlinks() {
 #[test]
 fn rmdir_removes_directory_inode() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
+    let store = create_store(&dir);
     let ino = store
         .create_entry(1, b"d", new_dir_entry(0o755), &CrashHooks::none())
         .unwrap();
@@ -162,7 +162,7 @@ fn rmdir_removes_directory_inode() {
 #[test]
 fn unlink_file_drops_inode_at_zero_links() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
+    let store = create_store(&dir);
     let ino = store
         .create_entry(1, b"f", new_file_entry(0o644), &CrashHooks::none())
         .unwrap();
@@ -173,7 +173,7 @@ fn unlink_file_drops_inode_at_zero_links() {
 #[test]
 fn unlink_one_hardlink_keeps_inode() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
+    let store = create_store(&dir);
     let ino = store
         .create_entry(1, b"a", new_file_entry(0o644), &CrashHooks::none())
         .unwrap();
@@ -187,7 +187,7 @@ fn unlink_one_hardlink_keeps_inode() {
 #[test]
 fn rename_rejects_nonempty_dir_over_dir() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
+    let store = create_store(&dir);
     store
         .create_entry(1, b"src", new_dir_entry(0o755), &CrashHooks::none())
         .unwrap();
@@ -207,7 +207,7 @@ fn rename_rejects_nonempty_dir_over_dir() {
 #[test]
 fn rename_rejects_type_mismatches() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
+    let store = create_store(&dir);
     store
         .create_entry(1, b"f", new_file_entry(0o644), &CrashHooks::none())
         .unwrap();
@@ -227,7 +227,7 @@ fn rename_rejects_type_mismatches() {
 #[test]
 fn rename_missing_source_errors() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
+    let store = create_store(&dir);
     let err = store
         .rename(1, b"nope", 1, b"x", &CrashHooks::none())
         .unwrap_err();
@@ -237,7 +237,7 @@ fn rename_missing_source_errors() {
 #[test]
 fn rename_noop_is_successful_and_preserves_state() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
+    let store = create_store(&dir);
     store
         .create_entry(1, b"a", new_file_entry(0o644), &CrashHooks::none())
         .unwrap();
@@ -250,7 +250,7 @@ fn rename_noop_is_successful_and_preserves_state() {
 #[test]
 fn rename_over_empty_dir_succeeds() {
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
+    let store = create_store(&dir);
     store
         .create_entry(1, b"src", new_dir_entry(0o755), &CrashHooks::none())
         .unwrap();
@@ -274,7 +274,7 @@ fn git_lock_dance_reproduces_cleanly() {
     // then rename config.lock -> config, repeated twice (git sets several
     // config values during clone).
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
+    let store = create_store(&dir);
     store
         .create_entry(1, b".git", new_dir_entry(0o755), &CrashHooks::none())
         .unwrap();
@@ -317,7 +317,7 @@ fn directory_tree_invariants_after_rename_stress() {
     // Interleave same-parent and cross-parent renames; verify the
     // directory B-tree is consistent and all entries resolve.
     let dir = TempDir::new().unwrap();
-    let mut store = create_store(&dir);
+    let store = create_store(&dir);
     let a = store
         .create_entry(1, b"a", new_file_entry(0o644), &CrashHooks::none())
         .unwrap();

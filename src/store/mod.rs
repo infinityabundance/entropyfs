@@ -167,25 +167,76 @@ pub struct ExtentUpdate {
     pub objects: Vec<ObjectRecord>,
 }
 
+/// The write/commit coordinator state: root, superblock, generation and
+/// feature bits. Readers snapshot it under a read lock; the commit path
+/// publishes under a write lock while holding `Store::commit_lock`.
+struct CommitState {
+    root: Root,
+    superblock: Superblock,
+    generation: u64,
+    features_in_use: u64,
+}
+
+/// Per-inode mutation locks (sharded mutexes keyed by inode number).
+///
+/// Lock order: `inode_lock → commit_lock`. Readers never take either.
+/// File-data writes and truncates hold the inode lock for their whole
+/// prepare+commit sequence so two writers to the same file cannot
+/// interleave their read-modify-write; writers to different files
+/// serialize only on the short commit lock.
+pub struct InodeLockTable {
+    shards: Box<[std::sync::Mutex<()>]>,
+}
+
+/// Number of inode-lock shards (a power of two).
+const INODE_LOCK_SHARDS: usize = 256;
+
+impl Default for InodeLockTable {
+    fn default() -> Self {
+        let mut shards = Vec::with_capacity(INODE_LOCK_SHARDS);
+        for _ in 0..INODE_LOCK_SHARDS {
+            shards.push(std::sync::Mutex::new(()));
+        }
+        Self {
+            shards: shards.into_boxed_slice(),
+        }
+    }
+}
+
+impl InodeLockTable {
+    /// Lock the shard for `ino` (serializes mutations of one inode).
+    pub fn lock(&self, ino: u64) -> std::sync::MutexGuard<'_, ()> {
+        self.shards[(ino as usize) & (INODE_LOCK_SHARDS - 1)]
+            .lock()
+            .expect("inode lock poisoned")
+    }
+}
+
 /// The filesystem store.
+///
+/// Concurrency model (ADR-0013, Phase 8): reads traverse immutable
+/// content-addressed state (a root snapshot + the append-only object
+/// index) with no global lock; writes prepare candidates concurrently and
+/// serialize only the short transaction application + root publication on
+/// `commit_lock`. GC is offline (unmounted), so the mounted object index
+/// never shrinks under a reader.
 pub struct Store {
     dir: PathBuf,
     config: StoreConfig,
-    /// In-memory derived object index.
-    object_index: ObjectIndex,
-    /// Current committed root.
-    root: Root,
-    /// Current superblock (for the commit flip).
-    superblock: Superblock,
-    /// Committed generation.
-    generation: u64,
-    /// Current segment writer (None between commits is not allowed; kept
-    /// open from mount).
-    current_segment: Option<SegmentWriter>,
-    /// Feature bits in use (incompat bits for representations).
-    features_in_use: u64,
+    /// In-memory derived object index (sharded `RwLock`; append-only while
+    /// mounted).
+    object_index: std::sync::Arc<ObjectIndex>,
+    /// Commit state: root, superblock, generation, feature bits.
+    commit: std::sync::RwLock<CommitState>,
+    /// The commit coordinator: serializes transaction application + root
+    /// publication. Held from `begin_tx` through commit; also taken by the
+    /// durability barrier so an fsync observes every commit that started
+    /// before it.
+    commit_lock: std::sync::Mutex<()>,
+    /// Current segment writer (serialized append; kept open from mount).
+    segment: std::sync::Mutex<Option<SegmentWriter>>,
     /// Statistics.
-    stats: StoreStats,
+    stats: std::sync::Mutex<StoreStats>,
     /// Advisory lock file.
     _lock: File,
     /// Superblock file path.
@@ -195,15 +246,18 @@ pub struct Store {
     /// DSFB storage observer (performance-only; zero decoding authority).
     /// Bounded by `DSFB_MAX_CHUNKS`; dropping it affects only search
     /// ordering, never bytes (ADR-0004).
-    dsfb: crate::dsfb::observer::StorageObserver,
+    dsfb: std::sync::Mutex<crate::dsfb::observer::StorageObserver>,
+    /// Per-inode mutation locks (file-data writes and truncates).
+    inode_locks: std::sync::Arc<InodeLockTable>,
 }
 
 impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let cs = self.commit.read().expect("commit state poisoned");
         f.debug_struct("Store")
             .field("dir", &self.dir)
-            .field("generation", &self.generation)
-            .field("root", &self.root)
+            .field("generation", &cs.generation)
+            .field("root", &cs.root)
             .finish_non_exhaustive()
     }
 }
@@ -238,20 +292,24 @@ impl Store {
         let sb_path = dir.join("superblock");
         crate::store::root::write_slot(&sb_path, SUPERBLOCK_SLOT_A_OFFSET, &sb, true)?;
         // Root object record lives in segment 0.
-        let mut store = Self {
+        let store = Self {
             dir: dir.to_path_buf(),
             config: *config,
-            object_index: ObjectIndex::new(),
-            root,
-            superblock: sb,
-            generation: 0,
-            current_segment: None,
-            features_in_use: 0,
-            stats: StoreStats::default(),
+            object_index: std::sync::Arc::new(ObjectIndex::new()),
+            commit: std::sync::RwLock::new(CommitState {
+                root,
+                superblock: sb,
+                generation: 0,
+                features_in_use: 0,
+            }),
+            commit_lock: std::sync::Mutex::new(()),
+            segment: std::sync::Mutex::new(None),
+            stats: std::sync::Mutex::new(StoreStats::default()),
             _lock: lock,
             superblock_path: sb_path,
             model_cache: std::sync::Mutex::new(crate::cache::model::ModelCache::new(64)),
-            dsfb: crate::dsfb::observer::StorageObserver::default(),
+            dsfb: std::sync::Mutex::new(crate::dsfb::observer::StorageObserver::default()),
+            inode_locks: std::sync::Arc::new(InodeLockTable::default()),
         };
         store.open_segment(0)?;
         // Create the root directory inode (ino 1) and commit the initial
@@ -264,7 +322,11 @@ impl Store {
             Store::put_inode_in_tx(&mut tx, 1, &root_inode)?;
             tx.commit(&crate::store::transaction::CrashHooks::none())?;
         }
-        store.stats.physical_capacity = store.physical_capacity();
+        store
+            .stats
+            .lock()
+            .expect("stats poisoned")
+            .physical_capacity = store.physical_capacity();
         Ok(store)
     }
 
@@ -275,7 +337,7 @@ impl Store {
         let pair = SuperblockPair::read(&sb_path)?;
         // Rebuild the object index from segments (needed to resolve the
         // root object; also the source for the recovery fallback).
-        let mut object_index = ObjectIndex::new();
+        let object_index = ObjectIndex::new();
         let segments = segment::list_segments(dir)?;
         for seq in &segments {
             let path = segment::segment_path(dir, *seq);
@@ -302,22 +364,30 @@ impl Store {
         // may observe the complete previous or complete new transaction,
         // never an impossible hybrid).
         let (sb, root) = Self::choose_root(&pair, dir, &object_index, config)?;
-        let mut store = Self {
+        let store = Self {
             dir: dir.to_path_buf(),
             config: *config,
-            object_index,
-            root: root.clone(),
-            superblock: sb.clone(),
-            generation: sb.generation,
-            current_segment: None,
-            features_in_use: sb.incompat,
-            stats: StoreStats::default(),
+            object_index: std::sync::Arc::new(object_index),
+            commit: std::sync::RwLock::new(CommitState {
+                root: root.clone(),
+                superblock: sb.clone(),
+                generation: sb.generation,
+                features_in_use: sb.incompat,
+            }),
+            commit_lock: std::sync::Mutex::new(()),
+            segment: std::sync::Mutex::new(None),
+            stats: std::sync::Mutex::new(StoreStats::default()),
             _lock: lock,
             superblock_path: sb_path,
             model_cache: std::sync::Mutex::new(crate::cache::model::ModelCache::new(64)),
-            dsfb: crate::dsfb::observer::StorageObserver::default(),
+            dsfb: std::sync::Mutex::new(crate::dsfb::observer::StorageObserver::default()),
+            inode_locks: std::sync::Arc::new(InodeLockTable::default()),
         };
-        store.stats.physical_capacity = store.physical_capacity();
+        store
+            .stats
+            .lock()
+            .expect("stats poisoned")
+            .physical_capacity = store.physical_capacity();
         store.open_segment(sb.segment_seq)?;
         // Deep-verify the chosen root quickly (structural).
         recovery::verify_root(&store)?;
@@ -379,44 +449,50 @@ impl Store {
         &self.config
     }
 
-    /// The current committed root.
-    pub fn current_root(&self) -> &Root {
-        &self.root
+    /// The current committed root (a snapshot copy; readers never hold
+    /// the commit lock across a traversal).
+    pub fn current_root(&self) -> Root {
+        self.commit
+            .read()
+            .expect("commit state poisoned")
+            .root
+            .clone()
     }
 
     /// The committed generation.
     pub fn generation(&self) -> u64 {
-        self.generation
+        self.commit
+            .read()
+            .expect("commit state poisoned")
+            .generation
     }
 
     /// Current segment sequence.
     pub fn current_segment_seq(&self) -> u64 {
-        self.current_segment.as_ref().map(|w| w.seq()).unwrap_or(0)
+        self.segment
+            .lock()
+            .expect("segment poisoned")
+            .as_ref()
+            .map(|w| w.seq())
+            .unwrap_or(0)
     }
 
-    /// The object index (derived; for GC/fsck).
+    /// The object index (derived; for GC/fsck and the read path).
     pub fn object_index(&self) -> &ObjectIndex {
         &self.object_index
     }
 
-    /// Mutable object index access (GC compaction).
-    pub fn object_index_mut(&mut self) -> &mut ObjectIndex {
-        &mut self.object_index
-    }
-
-    /// The committed stats.
-    pub fn stats(&self) -> &StoreStats {
-        &self.stats
-    }
-
-    /// Mutable stats (fsck/GC update them).
-    pub fn stats_mut(&mut self) -> &mut StoreStats {
-        &mut self.stats
+    /// The committed stats (copied: `StoreStats` is `Copy`).
+    pub fn stats(&self) -> StoreStats {
+        *self.stats.lock().expect("stats poisoned")
     }
 
     /// Feature bits in use.
     pub fn features_in_use(&self) -> u64 {
-        self.features_in_use
+        self.commit
+            .read()
+            .expect("commit state poisoned")
+            .features_in_use
     }
 
     /// The DSFB search plan for a chunk (trust-ordered, budget-bounded).
@@ -424,7 +500,7 @@ impl Store {
         &self,
         key: &crate::dsfb::features::ChunkKey,
     ) -> crate::dsfb::selection::SearchPlan {
-        self.dsfb.plan(key)
+        self.dsfb.lock().expect("dsfb poisoned").plan(key)
     }
 
     /// DSFB trust for one channel of a chunk.
@@ -433,30 +509,29 @@ impl Store {
         key: &crate::dsfb::features::ChunkKey,
         channel: crate::dsfb::features::Channel,
     ) -> f64 {
-        self.dsfb.trust(key, channel)
+        self.dsfb.lock().expect("dsfb poisoned").trust(key, channel)
     }
 
     /// Feed the DSFB observer (performance-only state). Bounded eviction
     /// keeps the observer from growing without limit.
     pub fn dsfb_observe(
-        &mut self,
+        &self,
         key: crate::dsfb::features::ChunkKey,
         measurements: &[(crate::dsfb::features::Channel, f64)],
         winner: crate::dsfb::features::Channel,
         outcome_quality: f64,
     ) -> crate::dsfb::drift::Regime {
-        let regime = self
-            .dsfb
-            .observe(key, measurements, winner, outcome_quality);
-        if self.dsfb.len() > DSFB_MAX_CHUNKS {
-            self.dsfb.evict_one();
+        let mut dsfb = self.dsfb.lock().expect("dsfb poisoned");
+        let regime = dsfb.observe(key, measurements, winner, outcome_quality);
+        if dsfb.len() > DSFB_MAX_CHUNKS {
+            dsfb.evict_one();
         }
         regime
     }
 
     /// Observer statistics (for `status`).
     pub fn dsfb_stats(&self) -> crate::dsfb::observer::ObserverStats {
-        self.dsfb.stats
+        self.dsfb.lock().expect("dsfb poisoned").stats
     }
 
     /// Materialize the chunk at `offset` of `ino` as a candidate base, but
@@ -538,10 +613,15 @@ impl Store {
     // Segments
     // ------------------------------------------------------------------
 
-    fn open_segment(&mut self, seq: u64) -> Result<(), StoreError> {
+    fn open_segment(&self, seq: u64) -> Result<(), StoreError> {
         let w = SegmentWriter::open(&self.dir, seq)?;
-        self.current_segment = Some(w);
+        *self.segment.lock().expect("segment poisoned") = Some(w);
         Ok(())
+    }
+
+    /// Replace the current segment writer (offline GC compaction).
+    pub(crate) fn install_segment(&self, w: SegmentWriter) {
+        *self.segment.lock().expect("segment poisoned") = Some(w);
     }
 
     /// ENOSPC guard: refuse a commit before staging anything when the
@@ -559,7 +639,7 @@ impl Store {
             return Ok(());
         }
         let mut projected = self.physical_used();
-        if let Some(w) = &self.current_segment {
+        if let Some(w) = self.segment.lock().expect("segment poisoned").as_ref() {
             projected = projected.saturating_add(w.buffered_len());
         }
         for pending in records {
@@ -588,8 +668,9 @@ impl Store {
 
     /// Append pending records (raw payloads) to the current segment,
     /// encoding each envelope with its flags; rolls the segment when full.
+    /// Serialized by the commit coordinator (`commit_lock`).
     fn append_records(
-        &mut self,
+        &self,
         records: &mut Vec<crate::store::transaction::PendingRecord>,
     ) -> Result<(), StoreError> {
         for pending in records.drain(..) {
@@ -605,14 +686,17 @@ impl Store {
                 &pending.payload,
             );
             let offset = {
-                let w = self.current_segment.as_mut().ok_or(StoreError::NotOpen)?;
+                let mut seg = self.segment.lock().expect("segment poisoned");
+                let w = seg.as_mut().ok_or(StoreError::NotOpen)?;
                 let base = w.durable_end() + w.buffered_len();
                 if base + encoded.len() as u64 > self.config.segment_size {
-                    // Roll: flush + sync current, open the next.  The
-                    // borrow of `self.current_segment` ends here (NLL).
+                    // Roll: flush + sync current, open the next. The
+                    // segment lock is released before re-acquiring it in
+                    // `open_segment`.
                     w.flush()?;
                     w.fdatasync()?;
-                    let next = self.current_segment_seq() + 1;
+                    let next = w.seq() + 1;
+                    drop(seg);
                     self.open_segment(next)?;
                     SegmentWriter::sync_dir(&self.dir)?;
                     base_after_roll(self, &encoded)
@@ -620,7 +704,8 @@ impl Store {
                     base
                 }
             };
-            let w = self.current_segment.as_mut().ok_or(StoreError::NotOpen)?;
+            let mut seg = self.segment.lock().expect("segment poisoned");
+            let w = seg.as_mut().ok_or(StoreError::NotOpen)?;
             w.append(encoded);
             self.object_index.insert(
                 ChunkId::of(&pending.payload),
@@ -637,8 +722,9 @@ impl Store {
     }
 
     /// fdatasync the current segment.
-    pub fn fdatasync_segment(&mut self) -> Result<(), StoreError> {
-        if let Some(w) = &mut self.current_segment {
+    pub fn fdatasync_segment(&self) -> Result<(), StoreError> {
+        let mut seg = self.segment.lock().expect("segment poisoned");
+        if let Some(w) = seg.as_mut() {
             // Flush buffered bytes first (the caller appended them).
             w.flush()?;
             w.fdatasync()?;
@@ -647,8 +733,9 @@ impl Store {
     }
 
     /// Flush buffered segment bytes.
-    pub fn flush_segment(&mut self) -> Result<(), StoreError> {
-        if let Some(w) = &mut self.current_segment {
+    pub fn flush_segment(&self) -> Result<(), StoreError> {
+        let mut seg = self.segment.lock().expect("segment poisoned");
+        if let Some(w) = seg.as_mut() {
             w.flush()?;
         }
         Ok(())
@@ -687,19 +774,21 @@ impl Store {
     // Superblock / commit
     // ------------------------------------------------------------------
 
-    /// Write the inactive superblock slot for the new root.
-    pub fn write_superblock(&mut self, root_id: ChunkId, root: &Root) -> Result<(), StoreError> {
-        let mut sb = self.superblock.clone();
+    /// Write the inactive superblock slot for the new root. Runs under the
+    /// commit coordinator (`commit_lock`).
+    pub fn write_superblock(&self, root_id: ChunkId, root: &Root) -> Result<(), StoreError> {
+        let mut cs = self.commit.write().expect("commit state poisoned");
+        let mut sb = cs.superblock.clone();
         sb.generation = root.generation;
         sb.root_object_id = root_id;
         sb.segment_seq = root.segment_seq;
-        sb.incompat = self.features_in_use;
+        sb.incompat = cs.features_in_use;
         let offset = match root.generation & 1 {
             0 => SUPERBLOCK_SLOT_A_OFFSET,
             _ => SUPERBLOCK_SLOT_B_OFFSET,
         };
         crate::store::root::write_slot(&self.superblock_path, offset, &sb, false)?;
-        self.superblock = sb;
+        cs.superblock = sb;
         Ok(())
     }
 
@@ -719,9 +808,13 @@ impl Store {
     /// chosen slot's root and falls back to the newest valid root record
     /// in the segments.
     pub fn durability_barrier(
-        &mut self,
+        &self,
         hooks: &crate::store::transaction::CrashHooks,
     ) -> Result<(), StoreError> {
+        // Serialize with in-flight commits: an fsync observes every commit
+        // that started before it (and every commit that started after
+        // waits for the barrier).
+        let _guard = self.commit_lock.lock().expect("commit lock poisoned");
         // Records have been appended (by the deferred commit(s)); the
         // segment has not been fdatasync'd yet.
         hooks.hit(crate::store::transaction::CrashPoint::AfterRecordAppend)?;
@@ -733,7 +826,7 @@ impl Store {
         hooks.hit(crate::store::transaction::CrashPoint::AfterSegmentDirFsync)?;
         // 3. write the inactive superblock slot (idempotent: the deferred
         //    commit already wrote it to the page cache) and fsync it.
-        let root = self.root.clone();
+        let root = self.current_root();
         let root_id = root.id();
         self.write_superblock(root_id, &root)?;
         hooks.hit(crate::store::transaction::CrashPoint::AfterSuperblockWrite)?;
@@ -742,10 +835,12 @@ impl Store {
         Ok(())
     }
 
-    /// Publish a committed root to the in-memory state.
-    pub fn publish_commit(&mut self, root: &Root, _root_id: ChunkId) -> Result<(), StoreError> {
-        self.root = root.clone();
-        self.generation = root.generation;
+    /// Publish a committed root to the in-memory state (under the commit
+    /// coordinator).
+    pub fn publish_commit(&self, root: &Root, _root_id: ChunkId) -> Result<(), StoreError> {
+        let mut cs = self.commit.write().expect("commit state poisoned");
+        cs.root = root.clone();
+        cs.generation = root.generation;
         Ok(())
     }
 
@@ -753,14 +848,22 @@ impl Store {
     // Begin transaction
     // ------------------------------------------------------------------
 
-    /// Begin a write transaction (exclusive; the commit coordinator
-    /// serializes these — ADR-0013).
-    pub fn begin_tx(&mut self) -> Result<crate::store::transaction::Tx<'_>, StoreError> {
+    /// Begin a write transaction. Takes the commit coordinator lock (held
+    /// until commit): the transaction application and root publication are
+    /// serialized, while candidate encoding (the expensive part of a
+    /// write) happens before `begin_tx` and runs concurrently.
+    pub fn begin_tx(&self) -> Result<crate::store::transaction::Tx<'_>, StoreError> {
+        let guard = self.commit_lock.lock().expect("commit lock poisoned");
         // Ensure the segment writer is present.
-        if self.current_segment.is_none() {
-            self.open_segment(self.root.segment_seq)?;
+        if self.segment.lock().expect("segment poisoned").is_none() {
+            self.open_segment(self.current_root().segment_seq)?;
         }
-        Ok(crate::store::transaction::Tx::begin(self))
+        Ok(crate::store::transaction::Tx::begin(self, guard))
+    }
+
+    /// The per-inode mutation lock (file-data writes and truncates).
+    pub fn inode_lock(&self, ino: u64) -> std::sync::MutexGuard<'_, ()> {
+        self.inode_locks.lock(ino)
     }
 
     // ------------------------------------------------------------------
@@ -771,7 +874,7 @@ impl Store {
     pub fn get_inode(&self, ino: u64) -> Result<Option<Inode>, StoreError> {
         let key = ino.to_be_bytes();
         match index::get(
-            self.root.inode_index_root,
+            self.current_root().inode_index_root,
             &key,
             BTREE_ORDER,
             self.config.limits.max_fanout,
@@ -831,7 +934,7 @@ impl Store {
     /// All inode numbers (for fsck/GC; bounded by the index size).
     pub fn all_inodes(&self) -> Result<Vec<u64>, StoreError> {
         let entries = index::scan_all(
-            self.root.inode_index_root,
+            self.current_root().inode_index_root,
             BTREE_ORDER,
             self.config.limits.max_fanout,
             self,
@@ -849,7 +952,7 @@ impl Store {
     /// Look up a chunk descriptor by content id.
     pub fn chunk_descriptor(&self, cid: &ChunkId) -> Result<Option<Vec<u8>>, StoreError> {
         Ok(index::get(
-            self.root.chunk_index_root,
+            self.current_root().chunk_index_root,
             cid.as_bytes(),
             BTREE_ORDER,
             self.config.limits.max_fanout,
@@ -877,7 +980,13 @@ impl Store {
             }
         }
         // Track incompat features.
-        let mut features = tx.store.features_in_use;
+        let mut features = {
+            tx.store
+                .commit
+                .read()
+                .expect("commit state poisoned")
+                .features_in_use
+        };
         match descriptor {
             Representation::EntropyRef { .. } => {
                 features |= crate::format::features::Feature::EntropyRef.mask();
@@ -899,13 +1008,13 @@ impl Store {
             tx.store.config.limits.max_fanout,
             tx,
         )?;
-        // Stash the features on the tx via a side channel: the store's
-        // features_in_use is updated at commit. We record in the root's
-        // reserved space? Simpler: keep a thread-local-free approach —
-        // recompute at commit from the descriptor set. For v1 we update
-        // the store field directly through the &mut (commit runs with the
-        // store mutably borrowed).
-        tx.store.features_in_use |= features;
+        // Feature bits are recorded on the commit state (the tx runs under
+        // the commit coordinator).
+        tx.store
+            .commit
+            .write()
+            .expect("commit state poisoned")
+            .features_in_use |= features;
         Ok(())
     }
 
@@ -1175,7 +1284,7 @@ impl Store {
     /// Commit a set of extent updates for a file region (the FUSE write
     /// path entry point after candidate selection).
     pub fn commit_file_extents(
-        &mut self,
+        &self,
         ino: u64,
         updates: Vec<ExtentUpdate>,
         new_size: Option<u64>,
@@ -1251,7 +1360,7 @@ impl Store {
     /// [`Store::durability_barrier`]). Process-crash safe; power-durable
     /// only after the next barrier.
     pub fn commit_file_extents_deferred(
-        &mut self,
+        &self,
         ino: u64,
         updates: Vec<ExtentUpdate>,
         new_size: Option<u64>,
@@ -1317,7 +1426,17 @@ impl Store {
     /// Truncate a file: drop extents starting at or beyond the new size
     /// and re-encode the trailing partial extent so no extent extends past
     /// `new_size` (fsck invariant: extent end <= file size).
-    pub fn truncate_file(&mut self, ino: u64, new_size: u64) -> Result<(), StoreError> {
+    /// Truncate a file: drop extents starting at or beyond the new size
+    /// and re-encode the trailing partial extent so no extent extends past
+    /// `new_size` (fsck invariant: extent end <= file size). Takes the
+    /// per-inode mutation lock.
+    pub fn truncate_file(&self, ino: u64, new_size: u64) -> Result<(), StoreError> {
+        let _lock = self.inode_lock(ino);
+        self.truncate_file_locked(ino, new_size)
+    }
+
+    /// The truncate body (the caller holds the per-inode mutation lock).
+    pub(crate) fn truncate_file_locked(&self, ino: u64, new_size: u64) -> Result<(), StoreError> {
         let inode = self
             .get_inode(ino)?
             .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
@@ -1448,7 +1567,7 @@ impl Store {
 
     /// Insert a directory entry.
     pub fn dir_insert(
-        &mut self,
+        &self,
         dir_ino: u64,
         name: &[u8],
         entry: DirEntry,
@@ -1473,7 +1592,7 @@ impl Store {
 
     /// Remove a directory entry.
     pub fn dir_remove(
-        &mut self,
+        &self,
         dir_ino: u64,
         name: &[u8],
         hooks: &crate::store::transaction::CrashHooks,
@@ -1535,7 +1654,7 @@ impl Store {
     /// Create a new entry (file/dir/symlink/device) under `parent` and
     /// return its inode number. One transaction for inode + entry.
     pub fn create_entry(
-        &mut self,
+        &self,
         parent: u64,
         name: &[u8],
         entry: NewEntry,
@@ -1608,7 +1727,7 @@ impl Store {
     /// (directory must be empty). Returns the removed entry's inode
     /// number (needed by the FUSE layer for kernel cache invalidation).
     pub fn unlink(
-        &mut self,
+        &self,
         parent: u64,
         name: &[u8],
         is_dir: bool,
@@ -1688,7 +1807,7 @@ impl Store {
     /// directory cannot replace a non-directory (and vice versa), and a
     /// directory can only replace an empty directory.
     pub fn rename(
-        &mut self,
+        &self,
         src_parent: u64,
         src_name: &[u8],
         dst_parent: u64,
@@ -1847,7 +1966,7 @@ impl Store {
 
     /// Create a hard link: another directory entry for `ino` (nlink++).
     pub fn link(
-        &mut self,
+        &self,
         parent: u64,
         name: &[u8],
         ino: u64,
@@ -1892,9 +2011,21 @@ impl Store {
     }
 
     /// Replace an inode's mode/uid/gid/size/time fields (setattr). Returns
-    /// the updated inode.
+    /// the updated inode. Takes the per-inode mutation lock (a size change
+    /// truncates, which must serialize with concurrent writes).
     pub fn setattr_inode(
-        &mut self,
+        &self,
+        ino: u64,
+        update: &AttrUpdate,
+        hooks: &crate::store::transaction::CrashHooks,
+    ) -> Result<Inode, StoreError> {
+        let _lock = self.inode_lock(ino);
+        self.setattr_inode_locked(ino, update, hooks)
+    }
+
+    /// The setattr body (the caller holds the per-inode mutation lock).
+    fn setattr_inode_locked(
+        &self,
         ino: u64,
         update: &AttrUpdate,
         hooks: &crate::store::transaction::CrashHooks,
@@ -1925,7 +2056,7 @@ impl Store {
                 // truncate path re-encodes trailing partial extents.
                 let _ = fanout;
                 drop(tx);
-                self.truncate_file(ino, s)?;
+                self.truncate_file_locked(ino, s)?;
                 let mut tx = self.begin_tx()?;
                 let mut inode = Store::inode_for_tx(&tx, ino)?;
                 inode.size = s;
@@ -2050,8 +2181,9 @@ pub struct AttrUpdate {
 
 impl Store {
     /// Write `data` at `offset` of file `ino` (chunk-aligned
-    /// read-modify-write; one transaction; extends the file size).
-    pub fn write_region(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<(), StoreError> {
+    /// read-modify-write; one transaction; extends the file size). Takes
+    /// the per-inode mutation lock for the whole prepare+commit sequence.
+    pub fn write_region(&self, ino: u64, offset: u64, data: &[u8]) -> Result<(), StoreError> {
         self.write_region_with(
             ino,
             offset,
@@ -2061,8 +2193,25 @@ impl Store {
     }
 
     /// Write with explicit optimization options (ablation benchmarks, §43).
+    /// Takes the per-inode mutation lock.
     pub fn write_region_with(
-        &mut self,
+        &self,
+        ino: u64,
+        offset: u64,
+        data: &[u8],
+        options: crate::optimizer::policy::OptimizeOptions,
+    ) -> Result<(), StoreError> {
+        let _lock = self.inode_lock(ino);
+        self.write_region_with_locked(ino, offset, data, options)
+    }
+
+    /// The write body: the caller holds the per-inode mutation lock.
+    /// Candidate encoding (hashing, rANS, dedup lookups, base search)
+    /// runs concurrently with reads and with other inodes' prepares; only
+    /// the final `commit_file_extents_deferred` serializes on the commit
+    /// coordinator.
+    pub(crate) fn write_region_with_locked(
+        &self,
         ino: u64,
         offset: u64,
         data: &[u8],
@@ -2070,6 +2219,34 @@ impl Store {
     ) -> Result<(), StoreError> {
         if data.is_empty() {
             return Ok(());
+        }
+        let (updates, new_size) = self.prepare_write(ino, offset, data, None, options)?;
+        self.commit_file_extents_deferred(ino, updates, Some(new_size), &CrashHooks::none())?;
+        Ok(())
+    }
+
+    /// Prepare a file write: chunk-aligned read-modify-write + candidate
+    /// encoding into extent updates, WITHOUT committing. The caller holds
+    /// the per-inode mutation lock and must commit the returned updates
+    /// (possibly batched with other regions of the same inode).
+    ///
+    /// `overlay` (chunk offset → bytes) carries uncommitted in-batch chunk
+    /// state so a later partial write in the same batch sees earlier batch
+    /// writes instead of stale committed bytes. Returns the updates plus
+    /// the file size after this write.
+    fn prepare_write(
+        &self,
+        ino: u64,
+        offset: u64,
+        data: &[u8],
+        mut overlay: Option<&mut std::collections::BTreeMap<u64, Vec<u8>>>,
+        options: crate::optimizer::policy::OptimizeOptions,
+    ) -> Result<(Vec<ExtentUpdate>, u64), StoreError> {
+        if data.is_empty() {
+            return Ok((
+                Vec::new(),
+                self.get_inode(ino)?.map(|i| i.size).unwrap_or(0),
+            ));
         }
         let limits = self.config.limits;
         let chunk_class = limits.chunk_class;
@@ -2092,18 +2269,32 @@ impl Store {
             let write_end = (in_end - chunk_off) as usize;
             let payload = &data[(in_start - offset) as usize..(in_end - offset) as usize];
 
-            // Read the current chunk bytes (zeros for holes / beyond EOF),
-            // unless the write covers the entire chunk. The whole chunk is
-            // read (clipped to the file size) so untouched bytes survive.
+            // Read the current chunk bytes: the batch overlay (if this
+            // chunk was already touched in this batch), else the committed
+            // store (zeros for holes / beyond EOF) — unless the write
+            // covers the entire chunk. The whole chunk is read (clipped to
+            // the file size) so untouched bytes survive.
             let full_chunk = write_start == 0 && write_end == chunk_class as usize;
             let mut chunk_bytes = vec![0u8; chunk_class as usize];
             let mut partial: Vec<u8> = Vec::new();
+            let mut from_overlay = false;
             if !full_chunk {
-                let read_end = (chunk_off + chunk_class).min(old_size);
-                if read_end > chunk_off {
-                    partial = self.read_file(ino, chunk_off, read_end - chunk_off)?;
-                    let n = partial.len().min(chunk_class as usize);
-                    chunk_bytes[..n].copy_from_slice(&partial[..n]);
+                let overlay_hit = overlay.as_ref().and_then(|o| o.get(&chunk_off).cloned());
+                match overlay_hit {
+                    Some(bytes) => {
+                        let n = bytes.len().min(chunk_class as usize);
+                        chunk_bytes[..n].copy_from_slice(&bytes[..n]);
+                        partial = bytes;
+                        from_overlay = true;
+                    }
+                    None => {
+                        let read_end = (chunk_off + chunk_class).min(old_size);
+                        if read_end > chunk_off {
+                            partial = self.read_file(ino, chunk_off, read_end - chunk_off)?;
+                            let n = partial.len().min(chunk_class as usize);
+                            chunk_bytes[..n].copy_from_slice(&partial[..n]);
+                        }
+                    }
                 }
             }
             chunk_bytes[write_start..write_end].copy_from_slice(payload);
@@ -2115,14 +2306,19 @@ impl Store {
             let chunk_end = chunk_off.saturating_add(chunk_class).min(new_size);
             let chunk_len = (chunk_end - chunk_off) as usize;
             let chunk_bytes = &chunk_bytes[..chunk_len];
+            if let Some(o) = overlay.as_mut() {
+                o.insert(chunk_off, chunk_bytes.to_vec());
+            }
 
             // Phase 4: the guided search (DSFB-ordered, §16). P0 is the
             // previous version of this chunk (the natural edit base for
             // versioned data, H2); it is only usable when the old extent
             // resolves in the chunk index. When the RMW already
             // materialized the full pre-write chunk, reuse those bytes
-            // instead of re-reading the store (Phase 6 hot path).
-            let mut prev_version = if old_size > chunk_off {
+            // instead of re-reading the store (Phase 6 hot path). The
+            // batch overlay bytes are *uncommitted*, so they are never a
+            // base (the store cannot resolve them).
+            let mut prev_version = if !from_overlay && old_size > chunk_off {
                 if !full_chunk && old_size >= chunk_off + chunk_len as u64 {
                     self.base_chunk_from_bytes(&partial[..chunk_len])?
                 } else if full_chunk {
@@ -2165,16 +2361,57 @@ impl Store {
             updates.push(outcome.update);
             chunk += 1;
         }
+        Ok((updates, new_size))
+    }
 
+    /// Group commit: write many (offset, data) regions of one file in a
+    /// single transaction (§16, Phase-8 write aggregation). Regions are
+    /// applied in offset order with an in-batch overlay, so overlapping or
+    /// adjacent partial chunks compose correctly. Takes the per-inode
+    /// mutation lock.
+    pub fn write_region_batch(
+        &self,
+        ino: u64,
+        writes: &[(u64, Vec<u8>)],
+        options: crate::optimizer::policy::OptimizeOptions,
+    ) -> Result<(), StoreError> {
+        if writes.is_empty() {
+            return Ok(());
+        }
+        let _lock = self.inode_lock(ino);
+        let mut sorted: Vec<(u64, Vec<u8>)> = writes.to_vec();
+        sorted.sort_by_key(|(off, _)| *off);
+        let mut overlay: std::collections::BTreeMap<u64, Vec<u8>> =
+            std::collections::BTreeMap::new();
+        let mut updates: Vec<ExtentUpdate> = Vec::new();
+        let mut new_size = 0u64;
+        for (offset, data) in &sorted {
+            let (u, sz) = self.prepare_write(ino, *offset, data, Some(&mut overlay), options)?;
+            updates.extend(u);
+            new_size = new_size.max(sz);
+        }
         self.commit_file_extents_deferred(ino, updates, Some(new_size), &CrashHooks::none())?;
         Ok(())
     }
 
     /// Punch a hole: the byte range reads as ZERO (and is stored as ZERO
     /// descriptors, so space is freed). When the punch reaches EOF and
-    /// `keep_size` is clear, the file is truncated instead.
+    /// `keep_size` is clear, the file is truncated instead. Takes the
+    /// per-inode mutation lock.
     pub fn punch_hole(
-        &mut self,
+        &self,
+        ino: u64,
+        start: u64,
+        end: u64,
+        keep_size: bool,
+    ) -> Result<(), StoreError> {
+        let _lock = self.inode_lock(ino);
+        self.punch_hole_locked(ino, start, end, keep_size)
+    }
+
+    /// The punch body (the caller holds the per-inode lock).
+    fn punch_hole_locked(
+        &self,
         ino: u64,
         start: u64,
         end: u64,
@@ -2185,21 +2422,27 @@ impl Store {
             .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
         let size = inode.size;
         if !keep_size && end >= size {
-            return self.truncate_file(ino, start);
+            return self.truncate_file_locked(ino, start);
         }
         let punch_end = end.min(size);
         if punch_end > start {
             let zeros = vec![0u8; (punch_end - start) as usize];
-            self.write_region(ino, start, &zeros)?;
+            self.write_region_with_locked(
+                ino,
+                start,
+                &zeros,
+                crate::optimizer::policy::OptimizeOptions::default(),
+            )?;
         }
         Ok(())
     }
 
     /// `copy_file_range`: copy `len` bytes between files (v1 reads through
     /// the materialization path and writes through the RMW path — correct,
-    /// not zero-copy). Returns the number of bytes copied.
+    /// not zero-copy). Returns the number of bytes copied. Serializes with
+    /// other writers of the destination inode.
     pub fn copy_range(
-        &mut self,
+        &self,
         ino_in: u64,
         offset_in: u64,
         ino_out: u64,
@@ -2209,7 +2452,13 @@ impl Store {
         let data = self.read_file(ino_in, offset_in, len)?;
         let copied = data.len() as u64;
         if copied > 0 {
-            self.write_region(ino_out, offset_out, &data)?;
+            let _lock = self.inode_lock(ino_out);
+            self.write_region_with_locked(
+                ino_out,
+                offset_out,
+                &data,
+                crate::optimizer::policy::OptimizeOptions::default(),
+            )?;
         }
         Ok(copied)
     }
@@ -2332,7 +2581,7 @@ impl Store {
 
     /// Create a snapshot of the current root under `name`.
     pub fn create_snapshot(
-        &mut self,
+        &self,
         name: &[u8],
         hooks: &crate::store::transaction::CrashHooks,
     ) -> Result<crate::store::snapshot::SnapshotEntry, StoreError> {
@@ -2391,7 +2640,7 @@ impl Store {
 
     /// Delete a snapshot by name. Returns whether it existed.
     pub fn delete_snapshot(
-        &mut self,
+        &self,
         name: &[u8],
         hooks: &crate::store::transaction::CrashHooks,
     ) -> Result<bool, StoreError> {
@@ -2414,7 +2663,7 @@ impl Store {
     /// snapshot entry is re-inserted so the snapshot itself survives the
     /// rollback (ZFS/btrfs-style semantics, §17).
     pub fn restore_snapshot(
-        &mut self,
+        &self,
         name: &[u8],
         hooks: &crate::store::transaction::CrashHooks,
     ) -> Result<(), StoreError> {
@@ -2479,7 +2728,7 @@ impl Store {
 
     /// Set an xattr (insert or replace).
     pub fn set_xattr(
-        &mut self,
+        &self,
         ino: u64,
         name: &[u8],
         value: &[u8],
@@ -2509,7 +2758,7 @@ impl Store {
 
     /// Remove an xattr; returns whether it existed.
     pub fn remove_xattr(
-        &mut self,
+        &self,
         ino: u64,
         name: &[u8],
         hooks: &crate::store::transaction::CrashHooks,
@@ -2552,8 +2801,9 @@ impl Store {
 }
 
 /// Helper for segment rollover offset computation.
-fn base_after_roll(store: &mut Store, encoded: &[u8]) -> u64 {
-    let w = store.current_segment.as_ref().expect("segment open");
+fn base_after_roll(store: &Store, encoded: &[u8]) -> u64 {
+    let seg = store.segment.lock().expect("segment poisoned");
+    let w = seg.as_ref().expect("segment open");
     let base = w.durable_end();
     debug_assert!(base + encoded.len() as u64 <= store.config.segment_size);
     base

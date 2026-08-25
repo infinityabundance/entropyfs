@@ -83,7 +83,7 @@ pub struct PassCursor {
 /// strictly cheaper valid representation exists and the extent is
 /// unchanged since we read it.
 pub fn optimize_pass(
-    store: &mut Store,
+    store: &Store,
     options: OptimizeOptions,
     max_extents: Option<u64>,
     mut cursor: Option<&mut PassCursor>,
@@ -216,7 +216,9 @@ pub fn optimize_pass(
                 continue;
             }
             // CAS: the extent must still hold the descriptor we read
-            // (§25 — never overwrite a newer write).
+            // (§25 — never overwrite a newer write). The per-inode lock
+            // closes the check→commit window against foreground writers.
+            let _lock = store.inode_lock(at);
             let current_desc = store.extent_descriptor(at, start)?;
             let stale = match current_desc {
                 Some(cur) => cur != desc_bytes,
@@ -268,7 +270,7 @@ const WORKER_IDLE_SECS: u64 = 3;
 /// cycle) and exits when `stop` is set (tied to the filesystem instance's
 /// drop, so the store's advisory lock is always released).
 pub fn spawn_background_worker(
-    store: Arc<std::sync::Mutex<Store>>,
+    store: Arc<Store>,
     ops: Arc<std::sync::atomic::AtomicU64>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     options: OptimizeOptions,
@@ -290,14 +292,15 @@ pub fn spawn_background_worker(
                     last_ops = now;
                     continue;
                 }
-                if let Ok(mut s) = store.try_lock() {
-                    let _ = optimize_pass(
-                        &mut s,
-                        options,
-                        Some(WORKER_CYCLE_EXTENTS),
-                        Some(&mut cursor),
-                    );
-                }
+                // Reads and writes are lock-free at the store level (reads
+                // never block), so the worker can run without disturbing
+                // requests; the idle gate keeps CPU on cold data.
+                let _ = optimize_pass(
+                    &store,
+                    options,
+                    Some(WORKER_CYCLE_EXTENTS),
+                    Some(&mut cursor),
+                );
                 last_ops = ops.load(Ordering::Relaxed);
             }
         })

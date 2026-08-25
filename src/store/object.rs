@@ -33,10 +33,31 @@ impl Location {
     }
 }
 
-/// The derived object index.
-#[derive(Debug, Default, Clone)]
+/// The derived object index (ADR-0007), sharded for concurrent access.
+///
+/// Sharded by the low bits of the content id behind independent `RwLock`
+/// shards (ADR-0013/Phase-8 concurrency): reads take one shard's read
+/// lock, inserts/removals take one shard's write lock. While mounted the
+/// index is append-only (GC is offline), so readers of an older root
+/// snapshot always find the objects they need.
+#[derive(Debug)]
 pub struct ObjectIndex {
-    map: HashMap<ChunkId, Location>,
+    shards: Box<[std::sync::RwLock<HashMap<ChunkId, Location>>]>,
+}
+
+/// Number of shards (a power of two; more shards = more read parallelism).
+const SHARDS: usize = 64;
+
+impl Default for ObjectIndex {
+    fn default() -> Self {
+        let mut shards = Vec::with_capacity(SHARDS);
+        for _ in 0..SHARDS {
+            shards.push(std::sync::RwLock::new(HashMap::new()));
+        }
+        Self {
+            shards: shards.into_boxed_slice(),
+        }
+    }
 }
 
 impl ObjectIndex {
@@ -45,44 +66,76 @@ impl ObjectIndex {
         Self::default()
     }
 
-    /// Insert a location.
-    pub fn insert(&mut self, id: ChunkId, loc: Location) {
-        self.map.insert(id, loc);
+    fn shard_of(id: &ChunkId) -> usize {
+        // Low bits of the first content-id word: uniformly distributed for
+        // BLAKE3 output.
+        (u64::from_le_bytes(id.as_bytes()[..8].try_into().expect("8 bytes")) as usize)
+            & (SHARDS - 1)
     }
 
-    /// Look up a location.
-    pub fn get(&self, id: &ChunkId) -> Option<&Location> {
-        self.map.get(id)
+    /// Insert a location.
+    pub fn insert(&self, id: ChunkId, loc: Location) {
+        self.shards[Self::shard_of(&id)]
+            .write()
+            .expect("object index shard poisoned")
+            .insert(id, loc);
+    }
+
+    /// Look up a location (copied: `Location` is `Copy`, so callers never
+    /// hold a shard lock across a segment read).
+    pub fn get(&self, id: &ChunkId) -> Option<Location> {
+        self.shards[Self::shard_of(id)]
+            .read()
+            .expect("object index shard poisoned")
+            .get(id)
+            .copied()
     }
 
     /// Whether an id is present.
     pub fn contains(&self, id: &ChunkId) -> bool {
-        self.map.contains_key(id)
+        self.shards[Self::shard_of(id)]
+            .read()
+            .expect("object index shard poisoned")
+            .contains_key(id)
     }
 
-    /// Number of entries.
+    /// Number of entries (sums shard lengths; O(shards)).
     pub fn len(&self) -> usize {
-        self.map.len()
+        self.shards
+            .iter()
+            .map(|s| s.read().expect("object index shard poisoned").len())
+            .sum()
     }
 
     /// Whether empty.
     pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
+        self.len() == 0
     }
 
-    /// Iterate all (id, location) pairs (for GC and fsck).
-    pub fn iter(&self) -> impl Iterator<Item = (&ChunkId, &Location)> {
-        self.map.iter()
+    /// Iterate all (id, location) pairs (for GC and fsck; snapshots each
+    /// shard under a read lock).
+    pub fn iter(&self) -> Vec<(ChunkId, Location)> {
+        let mut out = Vec::new();
+        for s in self.shards.iter() {
+            let guard = s.read().expect("object index shard poisoned");
+            out.extend(guard.iter().map(|(k, v)| (*k, *v)));
+        }
+        out
     }
 
-    /// Remove an entry (compaction).
-    pub fn remove(&mut self, id: &ChunkId) -> Option<Location> {
-        self.map.remove(id)
+    /// Remove an entry (offline GC compaction).
+    pub fn remove(&self, id: &ChunkId) -> Option<Location> {
+        self.shards[Self::shard_of(id)]
+            .write()
+            .expect("object index shard poisoned")
+            .remove(id)
     }
 
-    /// Clear all entries.
-    pub fn clear(&mut self) {
-        self.map.clear();
+    /// Clear all entries (index rebuild).
+    pub fn clear(&self) {
+        for s in self.shards.iter() {
+            s.write().expect("object index shard poisoned").clear();
+        }
     }
 }
 
@@ -131,7 +184,7 @@ mod tests {
 
     #[test]
     fn index_basics() {
-        let mut idx = ObjectIndex::new();
+        let idx = ObjectIndex::new();
         let id = ChunkId::of(b"obj");
         let loc = Location {
             segment_seq: 0,
@@ -143,7 +196,7 @@ mod tests {
         assert!(!idx.contains(&id));
         idx.insert(id, loc);
         assert!(idx.contains(&id));
-        assert_eq!(idx.get(&id), Some(&loc));
+        assert_eq!(idx.get(&id), Some(loc));
         assert_eq!(idx.len(), 1);
         assert_eq!(idx.remove(&id), Some(loc));
         assert!(idx.is_empty());
