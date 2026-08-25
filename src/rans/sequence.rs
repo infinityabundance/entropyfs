@@ -1077,6 +1077,15 @@ fn encode_one_stream_external(
         0 => Some((StreamSlot::Empty, Vec::new())),
         1 => Some((StreamSlot::Raw, stream.to_vec())),
         _ => match external {
+            // Phase-9G: an external cohort model may not cover this
+            // member's symbol set (a model trained on other members'
+            // streams). A zero-frequency symbol would panic the rANS
+            // encoder; the stream is stored RAW instead — the correct
+            // accounting for a bundle that does not apply to this member
+            // (the greedy pool selection then sees the true gain).
+            Some(model) if stream.iter().any(|&b| model.freqs[b as usize] == 0) => {
+                Some((StreamSlot::Raw, stream.to_vec()))
+            }
             Some(model) => match encode_stream(stream, model) {
                 Ok(enc) if enc.len() < stream.len() => {
                     Some((StreamSlot::Rans(metadata::encode_model(model)), enc))
@@ -2361,6 +2370,53 @@ mod tests {
             &ctx_for(&input, &Limits::default(), &Policy::default()),
         );
         assert!(cands.is_empty());
+    }
+
+    #[test]
+    fn external_model_without_symbol_coverage_falls_back_to_raw() {
+        // Phase-9G: an amortized cohort model may not cover a member's
+        // symbol set. `encode_one_stream_external` must store such a
+        // stream RAW rather than panic the rANS encoder on a zero-
+        // frequency symbol (regression: the model-bundle pass crashed on
+        // real trees where a member bundle was evaluated against a member
+        // with disjoint symbols).
+        //
+        // A model trained on `{'a','b','c'}` streams:
+        let stream_a = vec![b'a', b'b', b'c', b'a', b'b', b'c'];
+        let mut hist = [0u32; 256];
+        for &b in &stream_a {
+            hist[b as usize] += 1;
+        }
+        let model = normalize_histogram(&hist, SCALE_BITS, CODEC).unwrap();
+        // A stream with a symbol outside the model's alphabet:
+        let stream_z = vec![b'z'; 16];
+        let (slot, payload) =
+            encode_one_stream_external(&stream_z, Some(&model)).expect("must produce a slot");
+        assert_eq!(slot, StreamSlot::Raw, "uncovered stream must be RAW");
+        assert_eq!(payload, stream_z);
+        // A covered, skewed stream still uses the external model when it
+        // wins (rANS below raw):
+        let covered: Vec<u8> = (0..4096u32).map(|i| (*b"abc")[(i % 3) as usize]).collect();
+        let (slot2, _) =
+            encode_one_stream_external(&covered, Some(&model)).expect("must produce a slot");
+        assert!(
+            matches!(slot2, StreamSlot::Rans(_)),
+            "covered stream must use rANS"
+        );
+        // And the N-streams wrapper returns a valid result (no panic) for
+        // the mixed-coverage batch.
+        let enc = encode_streams_n_with_models(
+            &[stream_z.clone(), covered.clone()],
+            &[Some(&model), Some(&model)],
+        )
+        .expect("mixed coverage must still encode");
+        // The model object starts with the RAW slot marker for stream 0
+        // (the uncovered one): 0x01 SLOT_RAW + 0u16 length.
+        assert_eq!(
+            enc.model_obj[..3],
+            [SLOT_RAW, 0, 0],
+            "uncovered stream must be a RAW slot in the model object"
+        );
     }
 
     #[test]

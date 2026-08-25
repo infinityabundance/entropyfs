@@ -287,7 +287,9 @@ mod tests {
         // is uniform (8 bits), but the pattern is PERIODIC and therefore
         // compressible — the anti-aliasing min-over-strides must keep it
         // OUT of the high-entropy skip (the periodic family wins instead).
-        let periodic: Vec<u8> = (0..65536u32).map(|i| (i * 2654435761) as u8).collect();
+        let periodic: Vec<u8> = (0..65536u32)
+            .map(|i| (i.wrapping_mul(2654435761)) as u8)
+            .collect();
         let text: Vec<u8> = (0..65536u32).map(|i| b'a' + (i % 26) as u8).collect();
         let p = ForegroundPolicy::cheap();
         let e0 = sampled_entropy(&zeros, 4096);

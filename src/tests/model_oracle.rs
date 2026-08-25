@@ -73,6 +73,13 @@ fn best_stream_cost(stream: &[u8], model: Option<&[u8]>, model_share: u64) -> (u
                 Ok(p) => p,
                 Err(_) => return (raw, true),
             };
+            // A member bundle evaluated against another member may not
+            // cover its symbol set; such a stream is stored RAW (a
+            // zero-frequency symbol would panic the rANS encoder — the
+            // same rule the real amortized-model path applies).
+            if stream.iter().any(|&b| parsed.freqs[b as usize] == 0) {
+                return (raw, true);
+            }
             match crate::rans::residual::encode_stream(stream, &parsed) {
                 Ok(enc) if (enc.len() as u64) + model_share < raw => (enc.len() as u64, false),
                 _ => (raw, true),
