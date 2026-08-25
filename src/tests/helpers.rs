@@ -47,6 +47,15 @@ impl MemResolver {
     }
 }
 
+/// Histogram of byte values in `data`.
+pub fn histogram_of(data: &[u8]) -> [u32; 256] {
+    let mut hist = [0u32; 256];
+    for &b in data {
+        hist[b as usize] += 1;
+    }
+    hist
+}
+
 impl DecoderContext for MemResolver {
     fn fetch_object(&self, id: &ChunkId) -> Result<Vec<u8>, MaterializeError> {
         self.objects

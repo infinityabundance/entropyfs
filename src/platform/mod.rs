@@ -1,7 +1,9 @@
-//! Narrowly isolated Linux-specific machinery. The only module permitted
-//! to hold `unsafe` (see `docs/security/unsafe-ledger.md`); currently the
-//! crate builds with zero unsafe code, so this module is safe-only for now.
+//! Narrowly isolated Linux-specific machinery (safe Rust only).
+//!
+//! Per `docs/security/unsafe-ledger.md` the crate currently builds with
+//! zero `unsafe`; if a future Linux boundary genuinely requires it, it
+//! belongs here with a ledger entry.
 
 #![forbid(unsafe_code)]
 
-// (module populated by the platform implementation step)
+pub mod linux;

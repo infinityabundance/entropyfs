@@ -106,6 +106,79 @@ fn write_file(store: &mut Store, ino: u64, content: &[u8]) {
         .unwrap();
 }
 
+/// The set of (start, descriptor) extent entries for `ino`.
+fn extents(store: &Store, ino: u64) -> Vec<(u64, crate::core::representation::Representation)> {
+    let limits = store.limits();
+    let inode = store.get_inode(ino).unwrap().unwrap();
+    let root = match inode.data {
+        crate::store::inode::InodeData::File { extent_root } => extent_root,
+        _ => unreachable!(),
+    };
+    crate::store::extent_tree::scan_all(root, 64, limits.max_fanout, store)
+        .unwrap()
+        .into_iter()
+        .map(|(start, bytes)| {
+            let d = crate::format::descriptor::decode(
+                &bytes,
+                limits.max_descriptor_bytes,
+                limits.max_inline_bytes,
+                limits.max_palette,
+                limits.max_period,
+                limits.max_chunk_size,
+            )
+            .unwrap();
+            (start, d)
+        })
+        .collect()
+}
+
+#[test]
+fn partial_tail_chunk_never_exceeds_eof() {
+    // The fsck invariant: every extent's end must be <= the file size.
+    // Writing a small file through write_region (the FUSE write path)
+    // must encode the trailing chunk at its logical length, not pad it
+    // to the full chunk class.
+    let dir = TempDir::new().unwrap();
+    let mut store = create_store(&dir);
+    create_file(&mut store, 3);
+    store.write_region(3, 0, b"hello world").unwrap();
+    let size = store.get_inode(3).unwrap().unwrap().size;
+    assert_eq!(size, 11);
+    let exts = extents(&store, 3);
+    assert_eq!(exts.len(), 1);
+    assert_eq!(exts[0].0, 0);
+    assert_eq!(exts[0].1.len(), 11);
+    assert_eq!(exts[0].1.len(), size);
+
+    // Extend in place: the extent grows but stays <= size.
+    store.write_region(3, 5, b" and beyond").unwrap();
+    let size = store.get_inode(3).unwrap().unwrap().size;
+    assert_eq!(size, 16);
+    let exts = extents(&store, 3);
+    assert_eq!(exts.len(), 1);
+    assert_eq!(exts[0].1.len(), size);
+
+    // Write a full mid-file chunk plus a short tail.
+    store
+        .write_region(3, 0, vec![0x5A; 65536].as_slice())
+        .unwrap();
+    store.write_region(3, 65536, b"tail").unwrap();
+    let size = store.get_inode(3).unwrap().unwrap().size;
+    assert_eq!(size, 65540);
+    let exts = extents(&store, 3);
+    assert_eq!(exts.len(), 2);
+    assert!(exts.iter().all(|(s, d)| *s + d.len() <= size));
+    // The tail extent is exactly 4 bytes.
+    let tail = exts.iter().find(|(s, _)| *s == 65536).unwrap();
+    assert_eq!(tail.1.len(), 4);
+
+    // Byte-exact read-back.
+    let read = store.read_file(3, 0, size).unwrap();
+    let mut expect = vec![0x5Au8; 65536];
+    expect.extend_from_slice(b"tail");
+    assert_eq!(read, expect);
+}
+
 #[test]
 fn create_commit_remount_roundtrip() {
     let dir = TempDir::new().unwrap();

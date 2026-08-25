@@ -39,7 +39,7 @@ crc32c = "=0.6.8"   # physical record integrity (SSE4.2 crc32c w/ software fallb
 
 # --- Linux / FUSE frontend ---
 fuser = "=0.18.0"   # stable synchronous FUSE binding (pure Rust; no libfuse required)
-rustix = { version = "1", features = ["fs", "std"] } # safe syscall wrappers (fs: flock/statvfs)
+rustix = { version = "1", features = ["fs", "param", "std"] } # safe syscall wrappers (fs: flock/statvfs; param: page_size)
 
 # --- CLI / diagnostics ---
 clap = { version = "4", features = ["derive"] }
@@ -48,6 +48,8 @@ clap = { version = "4", features = ["derive"] }
 # never serde/bincode-derived layouts.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Ctrl-C handling for the mount daemon (small, standard; no tokio).
+ctrlc = "3"
 
 [dev-dependencies]
 proptest = "1"  # property tests: rank/unrank round trips, materialization, store invariants

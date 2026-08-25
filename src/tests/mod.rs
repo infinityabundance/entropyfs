@@ -10,6 +10,7 @@ pub mod crash_recovery;
 pub mod enospc;
 pub mod fsck;
 pub mod helpers;
+pub mod namespace_ops;
 pub mod persistent_store;
 pub mod rank_roundtrip;
 pub mod representation_roundtrip;

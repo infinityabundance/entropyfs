@@ -124,6 +124,10 @@ pub struct StoreConfig {
     /// exercised deterministically. Never exceeds the physical device
     /// (honesty rule, §22).
     pub capacity_override: Option<u64>,
+    /// Owner uid of the filesystem root directory (the mounting user).
+    pub root_uid: u32,
+    /// Owner gid of the filesystem root directory.
+    pub root_gid: u32,
 }
 
 impl Default for StoreConfig {
@@ -137,6 +141,8 @@ impl Default for StoreConfig {
             limits: Limits::default(),
             policy: Policy::balanced(),
             capacity_override: None,
+            root_uid: current_uid(),
+            root_gid: current_gid(),
         }
     }
 }
@@ -180,6 +186,8 @@ pub struct Store {
     _lock: File,
     /// Superblock file path.
     superblock_path: PathBuf,
+    /// Bounded decoded-model cache (performance only).
+    model_cache: std::sync::Mutex<crate::cache::model::ModelCache>,
 }
 
 impl std::fmt::Debug for Store {
@@ -204,10 +212,11 @@ impl Store {
         std::fs::create_dir_all(dir)?;
         std::fs::create_dir_all(dir.join("segments"))?;
         let lock = open_lock(dir)?;
-        // Initial root.
+        // Initial root.  Ino 1 is the filesystem root so FUSE's mount
+        // root (always ino 1) maps 1:1 to the store (ADR-0002).
         let root = Root {
             uuid,
-            root_dir_ino: 2,
+            root_dir_ino: 1,
             generation: 0,
             ..Default::default()
         };
@@ -233,15 +242,17 @@ impl Store {
             stats: StoreStats::default(),
             _lock: lock,
             superblock_path: sb_path,
+            model_cache: std::sync::Mutex::new(crate::cache::model::ModelCache::new(64)),
         };
         store.open_segment(0)?;
-        // Create the root directory inode (ino 2) and commit the initial
+        // Create the root directory inode (ino 1) and commit the initial
         // root through the normal transaction protocol, so the store is
         // mountable (verify_root requires the root dir inode to exist).
+        // The root is owned by the mounting user (config).
         {
             let mut tx = store.begin_tx()?;
-            let root_inode = Inode::new_dir(0, 0, 0o755);
-            Store::put_inode_in_tx(&mut tx, 2, &root_inode)?;
+            let root_inode = Inode::new_dir(config.root_uid, config.root_gid, 0o755);
+            Store::put_inode_in_tx(&mut tx, 1, &root_inode)?;
             tx.commit(&crate::store::transaction::CrashHooks::none())?;
         }
         store.stats.physical_capacity = store.physical_capacity();
@@ -298,6 +309,7 @@ impl Store {
             stats: StoreStats::default(),
             _lock: lock,
             superblock_path: sb_path,
+            model_cache: std::sync::Mutex::new(crate::cache::model::ModelCache::new(64)),
         };
         store.stats.physical_capacity = store.physical_capacity();
         store.open_segment(sb.segment_seq)?;
@@ -1206,11 +1218,907 @@ impl Store {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Namespace transactions (used by the FUSE adapter and CLI)
+    // ------------------------------------------------------------------
+
+    /// Validate a directory entry name (raw bytes; never assumed UTF-8).
+    pub fn validate_name(name: &[u8]) -> bool {
+        !name.is_empty()
+            && name != b"."
+            && name != b".."
+            && name.len() <= 255
+            && !name.contains(&0u8)
+            && !name.contains(&b'/')
+    }
+
+    /// Create a new entry (file/dir/symlink/device) under `parent` and
+    /// return its inode number. One transaction for inode + entry.
+    pub fn create_entry(
+        &mut self,
+        parent: u64,
+        name: &[u8],
+        entry: NewEntry,
+        hooks: &crate::store::transaction::CrashHooks,
+    ) -> Result<u64, StoreError> {
+        let kind = &entry.kind;
+        let mode_perms = entry.mode;
+        let uid = entry.uid;
+        let gid = entry.gid;
+        if !Self::validate_name(name) {
+            return Err(StoreError::Config("invalid entry name".into()));
+        }
+        let fanout = self.config.limits.max_fanout;
+        let ino = self.alloc_ino()?;
+        let mut tx = self.begin_tx()?;
+        // The parent must exist, be a directory, and not already contain
+        // the name.
+        let parent_inode = Store::inode_for_tx(&tx, parent)?;
+        let dir_root = match parent_inode.data {
+            InodeData::Directory { dir_root } => dir_root,
+            _ => return Err(StoreError::Invariant("parent not a directory".into())),
+        };
+        if crate::store::directory::lookup(dir_root, name, BTREE_ORDER, fanout, &tx)?.is_some() {
+            return Err(StoreError::Invariant("entry already exists".into()));
+        }
+        let inode = match kind {
+            EntryKind::File => Inode::new_file(uid, gid, mode_perms),
+            EntryKind::Directory => Inode::new_dir(uid, gid, mode_perms),
+            EntryKind::Symlink(target) => Inode::new_symlink(target.clone(), uid, gid),
+            EntryKind::Device(is_char, rdev) => {
+                let mut i = Inode::new_file(uid, gid, mode_perms);
+                i.data_kind = crate::store::inode::DATA_DEVICE;
+                i.data = InodeData::Device;
+                i.rdev = *rdev;
+                i.mode = (if *is_char {
+                    crate::store::inode::mode::S_IFCHR
+                } else {
+                    crate::store::inode::mode::S_IFBLK
+                }) | (mode_perms & crate::store::inode::mode::S_IPERM);
+                i
+            }
+        };
+        Store::put_inode_in_tx(&mut tx, ino, &inode)?;
+        let entry = DirEntry {
+            ino,
+            d_type: match &kind {
+                EntryKind::File => directory::dt::DT_REG,
+                EntryKind::Directory => directory::dt::DT_DIR,
+                EntryKind::Symlink(_) => directory::dt::DT_LNK,
+                EntryKind::Device(_, _) => directory::dt::DT_UNKNOWN,
+            },
+        };
+        let new_dir_root =
+            crate::store::directory::insert(dir_root, name, entry, BTREE_ORDER, fanout, &mut tx)?;
+        let mut p = parent_inode;
+        p.data = InodeData::Directory {
+            dir_root: new_dir_root,
+        };
+        p.mtime = crate::store::inode::Timespec::now();
+        if matches!(kind, EntryKind::Directory) {
+            p.nlink = p.nlink.saturating_add(1);
+        }
+        Store::put_inode_in_tx(&mut tx, parent, &p)?;
+        tx.commit(hooks)?;
+        Ok(ino)
+    }
+
+    /// Remove an entry; drops the inode when its nlink reaches zero
+    /// (GC reclaims the objects). `is_dir` selects rmdir semantics
+    /// (directory must be empty). Returns the removed entry's inode
+    /// number (needed by the FUSE layer for kernel cache invalidation).
+    pub fn unlink(
+        &mut self,
+        parent: u64,
+        name: &[u8],
+        is_dir: bool,
+        hooks: &crate::store::transaction::CrashHooks,
+    ) -> Result<u64, StoreError> {
+        if !Self::validate_name(name) {
+            return Err(StoreError::Config("invalid entry name".into()));
+        }
+        let fanout = self.config.limits.max_fanout;
+        let mut tx = self.begin_tx()?;
+        let parent_inode = Store::inode_for_tx(&tx, parent)?;
+        let dir_root = match parent_inode.data {
+            InodeData::Directory { dir_root } => dir_root,
+            _ => return Err(StoreError::Invariant("parent not a directory".into())),
+        };
+        let entry = match crate::store::directory::lookup(dir_root, name, BTREE_ORDER, fanout, &tx)?
+        {
+            Some(e) => e,
+            None => return Err(StoreError::Invariant("no such entry".into())),
+        };
+        let target = Store::inode_for_tx(&tx, entry.ino)?;
+        if is_dir {
+            if !target.is_dir() {
+                return Err(StoreError::Invariant("not a directory".into()));
+            }
+            // A directory is empty when its tree has no entries.
+            if let InodeData::Directory { dir_root: dr } = &target.data {
+                if !dr.is_zero()
+                    && !crate::store::directory::scan(*dr, None, 1, BTREE_ORDER, fanout, &tx)?
+                        .0
+                        .is_empty()
+                {
+                    return Err(StoreError::Invariant("directory not empty".into()));
+                }
+            }
+        } else if target.is_dir() {
+            return Err(StoreError::Invariant("is a directory".into()));
+        }
+        let new_dir_root =
+            crate::store::directory::remove(dir_root, name, BTREE_ORDER, fanout, &mut tx)?.0;
+        let mut p = parent_inode;
+        p.data = InodeData::Directory {
+            dir_root: new_dir_root,
+        };
+        p.mtime = crate::store::inode::Timespec::now();
+        if target.is_dir() {
+            p.nlink = p.nlink.saturating_sub(1);
+        }
+        Store::put_inode_in_tx(&mut tx, parent, &p)?;
+        // Drop the inode when the last link goes away. An rmdir'd
+        // directory dies outright: POSIX removes the directory entry and
+        // the directory inode together (there is no nlink-1 state for a
+        // removed directory).
+        let mut target = target;
+        if is_dir {
+            Store::remove_inode_in_tx(&mut tx, entry.ino)?;
+        } else {
+            target.nlink = target.nlink.saturating_sub(1);
+            if target.nlink == 0 {
+                Store::remove_inode_in_tx(&mut tx, entry.ino)?;
+            } else {
+                Store::put_inode_in_tx(&mut tx, entry.ino, &target)?;
+            }
+        }
+        tx.commit(hooks)?;
+        Ok(entry.ino)
+    }
+
+    /// Rename `src_name` under `src_parent` to `dst_name` under
+    /// `dst_parent` (v1: no RENAME_EXCHANGE / RENAME_NOREPLACE flags;
+    /// an existing destination is replaced).
+    ///
+    /// Same-parent renames operate on a single tree root: the destination
+    /// removal, destination insertion, and source removal are chained on
+    /// one root so no entry is lost or duplicated. Cross-parent renames
+    /// mutate both roots independently. POSIX type rules apply: a
+    /// directory cannot replace a non-directory (and vice versa), and a
+    /// directory can only replace an empty directory.
+    pub fn rename(
+        &mut self,
+        src_parent: u64,
+        src_name: &[u8],
+        dst_parent: u64,
+        dst_name: &[u8],
+        hooks: &crate::store::transaction::CrashHooks,
+    ) -> Result<RenameOutcome, StoreError> {
+        if !Self::validate_name(src_name) || !Self::validate_name(dst_name) {
+            return Err(StoreError::Config("invalid entry name".into()));
+        }
+        // Renaming a name onto itself is a POSIX no-op.
+        if src_parent == dst_parent && src_name == dst_name {
+            return Ok(RenameOutcome {
+                src_ino: self
+                    .dir_lookup(src_parent, src_name)?
+                    .ok_or_else(|| StoreError::Invariant("no such entry".into()))?
+                    .ino,
+                replaced_dst_ino: None,
+            });
+        }
+        let fanout = self.config.limits.max_fanout;
+        let mut tx = self.begin_tx()?;
+        let sp = Store::inode_for_tx(&tx, src_parent)?;
+        let src_root = match sp.data {
+            InodeData::Directory { dir_root } => dir_root,
+            _ => return Err(StoreError::Invariant("src parent not a directory".into())),
+        };
+        let entry =
+            match crate::store::directory::lookup(src_root, src_name, BTREE_ORDER, fanout, &tx)? {
+                Some(e) => e,
+                None => return Err(StoreError::Invariant("no such entry".into())),
+            };
+        let src_inode = Store::inode_for_tx(&tx, entry.ino)?;
+        let src_is_dir = src_inode.is_dir();
+        let dp = Store::inode_for_tx(&tx, dst_parent)?;
+        let dst_root = match dp.data {
+            InodeData::Directory { dir_root } => dir_root,
+            _ => return Err(StoreError::Invariant("dst parent not a directory".into())),
+        };
+        let mut replaced_dst_ino = None;
+        if let Some(dst_entry) =
+            crate::store::directory::lookup(dst_root, dst_name, BTREE_ORDER, fanout, &tx)?
+        {
+            if dst_entry.ino != entry.ino {
+                // POSIX type rules.
+                let dst_inode = Store::inode_for_tx(&tx, dst_entry.ino)?;
+                let dst_is_dir = dst_inode.is_dir();
+                if src_is_dir && !dst_is_dir {
+                    return Err(StoreError::Invariant("cannot rename dir over file".into()));
+                }
+                if !src_is_dir && dst_is_dir {
+                    return Err(StoreError::Invariant("cannot rename file over dir".into()));
+                }
+                if src_is_dir && dst_is_dir {
+                    if let InodeData::Directory { dir_root: dr } = &dst_inode.data {
+                        if !dr.is_zero()
+                            && !crate::store::directory::scan(
+                                *dr,
+                                None,
+                                1,
+                                BTREE_ORDER,
+                                fanout,
+                                &tx,
+                            )?
+                            .0
+                            .is_empty()
+                        {
+                            return Err(StoreError::Invariant("directory not empty".into()));
+                        }
+                    }
+                }
+                replaced_dst_ino = Some(dst_entry.ino);
+                // Drop the destination's inode reference. A replaced
+                // directory dies outright (directories cannot be hard
+                // linked); a replaced file drops one link.
+                if dst_is_dir {
+                    Store::remove_inode_in_tx(&mut tx, dst_entry.ino)?;
+                } else {
+                    let mut target = dst_inode;
+                    target.nlink = target.nlink.saturating_sub(1);
+                    if target.nlink == 0 {
+                        Store::remove_inode_in_tx(&mut tx, dst_entry.ino)?;
+                    } else {
+                        Store::put_inode_in_tx(&mut tx, dst_entry.ino, &target)?;
+                    }
+                }
+            }
+        }
+        // Same-parent renames chain all tree mutations on one root;
+        // cross-parent renames mutate both roots.
+        let mut sp = sp;
+        let mut dp = dp;
+        if src_parent == dst_parent {
+            let mut root = dst_root;
+            if replaced_dst_ino.is_some() {
+                root =
+                    crate::store::directory::remove(root, dst_name, BTREE_ORDER, fanout, &mut tx)?
+                        .0;
+            }
+            root = crate::store::directory::insert(
+                root,
+                dst_name,
+                entry,
+                BTREE_ORDER,
+                fanout,
+                &mut tx,
+            )?;
+            if src_name != dst_name {
+                root =
+                    crate::store::directory::remove(root, src_name, BTREE_ORDER, fanout, &mut tx)?
+                        .0;
+            }
+            sp.data = InodeData::Directory { dir_root: root };
+            sp.mtime = crate::store::inode::Timespec::now();
+            Store::put_inode_in_tx(&mut tx, src_parent, &sp)?;
+        } else {
+            let mut dst_root = dst_root;
+            if replaced_dst_ino.is_some() {
+                dst_root = crate::store::directory::remove(
+                    dst_root,
+                    dst_name,
+                    BTREE_ORDER,
+                    fanout,
+                    &mut tx,
+                )?
+                .0;
+            }
+            dst_root = crate::store::directory::insert(
+                dst_root,
+                dst_name,
+                entry,
+                BTREE_ORDER,
+                fanout,
+                &mut tx,
+            )?;
+            let src_root =
+                crate::store::directory::remove(src_root, src_name, BTREE_ORDER, fanout, &mut tx)?
+                    .0;
+            sp.data = InodeData::Directory { dir_root: src_root };
+            sp.mtime = crate::store::inode::Timespec::now();
+            dp.data = InodeData::Directory { dir_root: dst_root };
+            dp.mtime = crate::store::inode::Timespec::now();
+            // Moving a directory changes both parents' subdirectory count.
+            if src_is_dir {
+                sp.nlink = sp.nlink.saturating_sub(1);
+                dp.nlink = dp.nlink.saturating_add(1);
+            }
+            Store::put_inode_in_tx(&mut tx, src_parent, &sp)?;
+            Store::put_inode_in_tx(&mut tx, dst_parent, &dp)?;
+        }
+        tx.commit(hooks)?;
+        Ok(RenameOutcome {
+            src_ino: entry.ino,
+            replaced_dst_ino,
+        })
+    }
+
+    /// Create a hard link: another directory entry for `ino` (nlink++).
+    pub fn link(
+        &mut self,
+        parent: u64,
+        name: &[u8],
+        ino: u64,
+        hooks: &crate::store::transaction::CrashHooks,
+    ) -> Result<(), StoreError> {
+        if !Self::validate_name(name) {
+            return Err(StoreError::Config("invalid entry name".into()));
+        }
+        let fanout = self.config.limits.max_fanout;
+        let mut tx = self.begin_tx()?;
+        let parent_inode = Store::inode_for_tx(&tx, parent)?;
+        let dir_root = match parent_inode.data {
+            InodeData::Directory { dir_root } => dir_root,
+            _ => return Err(StoreError::Invariant("parent not a directory".into())),
+        };
+        if crate::store::directory::lookup(dir_root, name, BTREE_ORDER, fanout, &tx)?.is_some() {
+            return Err(StoreError::Invariant("entry already exists".into()));
+        }
+        let target = Store::inode_for_tx(&tx, ino)?;
+        if target.is_dir() {
+            return Err(StoreError::Invariant("cannot hard link a directory".into()));
+        }
+        let entry = DirEntry {
+            ino,
+            d_type: match &target.data {
+                InodeData::File { .. } => directory::dt::DT_REG,
+                InodeData::Symlink { .. } => directory::dt::DT_LNK,
+                _ => directory::dt::DT_UNKNOWN,
+            },
+        };
+        let new_root =
+            crate::store::directory::insert(dir_root, name, entry, BTREE_ORDER, fanout, &mut tx)?;
+        let mut p = parent_inode;
+        p.data = InodeData::Directory { dir_root: new_root };
+        p.mtime = crate::store::inode::Timespec::now();
+        Store::put_inode_in_tx(&mut tx, parent, &p)?;
+        let mut target = target;
+        target.nlink = target.nlink.saturating_add(1);
+        Store::put_inode_in_tx(&mut tx, ino, &target)?;
+        tx.commit(hooks)?;
+        Ok(())
+    }
+
+    /// Replace an inode's mode/uid/gid/size/time fields (setattr). Returns
+    /// the updated inode.
+    pub fn setattr_inode(
+        &mut self,
+        ino: u64,
+        update: &AttrUpdate,
+        hooks: &crate::store::transaction::CrashHooks,
+    ) -> Result<Inode, StoreError> {
+        let mode = update.mode;
+        let uid = update.uid;
+        let gid = update.gid;
+        let size = update.size;
+        let atime = update.atime;
+        let mtime = update.mtime;
+        let fanout = self.config.limits.max_fanout;
+        let mut tx = self.begin_tx()?;
+        let inode = Store::inode_for_tx(&tx, ino)?;
+        let mut inode = inode;
+        if let Some(m) = mode {
+            // Preserve the type bits; replace the permission bits.
+            inode.mode = (inode.mode & crate::store::inode::mode::S_IFMT) | (m & 0o7777);
+        }
+        if let Some(u) = uid {
+            inode.uid = u;
+        }
+        if let Some(g) = gid {
+            inode.gid = g;
+        }
+        if let Some(s) = size {
+            if s != inode.size {
+                // Truncate or extend via the store truncate logic. The
+                // truncate path re-encodes trailing partial extents.
+                let _ = fanout;
+                drop(tx);
+                self.truncate_file(ino, s)?;
+                let mut tx = self.begin_tx()?;
+                let mut inode = Store::inode_for_tx(&tx, ino)?;
+                inode.size = s;
+                if let Some(a) = atime {
+                    inode.atime = a;
+                }
+                if let Some(m) = mtime {
+                    inode.mtime = m;
+                }
+                inode.ctime = crate::store::inode::Timespec::now();
+                Store::put_inode_in_tx(&mut tx, ino, &inode)?;
+                tx.commit(hooks)?;
+                return Ok(inode);
+            }
+        }
+        if let Some(a) = atime {
+            inode.atime = a;
+        }
+        if let Some(m) = mtime {
+            inode.mtime = m;
+        }
+        inode.ctime = crate::store::inode::Timespec::now();
+        Store::put_inode_in_tx(&mut tx, ino, &inode)?;
+        tx.commit(hooks)?;
+        Ok(inode)
+    }
+}
+
+/// Entry kinds for `create_entry`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryKind {
+    /// Regular file.
+    File,
+    /// Directory.
+    Directory,
+    /// Symbolic link with target bytes.
+    Symlink(Vec<u8>),
+    /// Device node (char, rdev).
+    Device(bool, u32),
+}
+
+/// Parameters for creating a new entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewEntry {
+    /// Entry kind.
+    pub kind: EntryKind,
+    /// Permission bits (0o7777; type bits are implied by the kind).
+    pub mode: u32,
+    /// Owner uid.
+    pub uid: u32,
+    /// Owner gid.
+    pub gid: u32,
+}
+
+/// Outcome of a rename, for kernel cache invalidation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenameOutcome {
+    /// Inode that was moved.
+    pub src_ino: u64,
+    /// Inode of a replaced destination entry, if any.
+    pub replaced_dst_ino: Option<u64>,
+}
+
+impl NewEntry {
+    /// A regular file with the given permission bits.
+    pub fn file(mode: u32, uid: u32, gid: u32) -> Self {
+        Self {
+            kind: EntryKind::File,
+            mode,
+            uid,
+            gid,
+        }
+    }
+
+    /// A directory with the given permission bits.
+    pub fn dir(mode: u32, uid: u32, gid: u32) -> Self {
+        Self {
+            kind: EntryKind::Directory,
+            mode,
+            uid,
+            gid,
+        }
+    }
+
+    /// A symlink with the given target.
+    pub fn symlink(target: Vec<u8>, uid: u32, gid: u32) -> Self {
+        Self {
+            kind: EntryKind::Symlink(target),
+            mode: 0o777,
+            uid,
+            gid,
+        }
+    }
+
+    /// A device node.
+    pub fn device(is_char: bool, rdev: u32, mode: u32, uid: u32, gid: u32) -> Self {
+        Self {
+            kind: EntryKind::Device(is_char, rdev),
+            mode,
+            uid,
+            gid,
+        }
+    }
+}
+
+/// Attribute updates for `setattr_inode` (all optional).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AttrUpdate {
+    /// Replace permission bits (type bits preserved).
+    pub mode: Option<u32>,
+    /// Replace uid.
+    pub uid: Option<u32>,
+    /// Replace gid.
+    pub gid: Option<u32>,
+    /// Replace size (truncate or extend).
+    pub size: Option<u64>,
+    /// Replace atime.
+    pub atime: Option<crate::store::inode::Timespec>,
+    /// Replace mtime.
+    pub mtime: Option<crate::store::inode::Timespec>,
+}
+
+impl Store {
+    /// Write `data` at `offset` of file `ino` (chunk-aligned
+    /// read-modify-write; one transaction; extends the file size).
+    pub fn write_region(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<(), StoreError> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        let limits = self.config.limits;
+        let policy = self.config.policy;
+        let chunk_class = limits.chunk_class;
+        let end = offset.saturating_add(data.len() as u64);
+        let first_chunk = offset / chunk_class;
+        let last_chunk = end.div_ceil(chunk_class);
+        let inode = self
+            .get_inode(ino)?
+            .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
+        let old_size = inode.size;
+        let new_size = old_size.max(end);
+
+        let mut updates = Vec::new();
+        let mut chunk = first_chunk;
+        while chunk < last_chunk {
+            let chunk_off = chunk * chunk_class;
+            let in_start = offset.max(chunk_off);
+            let in_end = end.min(chunk_off + chunk_class);
+            let write_start = (in_start - chunk_off) as usize;
+            let write_end = (in_end - chunk_off) as usize;
+            let payload = &data[(in_start - offset) as usize..(in_end - offset) as usize];
+
+            // Read the current chunk bytes (zeros for holes / beyond EOF),
+            // unless the write covers the entire chunk. The whole chunk is
+            // read (clipped to the file size) so untouched bytes survive.
+            let full_chunk = write_start == 0 && write_end == chunk_class as usize;
+            let mut chunk_bytes = vec![0u8; chunk_class as usize];
+            if !full_chunk {
+                let read_end = (chunk_off + chunk_class).min(old_size);
+                if read_end > chunk_off {
+                    let partial = self.read_file(ino, chunk_off, read_end - chunk_off)?;
+                    let n = partial.len().min(chunk_class as usize);
+                    chunk_bytes[..n].copy_from_slice(&partial[..n]);
+                }
+            }
+            chunk_bytes[write_start..write_end].copy_from_slice(payload);
+
+            // A trailing partial chunk must be encoded at its logical
+            // length, not padded to the full chunk class: extents must
+            // never extend past the file size (fsck invariant, and the
+            // SEEK_DATA/SEEK_HOLE contract).
+            let chunk_end = chunk_off.saturating_add(chunk_class).min(new_size);
+            let chunk_len = (chunk_end - chunk_off) as usize;
+            let chunk_bytes = &chunk_bytes[..chunk_len];
+            let cid = crate::core::extent::ChunkId::of(chunk_bytes);
+            let update = Store::encode_chunk(chunk_bytes, chunk_off, cid, &limits, &policy)?;
+            updates.push(update);
+            chunk += 1;
+        }
+
+        self.commit_file_extents(ino, updates, Some(new_size), &CrashHooks::none())?;
+        Ok(())
+    }
+
+    /// Punch a hole: the byte range reads as ZERO (and is stored as ZERO
+    /// descriptors, so space is freed). When the punch reaches EOF and
+    /// `keep_size` is clear, the file is truncated instead.
+    pub fn punch_hole(
+        &mut self,
+        ino: u64,
+        start: u64,
+        end: u64,
+        keep_size: bool,
+    ) -> Result<(), StoreError> {
+        let inode = self
+            .get_inode(ino)?
+            .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
+        let size = inode.size;
+        if !keep_size && end >= size {
+            return self.truncate_file(ino, start);
+        }
+        let punch_end = end.min(size);
+        if punch_end > start {
+            let zeros = vec![0u8; (punch_end - start) as usize];
+            self.write_region(ino, start, &zeros)?;
+        }
+        Ok(())
+    }
+
+    /// `copy_file_range`: copy `len` bytes between files (v1 reads through
+    /// the materialization path and writes through the RMW path — correct,
+    /// not zero-copy). Returns the number of bytes copied.
+    pub fn copy_range(
+        &mut self,
+        ino_in: u64,
+        offset_in: u64,
+        ino_out: u64,
+        offset_out: u64,
+        len: u64,
+    ) -> Result<u64, StoreError> {
+        let data = self.read_file(ino_in, offset_in, len)?;
+        let copied = data.len() as u64;
+        if copied > 0 {
+            self.write_region(ino_out, offset_out, &data)?;
+        }
+        Ok(copied)
+    }
+
+    /// Sum of materialized logical bytes across all file extents.
+    pub fn logical_bytes(&self) -> Result<u64, StoreError> {
+        let limits = self.config.limits;
+        let mut total = 0u64;
+        for ino in self.all_inodes()? {
+            let inode = match self.get_inode(ino)? {
+                Some(i) => i,
+                None => continue,
+            };
+            if let InodeData::File { extent_root } = &inode.data {
+                if extent_root.is_zero() {
+                    continue;
+                }
+                let entries = crate::store::extent_tree::scan_all(
+                    *extent_root,
+                    BTREE_ORDER,
+                    limits.max_fanout,
+                    self,
+                )?;
+                for (_, bytes) in entries {
+                    if let Ok(d) = crate::format::descriptor::decode(
+                        &bytes,
+                        limits.max_descriptor_bytes,
+                        limits.max_inline_bytes,
+                        limits.max_palette,
+                        limits.max_period,
+                        limits.max_chunk_size,
+                    ) {
+                        total = total.saturating_add(d.len());
+                    }
+                }
+            }
+        }
+        Ok(total)
+    }
+
+    /// Find the directory containing `ino` (for readdir `..`).
+    ///
+    /// v1: a reverse scan over directory entry lists (correct, but O(dirs)
+    /// per call — the FUSE layer caches parents per inode to keep readdir
+    /// cheap; a parent pointer is a future format refinement). The root
+    /// directory is its own parent.
+    pub fn parent_of(&self, ino: u64) -> Result<u64, StoreError> {
+        let root_dir = self.current_root().root_dir_ino;
+        if ino == root_dir {
+            return Ok(root_dir);
+        }
+        let fanout = self.config.limits.max_fanout;
+        for dir_ino in self.all_inodes()? {
+            let inode = match self.get_inode(dir_ino)? {
+                Some(i) => i,
+                None => continue,
+            };
+            let dir_root = match inode.data {
+                InodeData::Directory { dir_root } => dir_root,
+                _ => continue,
+            };
+            if dir_root.is_zero() {
+                continue;
+            }
+            let entries = index::scan_all(dir_root, BTREE_ORDER, fanout, self)?;
+            for (_, v) in entries {
+                if let Ok(e) = directory::DirEntry::decode(&v) {
+                    if e.ino == ino {
+                        return Ok(dir_ino);
+                    }
+                }
+            }
+        }
+        Ok(root_dir)
+    }
+
     /// Allocate a fresh inode number (monotonic; simple for v1 — the max
     /// ino + 1, found by scanning; the fuse layer caches the counter).
     pub fn alloc_ino(&self) -> Result<u64, StoreError> {
         let inodes = self.all_inodes()?;
         Ok(inodes.iter().copied().max().unwrap_or(1) + 1)
+    }
+
+    /// Resolve an absolute POSIX path (raw bytes) to an inode number.
+    /// The path may use `/` separators, `.` and `..` components. Returns
+    /// `None` for a missing component. v1: no symlink following in the
+    /// middle of the path (a final symlink is returned as-is).
+    pub fn resolve_path(&self, path: &[u8]) -> Result<Option<u64>, StoreError> {
+        let mut ino = self.current_root().root_dir_ino;
+        let mut components = Vec::new();
+        for part in path.split(|&b| b == b'/') {
+            if part.is_empty() || part == b"." {
+                continue;
+            }
+            components.push(part);
+        }
+        for comp in components {
+            if comp == b".." {
+                // Track parents: walk from the root tracking the parent of
+                // each directory (v1: directories store no parent pointer,
+                // so resolve by scanning the root dir and each dir's
+                // parent chain is unavailable — support `..` only at the
+                // top level by returning an error otherwise).
+                let _ = comp;
+                return Err(StoreError::Invariant(
+                    "'..' resolution not supported in v1 resolve_path".into(),
+                ));
+            }
+            match self.dir_lookup(ino, comp)? {
+                Some(entry) => ino = entry.ino,
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(ino))
+    }
+
+    // ------------------------------------------------------------------
+    // Snapshots
+    // ------------------------------------------------------------------
+
+    /// Create a snapshot of the current root under `name`.
+    pub fn create_snapshot(
+        &mut self,
+        name: &[u8],
+        hooks: &crate::store::transaction::CrashHooks,
+    ) -> Result<crate::store::snapshot::SnapshotEntry, StoreError> {
+        if name.is_empty() || name.len() > 255 || name.contains(&b'/') || name.contains(&0u8) {
+            return Err(StoreError::Config(format!(
+                "invalid snapshot name {:?}",
+                String::from_utf8_lossy(name)
+            )));
+        }
+        let fanout = self.config.limits.max_fanout;
+        let mut tx = self.begin_tx()?;
+        let root = tx.root().clone();
+        let root_id = root.id();
+        let entry = crate::store::snapshot::SnapshotEntry {
+            root_id,
+            created_unix_ns: crate::store::inode::Timespec::now().sec * 1_000_000_000
+                + crate::store::inode::Timespec::now().nsec as u64,
+        };
+        tx.root_mut().snapshot_tree_root = crate::store::snapshot::insert(
+            tx.root_mut().snapshot_tree_root,
+            name,
+            entry,
+            BTREE_ORDER,
+            fanout,
+            &mut tx,
+        )?;
+        tx.commit(hooks)?;
+        Ok(entry)
+    }
+
+    /// List snapshots in name order.
+    pub fn list_snapshots(
+        &self,
+    ) -> Result<Vec<(Vec<u8>, crate::store::snapshot::SnapshotEntry)>, StoreError> {
+        Ok(crate::store::snapshot::list(
+            self.current_root().snapshot_tree_root,
+            BTREE_ORDER,
+            self.config.limits.max_fanout,
+            self,
+        )?)
+    }
+
+    // ------------------------------------------------------------------
+    // xattrs (per-inode B-tree at `inode.xattr_root`)
+    // ------------------------------------------------------------------
+
+    /// Maximum xattr name length (linux XATTR_NAME_MAX).
+    pub const XATTR_NAME_MAX: usize = 255;
+    /// Maximum xattr value size (linux XATTR_SIZE_MAX).
+    pub const XATTR_SIZE_MAX: u64 = 64 * 1024;
+
+    /// Validate an xattr name (raw bytes; no NUL, no '/').
+    pub fn validate_xattr_name(name: &[u8]) -> bool {
+        !name.is_empty()
+            && name.len() <= Self::XATTR_NAME_MAX
+            && !name.contains(&0u8)
+            && !name.contains(&b'/')
+    }
+
+    /// Get an xattr value (raw bytes; `None` when absent).
+    pub fn get_xattr(&self, ino: u64, name: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
+        let inode = self
+            .get_inode(ino)?
+            .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
+        if inode.xattr_root.is_zero() {
+            return Ok(None);
+        }
+        Ok(index::get(
+            inode.xattr_root,
+            name,
+            BTREE_ORDER,
+            self.config.limits.max_fanout,
+            self,
+        )?)
+    }
+
+    /// Set an xattr (insert or replace).
+    pub fn set_xattr(
+        &mut self,
+        ino: u64,
+        name: &[u8],
+        value: &[u8],
+        hooks: &crate::store::transaction::CrashHooks,
+    ) -> Result<(), StoreError> {
+        if !Self::validate_xattr_name(name) {
+            return Err(StoreError::Config("invalid xattr name".into()));
+        }
+        if value.len() as u64 > Self::XATTR_SIZE_MAX {
+            return Err(StoreError::Limit(format!(
+                "xattr value {} exceeds {}",
+                value.len(),
+                Self::XATTR_SIZE_MAX
+            )));
+        }
+        let fanout = self.config.limits.max_fanout;
+        let mut tx = self.begin_tx()?;
+        let inode = Store::inode_for_tx(&tx, ino)?;
+        let new_root = index::insert(inode.xattr_root, name, value, BTREE_ORDER, fanout, &mut tx)?;
+        let mut inode = inode;
+        inode.xattr_root = new_root;
+        inode.ctime = crate::store::inode::Timespec::now();
+        Store::put_inode_in_tx(&mut tx, ino, &inode)?;
+        tx.commit(hooks)?;
+        Ok(())
+    }
+
+    /// Remove an xattr; returns whether it existed.
+    pub fn remove_xattr(
+        &mut self,
+        ino: u64,
+        name: &[u8],
+        hooks: &crate::store::transaction::CrashHooks,
+    ) -> Result<bool, StoreError> {
+        let fanout = self.config.limits.max_fanout;
+        let mut tx = self.begin_tx()?;
+        let inode = Store::inode_for_tx(&tx, ino)?;
+        if inode.xattr_root.is_zero() {
+            return Ok(false);
+        }
+        let present = index::get(inode.xattr_root, name, BTREE_ORDER, fanout, &tx)?.is_some();
+        if !present {
+            return Ok(false);
+        }
+        let new_root = index::remove(inode.xattr_root, name, BTREE_ORDER, fanout, &mut tx)?;
+        let mut inode = inode;
+        inode.xattr_root = new_root;
+        inode.ctime = crate::store::inode::Timespec::now();
+        Store::put_inode_in_tx(&mut tx, ino, &inode)?;
+        tx.commit(hooks)?;
+        Ok(true)
+    }
+
+    /// List xattr names.
+    pub fn list_xattr(&self, ino: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+        let inode = self
+            .get_inode(ino)?
+            .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
+        if inode.xattr_root.is_zero() {
+            return Ok(Vec::new());
+        }
+        let entries = index::scan_all(
+            inode.xattr_root,
+            BTREE_ORDER,
+            self.config.limits.max_fanout,
+            self,
+        )?;
+        Ok(entries.into_iter().map(|(k, _)| k).collect())
     }
 }
 
@@ -1266,10 +2174,27 @@ impl DecoderContext for Store {
         codec: RansCodec,
         out_len: u64,
     ) -> Result<Vec<u8>, MaterializeError> {
+        // The model cache memoizes decoded models (pure memo of immutable
+        // content-addressed bytes; performance only).
+        let model_id = ChunkId::of(model);
+        if let Some(cached) = self
+            .model_cache
+            .lock()
+            .ok()
+            .and_then(|mut c| c.get(&model_id))
+        {
+            if cached.scale_bits == scale_bits && cached.codec == codec {
+                return crate::rans::residual::decode_stream(&cached, encoded, out_len)
+                    .map_err(|e| MaterializeError::RansDecode(e.to_string()));
+            }
+        }
         let parsed = crate::rans::metadata::decode_model(model, self.config.limits.max_model_bytes)
             .map_err(|e| MaterializeError::RansDecode(e.to_string()))?;
         if parsed.scale_bits != scale_bits || parsed.codec != codec {
             return Err(MaterializeError::RansDecode("model tag mismatch".into()));
+        }
+        if let Ok(mut c) = self.model_cache.lock() {
+            c.insert(model_id, parsed.clone());
         }
         crate::rans::residual::decode_stream(&parsed, encoded, out_len)
             .map_err(|e| MaterializeError::RansDecode(e.to_string()))
@@ -1318,6 +2243,32 @@ fn open_lock(dir: &Path) -> Result<File, StoreError> {
 pub fn ensure_store_dir(dir: &Path) -> Result<(), StoreError> {
     std::fs::create_dir_all(dir)?;
     Ok(())
+}
+
+/// Current effective uid (safe wrapper; /proc/self/status fallback).
+pub fn current_uid() -> u32 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("Uid:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(0)
+}
+
+/// Current effective gid (safe wrapper; /proc/self/status fallback).
+pub fn current_gid() -> u32 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("Gid:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(0)
 }
 
 /// Write a scratch file atomically (used by evidence/tools).

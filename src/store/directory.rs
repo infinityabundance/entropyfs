@@ -121,7 +121,7 @@ pub fn scan<P: ObjectProvider>(
         dir_root,
         start.as_deref(),
         None,
-        limit + 1,
+        limit.saturating_add(1),
         order,
         max_fanout,
         provider,

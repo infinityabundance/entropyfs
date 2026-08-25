@@ -230,6 +230,10 @@ pub fn get<P: ObjectProvider>(
     max_fanout: u32,
     provider: &P,
 ) -> Result<Option<Vec<u8>>, BTreeError> {
+    if root.is_zero() {
+        // Empty tree: nothing to find.
+        return Ok(None);
+    }
     let mut node_id = root;
     let mut depth = 0u32;
     loop {
@@ -374,6 +378,10 @@ pub fn remove<P: ObjectProvider>(
     max_fanout: u32,
     provider: &mut P,
 ) -> Result<ChunkId, BTreeError> {
+    if root.is_zero() {
+        // Empty tree: key absent; the empty root is unchanged.
+        return Ok(ChunkId::ZERO);
+    }
     match remove_rec(root, key, order, max_fanout, provider, 0)? {
         (Some(new_root), _) => Ok(new_root),
         (None, _) => {
