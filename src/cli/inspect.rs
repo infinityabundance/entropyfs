@@ -103,6 +103,7 @@ pub fn family_name(desc: &crate::core::representation::Representation) -> &'stat
         crate::core::representation::Representation::EntropyRef { .. } => "ENTROPY_REF",
         crate::core::representation::Representation::Permutation { .. } => "PERMUTATION",
         crate::core::representation::Representation::SequenceRans { .. } => "SEQUENCE_RANS",
+        crate::core::representation::Representation::SparseBlock64 { .. } => "SPARSE_BLOCK64",
     }
 }
 

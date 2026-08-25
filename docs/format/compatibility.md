@@ -28,6 +28,7 @@ Feature bit registry (v1):
 | 8 | compat | `EXTENT_DELTA_INDEX` derived index present (disposable) |
 | 9 | compat | `OPTIMIZER_REWRITE` history markers present |
 | 10 | incompat | `SEQUENCE_RANS` descriptors present |
+| 11 | incompat | `SPARSE_BLOCK64` descriptors present |
 
 `CHUNK_64K` is the baseline and needs no bit (v1 always supports it).
 

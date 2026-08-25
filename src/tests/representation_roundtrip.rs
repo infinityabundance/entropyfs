@@ -14,6 +14,7 @@ use crate::entropy::periodic::PeriodicEncoder;
 use crate::entropy::permutation::PermutationEncoder;
 use crate::entropy::residual::BaseResidualEncoder;
 use crate::entropy::sparse::SparseEncoder;
+use crate::entropy::sparse64::SparseBlock64Encoder;
 use crate::entropy::universe::UniverseEncoder;
 use crate::rans::residual::{RansEncoder, RansResidualEncoder};
 use crate::rans::sequence::SequenceEncoder;
@@ -42,6 +43,7 @@ fn assert_all_candidates_roundtrip(input: &[u8], bases: &[crate::core::candidate
     let cctx = ctx(input, &limits, &policy, bases);
     let encoders: Vec<Box<dyn Encoder>> = vec![
         Box::new(SparseEncoder),
+        Box::new(SparseBlock64Encoder),
         Box::new(PaletteEncoder),
         Box::new(PermutationEncoder),
         Box::new(PeriodicEncoder),
@@ -113,6 +115,23 @@ fn sparse_roundtrip() {
     let mut input = vec![0u8; 8192];
     for &p in &[7u32, 4096, 8191] {
         input[p as usize] = 0x5A;
+    }
+    assert_all_candidates_roundtrip(&input, &[]);
+}
+
+#[test]
+fn sparse_block64_roundtrip() {
+    // k in the plain-SPARSE u128-overflow range at 64 KiB.
+    let mut input = vec![0u8; 65536];
+    let mut placed = 0usize;
+    let mut x: u64 = 0x1234_5678_9abc_def0;
+    while placed < 500 {
+        x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let pos = ((x >> 32) as usize) % 65536;
+        if input[pos] == 0 {
+            input[pos] = (placed % 200) as u8 + 3;
+            placed += 1;
+        }
     }
     assert_all_candidates_roundtrip(&input, &[]);
 }

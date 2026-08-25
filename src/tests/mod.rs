@@ -20,3 +20,4 @@ pub mod rank_roundtrip;
 pub mod representation_roundtrip;
 pub mod seqrans_versioned_repro;
 pub mod snapshots;
+pub mod sparse_block64;

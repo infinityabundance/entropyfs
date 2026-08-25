@@ -189,6 +189,8 @@ pub fn estimated_read_cycles(rep: &Representation) -> u64 {
         // Three rANS streams (≈len·4 total symbols) plus the copy/literal
         // walk (≈len byte copies) — slightly heavier than plain RANS.
         Representation::SequenceRans { .. } => len * 5,
+        // Per-word popcount + rank unranking + literal placement.
+        Representation::SparseBlock64 { .. } => len / 8 + 8,
     }
 }
 
@@ -208,6 +210,7 @@ pub fn estimated_write_cycles(rep: &Representation) -> u64 {
         Representation::Permutation { .. } => len * 8,
         // LZ hash search + three histograms + three rANS encodes.
         Representation::SequenceRans { .. } => len * 8,
+        Representation::SparseBlock64 { .. } => len / 8 + 16,
     }
 }
 
@@ -233,6 +236,8 @@ pub fn dependent_reads(rep: &Representation) -> u32 {
         },
         // Model object + enc object.
         Representation::SequenceRans { .. } => 2,
+        // Model object + enc object.
+        Representation::SparseBlock64 { .. } => 2,
     }
 }
 

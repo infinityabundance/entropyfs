@@ -28,6 +28,7 @@ Phase-1 representation set (stable numeric tags, see
 | 0x0B | `INLINE` — short literal bytes inside the descriptor |
 | 0x0C | `PERMUTATION` — factoradic rank over distinct symbols (len ≤ 34) |
 | 0x0D | `SEQUENCE_RANS` — local-match (LZ77) commands/literals/offsets, each rANS-coded or raw |
+| 0x0E | `SPARSE_BLOCK64` — blockwise-64 enumerative sparse coding (per-word popcount + C(64,k) rank, rANS/raw streams) |
 
 `SEQUENCE_RANS` (0x0D) is the general-purpose compression floor added in
 Phase 8: pure rANS is an entropy coder, not a match finder, so the family
@@ -47,6 +48,11 @@ shift-aware copy/literal delta: the output is a command stream of
 inserted/deleted regions cost only their own bytes instead of exploding a
 positional XOR residual. It shares the three-stream rANS/raw codec with
 `SEQUENCE_RANS` and accepts bases shorter or longer than the target.
+
+`SPARSE_BLOCK64` (0x0E) extends the configurational ceiling past the
+`u128` combination-rank limit of `SPARSE`: blockwise-64 enumerative
+coding keeps every rank within a `u64` (`C(64,32)` < 2^63), so sparse
+chunks with any marked-byte count are representable (Phase-8 §6).
 
 Hard rules:
 

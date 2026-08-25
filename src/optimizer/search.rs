@@ -183,6 +183,7 @@ pub fn encode_guided(
             Box::new(crate::entropy::sparse::SparseEncoder) as Box<dyn Encoder>,
             Box::new(crate::entropy::palette::PaletteEncoder),
             Box::new(crate::entropy::periodic::PeriodicEncoder),
+            Box::new(crate::entropy::sparse64::SparseBlock64Encoder),
         ] {
             candidates.extend(
                 enc.encode(ctx.target, &base_ctx)

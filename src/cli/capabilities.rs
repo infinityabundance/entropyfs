@@ -25,7 +25,7 @@ pub fn run() -> Result<(), String> {
         crate::core::limits::DEFAULT_MAX_REFERENCE_DEPTH
     );
     println!(
-        "representation families: ZERO FILL INLINE RAW RANS EXACT_REF BASE_RESIDUAL SPARSE PALETTE PERIODIC ENTROPY_REF PERMUTATION SEQUENCE_RANS"
+        "representation families: ZERO FILL INLINE RAW RANS EXACT_REF BASE_RESIDUAL SPARSE PALETTE PERIODIC ENTROPY_REF PERMUTATION SEQUENCE_RANS SPARSE_BLOCK64"
     );
     println!("rANS backends: ryg-rans-rs 0.5.1 (byte, interleaved2; scalar authority)");
     println!("DSFB observer: dsfb 0.1.2 (zero decoding authority)");

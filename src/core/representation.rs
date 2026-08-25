@@ -353,6 +353,39 @@ pub enum Representation {
         /// Materialized length.
         len: u64,
     },
+    /// Blockwise-64 enumerative sparse coding: the chunk's nonzero-byte
+    /// positions are coded as 64-bit subblocks — per 64-bit word, its
+    /// popcount `k` and the subset rank among `C(64, k)` (which fits a
+    /// u64 for every `k`), plus the literal byte values. The three streams
+    /// (popcounts, ranks, literals) use the same rANS/raw codec as
+    /// SEQUENCE_RANS. This removes the `u128` combination-rank cliff of
+    /// SPARSE (which cannot represent `10 <= k <= n-10` for 64 KiB
+    /// chunks) while staying bounded, SIMD/popcount-friendly, and
+    /// random-accessible per word (Phase-8 directive §6; ADR-0005).
+    SparseBlock64 {
+        /// Content id of the model object (3 slots).
+        model: ChunkId,
+        /// Content id of the encoded object (3 concatenated streams).
+        enc_obj: ChunkId,
+        /// Model scale bits.
+        scale_bits: u8,
+        /// Codec used for the streams.
+        codec: RansCodec,
+        /// Encoded popcount-stream length.
+        pc_len: u32,
+        /// Encoded rank-stream length.
+        rank_len: u32,
+        /// Encoded literal-stream length.
+        lit_len: u32,
+        /// Number of 64-bit words (= ceil(len / 8)).
+        words: u32,
+        /// Number of nonzero words (= decoded rank-stream entries).
+        nonzero: u32,
+        /// Decoded literal byte count (= total marked bytes).
+        lit_out: u32,
+        /// Materialized length.
+        len: u64,
+    },
 }
 
 impl Representation {
@@ -370,7 +403,8 @@ impl Representation {
             | Representation::Periodic { len, .. }
             | Representation::EntropyRef { len, .. }
             | Representation::Permutation { len, .. }
-            | Representation::SequenceRans { len, .. } => *len,
+            | Representation::SequenceRans { len, .. }
+            | Representation::SparseBlock64 { len, .. } => *len,
             Representation::Inline { data } => data.len() as u64,
         }
     }
@@ -396,6 +430,7 @@ impl Representation {
             Representation::Inline { .. } => 0x0B,
             Representation::Permutation { .. } => 0x0C,
             Representation::SequenceRans { .. } => 0x0D,
+            Representation::SparseBlock64 { .. } => 0x0E,
         }
     }
 
@@ -415,6 +450,7 @@ impl Representation {
             Representation::Inline { .. } => "INLINE",
             Representation::Permutation { .. } => "PERMUTATION",
             Representation::SequenceRans { .. } => "SEQUENCE_RANS",
+            Representation::SparseBlock64 { .. } => "SPARSE_BLOCK64",
         }
     }
 
@@ -447,6 +483,7 @@ impl Representation {
             Representation::EntropyRef { residual, .. } => 1 + 16 + 8 + 1 + residual.encoded_size(),
             Representation::Permutation { alphabet, .. } => 16 + alphabet.len() as u64,
             Representation::SequenceRans { .. } => 32 + 32 + 1 + 1 + 4 + 4 + 4 + 4 + 4,
+            Representation::SparseBlock64 { .. } => 32 + 32 + 1 + 1 + 4 + 4 + 4 + 4 + 4 + 4,
         };
         base + payload
     }
@@ -686,6 +723,49 @@ impl Representation {
                     return Err(ReprError::SequenceCmdsMismatch);
                 }
             }
+            Representation::SparseBlock64 {
+                model,
+                enc_obj,
+                scale_bits,
+                pc_len,
+                rank_len,
+                lit_len,
+                words,
+                nonzero,
+                lit_out,
+                len,
+                ..
+            } => {
+                check_len(*len, limits)?;
+                if model.is_zero() || enc_obj.is_zero() {
+                    return Err(ReprError::ZeroObjectId);
+                }
+                if !(1..=16).contains(scale_bits) {
+                    return Err(ReprError::BadScaleBits);
+                }
+                let max_stream = limits.max_chunk_size.saturating_add(64);
+                for s in [*pc_len, *rank_len, *lit_len] {
+                    if s as u64 > max_stream {
+                        return Err(ReprError::SequenceStreamTooLarge);
+                    }
+                }
+                // Word count must cover the output: words*8 >= len.
+                if (*words as u64).saturating_mul(8) < *len {
+                    return Err(ReprError::SparseBlockWords);
+                }
+                if (*nonzero as u64) > *words as u64 {
+                    return Err(ReprError::SparseBlockWords);
+                }
+                if (*lit_out as u64) > *len {
+                    return Err(ReprError::SequenceLitOutMismatch);
+                }
+                // Every marked byte carries a literal; the rank stream is
+                // 8 bytes per nonzero word. Each nonzero word has >= 1
+                // marked byte, so nonzero <= lit_out.
+                if (*nonzero as u64) > *lit_out as u64 {
+                    return Err(ReprError::SparseBlockLiteralCount);
+                }
+            }
         }
         Ok(())
     }
@@ -907,6 +987,11 @@ pub enum ReprError {
     SequenceNoCommands,
     /// SEQUENCE_RANS command count exceeds the materialized length.
     SequenceCmdsMismatch,
+    /// SPARSE_BLOCK64 word count does not cover the output or exceeds the
+    /// nonzero count.
+    SparseBlockWords,
+    /// SPARSE_BLOCK64 literal count is inconsistent with the marked bytes.
+    SparseBlockLiteralCount,
 }
 
 impl std::fmt::Display for ReprError {

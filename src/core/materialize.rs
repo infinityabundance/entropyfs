@@ -414,18 +414,21 @@ pub fn materialize(
             let d = crate::rans::sequence::decode_three_streams(
                 ctx,
                 limits,
-                model,
-                enc_obj,
-                *scale_bits,
-                *codec,
+                crate::rans::sequence::StreamRefs {
+                    model: *model,
+                    enc_obj: *enc_obj,
+                    scale_bits: *scale_bits,
+                    codec: *codec,
+                },
                 crate::rans::sequence::ThreeStreams {
                     seq_len: *seq_len,
                     lit_len: *lit_len,
                     off_len: *off_len,
                     cmds: *cmds,
                     lit_out: *lit_out,
-                    off_per_copy: 2,
                 },
+                None,
+                2,
             )?;
             let (commands, literals, offsets) = (d.commands, d.literals, d.offsets);
 
@@ -472,6 +475,109 @@ pub fn materialize(
             if pos != output.len() || lit != literals.len() {
                 return Err(MaterializeError::InvalidDescriptor(
                     "sequence command walk did not cover the output".into(),
+                ));
+            }
+            Ok(())
+        }
+        Representation::SparseBlock64 {
+            model,
+            enc_obj,
+            scale_bits,
+            codec,
+            pc_len,
+            rank_len,
+            lit_len,
+            words,
+            nonzero,
+            lit_out,
+            len,
+        } => {
+            if *len > limits.max_alloc_bytes {
+                return Err(MaterializeError::AllocTooLarge {
+                    requested: *len,
+                    max: limits.max_alloc_bytes,
+                });
+            }
+            // Word coverage: words*8 >= len (validated structurally, but
+            // re-checked here — materialize never trusts the descriptor).
+            let word_count = *words as usize;
+            if word_count.saturating_mul(8) < *len as usize {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "sparse-block64 word count does not cover the output".into(),
+                ));
+            }
+            // Popcount stream decodes to one byte per word; bound the
+            // allocation (popcounts <= 64 fit one byte each).
+            let d = crate::rans::sequence::decode_three_streams(
+                ctx,
+                limits,
+                crate::rans::sequence::StreamRefs {
+                    model: *model,
+                    enc_obj: *enc_obj,
+                    scale_bits: *scale_bits,
+                    codec: *codec,
+                },
+                crate::rans::sequence::ThreeStreams {
+                    seq_len: *pc_len,
+                    lit_len: *lit_len,
+                    off_len: *rank_len,
+                    cmds: *words,
+                    lit_out: *lit_out,
+                },
+                Some(*nonzero),
+                8,
+            )
+            .map_err(|e| MaterializeError::Sequence(e.to_string()))?;
+            let popcounts = d.commands;
+            let literals = d.literals;
+            let ranks = d.offsets;
+            if popcounts.len() != word_count {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "sparse-block64 popcount count mismatch".into(),
+                ));
+            }
+            output.fill(0);
+            let mut lit = 0usize;
+            let mut rank = 0usize;
+            for (w, &k) in popcounts.iter().enumerate() {
+                let k = k as usize;
+                if k == 0 {
+                    continue;
+                }
+                if k > 64 || rank + 8 > ranks.len() || lit + k > literals.len() {
+                    return Err(MaterializeError::InvalidDescriptor(
+                        "sparse-block64 stream inconsistency".into(),
+                    ));
+                }
+                let r = u64::from_le_bytes(
+                    ranks[rank..rank + 8].try_into().expect("8-byte rank slice"),
+                );
+                rank += 8;
+                // Unrank the C(64, k) subset of bit positions within the
+                // word; each position maps to an output byte.
+                let positions = crate::entropy::rank::unrank_comb_subset(r as u128, 64, k as u64)
+                    .map_err(|e| MaterializeError::InvalidDescriptor(e.to_string()))?;
+                if positions.len() != k {
+                    return Err(MaterializeError::InvalidDescriptor(
+                        "sparse-block64 rank length mismatch".into(),
+                    ));
+                }
+                let base = w * 8;
+                for (j, &p) in positions.iter().enumerate() {
+                    let out_pos = base + p as usize;
+                    if out_pos >= output.len() {
+                        return Err(MaterializeError::InvalidDescriptor(
+                            "sparse-block64 position out of bounds".into(),
+                        ));
+                    }
+                    output[out_pos] = literals[lit + j];
+                }
+                lit += k;
+                spend(k as u64 + 1, budget)?;
+            }
+            if lit != literals.len() {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "sparse-block64 literal count mismatch".into(),
                 ));
             }
             Ok(())
@@ -603,18 +709,21 @@ pub fn apply_residual(
             let d = crate::rans::sequence::decode_three_streams(
                 ctx,
                 limits,
-                model,
-                enc_obj,
-                *scale_bits,
-                *codec,
+                crate::rans::sequence::StreamRefs {
+                    model: *model,
+                    enc_obj: *enc_obj,
+                    scale_bits: *scale_bits,
+                    codec: *codec,
+                },
                 crate::rans::sequence::ThreeStreams {
                     seq_len: *seq_len,
                     lit_len: *lit_len,
                     off_len: *off_len,
                     cmds: *cmds,
                     lit_out: *lit_out,
-                    off_per_copy: 4,
                 },
+                None,
+                4,
             )
             .map_err(|e| MaterializeError::Residual(e.to_string()))?;
             let (commands, literals, offsets) = (d.commands, d.literals, d.offsets);

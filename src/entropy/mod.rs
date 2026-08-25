@@ -17,5 +17,6 @@ pub mod permutation;
 pub mod rank;
 pub mod residual;
 pub mod sparse;
+pub mod sparse64;
 pub mod transform;
 pub mod universe;

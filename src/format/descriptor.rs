@@ -37,6 +37,8 @@ pub const TAG_INLINE: u8 = 0x0B;
 pub const TAG_PERMUTATION: u8 = 0x0C;
 /// Tag: local-match + entropy (three rANS/raw streams).
 pub const TAG_SEQUENCE_RANS: u8 = 0x0D;
+/// Tag: blockwise-64 enumerative sparse coding.
+pub const TAG_SPARSE_BLOCK64: u8 = 0x0E;
 
 /// Residual kinds.
 pub const RESIDUAL_XOR_SPARSE: u8 = 0x01;
@@ -196,6 +198,32 @@ pub fn encode(rep: &Representation) -> Result<Vec<u8>, CodecError> {
             w.u32(*lit_len);
             w.u32(*off_len);
             w.u32(*cmds);
+            w.u32(*lit_out);
+        }
+        Representation::SparseBlock64 {
+            model,
+            enc_obj,
+            scale_bits,
+            codec,
+            pc_len,
+            rank_len,
+            lit_len,
+            words,
+            nonzero,
+            lit_out,
+            len,
+        } => {
+            w.u8(TAG_SPARSE_BLOCK64);
+            w.u32(*len as u32);
+            w.bytes(model.as_bytes());
+            w.bytes(enc_obj.as_bytes());
+            w.u8(*scale_bits);
+            w.u8(codec.tag());
+            w.u32(*pc_len);
+            w.u32(*rank_len);
+            w.u32(*lit_len);
+            w.u32(*words);
+            w.u32(*nonzero);
             w.u32(*lit_out);
         }
     }
@@ -431,6 +459,31 @@ pub fn decode(
                 len,
             }
         }
+        TAG_SPARSE_BLOCK64 => {
+            let model = read_id(&mut r)?;
+            let enc_obj = read_id(&mut r)?;
+            let scale_bits = r.u8()?;
+            let codec = RansCodec::from_u8(r.u8()?).ok_or(CodecError::Malformed)?;
+            let pc_len = r.u32()?;
+            let rank_len = r.u32()?;
+            let lit_len = r.u32()?;
+            let words = r.u32()?;
+            let nonzero = r.u32()?;
+            let lit_out = r.u32()?;
+            Representation::SparseBlock64 {
+                model,
+                enc_obj,
+                scale_bits,
+                codec,
+                pc_len,
+                rank_len,
+                lit_len,
+                words,
+                nonzero,
+                lit_out,
+                len,
+            }
+        }
         _ => return Err(CodecError::Malformed),
     };
     if !r.done() {
@@ -650,6 +703,19 @@ mod tests {
                 off_len: 20,
                 cmds: 30,
                 lit_out: 40,
+                len: 4096,
+            },
+            Representation::SparseBlock64 {
+                model: id,
+                enc_obj: id,
+                scale_bits: 14,
+                codec: RansCodec::Interleaved2,
+                pc_len: 100,
+                rank_len: 60,
+                lit_len: 20,
+                words: 512,
+                nonzero: 7,
+                lit_out: 9,
                 len: 4096,
             },
         ]

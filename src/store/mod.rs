@@ -1006,6 +1006,9 @@ impl Store {
             Representation::SequenceRans { .. } => {
                 features |= crate::format::features::Feature::SequenceRans.mask();
             }
+            Representation::SparseBlock64 { .. } => {
+                features |= crate::format::features::Feature::SparseBlock64.mask();
+            }
             _ => {}
         }
         let bytes = crate::format::descriptor::encode(descriptor)?;
@@ -1273,6 +1276,7 @@ impl Store {
                 as Box<dyn crate::core::candidate::Encoder>,
             Box::new(crate::entropy::palette::PaletteEncoder),
             Box::new(crate::entropy::periodic::PeriodicEncoder),
+            Box::new(crate::entropy::sparse64::SparseBlock64Encoder),
             Box::new(crate::rans::residual::RansEncoder),
             Box::new(crate::rans::sequence::SequenceEncoder),
         ] {

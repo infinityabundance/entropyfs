@@ -162,6 +162,7 @@ Representation tags and payloads:
 | 0x0B | INLINE | data (len bytes, len ≤ 4096) |
 | 0x0C | PERMUTATION | rank u128, alphabet (len bytes; distinct, strictly increasing, len ≤ 34) |
 | 0x0D | SEQUENCE_RANS | model `[u8;32]`, enc_obj `[u8;32]`, scale_bits u8, codec u8, seq_len u32, lit_len u32, off_len u32, cmds u32, lit_out u32 |
+| 0x0E | SPARSE_BLOCK64 | model `[u8;32]`, enc_obj `[u8;32]`, scale_bits u8, codec u8, pc_len u32, rank_len u32, lit_len u32, words u32, nonzero u32, lit_out u32 |
 
 SEQUENCE_RANS (0x0D) is the local-match + entropy floor: an LZ77-style
 hash-chain matcher turns the extent into three byte streams — *commands*,
@@ -183,6 +184,17 @@ and must sum to the enc object length; `cmds` is the decoded command count
 (≤ len) and `lit_out` the decoded literal byte count (≤ len). The enc
 object is `[commands][literals][offsets]` concatenated. The model object
 is three slots (below).
+
+SPARSE_BLOCK64 (0x0E) is blockwise-64 enumerative sparse coding: the
+chunk's nonzero-byte positions are coded as 64-bit subblocks. For each
+64-bit word: popcount `k` (one byte in the popcount stream) and the
+subset rank among `C(64, k)` (u64 LE in the rank stream — `C(64, 32)`
+fits a u64), plus the literal values (one byte per marked position in the
+literal stream). `words = ceil(len / 8)`; `nonzero` = number of words with
+`k > 0`; the rank stream decodes to `nonzero × 8` bytes; `lit_out` = total
+marked bytes. This removes the plain-SPARSE `u128` combination-rank cliff
+(`10 ≤ k ≤ n−10` at 64 KiB) while staying bounded and popcount-friendly.
+The three streams share the SEQUENCE_RANS codec.
 
 Residual (for BASE_RESIDUAL / ENTROPY_REF), kinds:
 

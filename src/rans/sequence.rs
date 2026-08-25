@@ -390,8 +390,8 @@ pub fn parse_model_object(bytes: &[u8], max_bytes: u64) -> Result<[StreamSlot; 3
     Ok(out)
 }
 
-/// The descriptor stream-length fields shared by SEQUENCE_RANS and the
-/// BASE_SEQUENCE residual.
+/// The descriptor stream-length fields shared by SEQUENCE_RANS, the
+/// BASE_SEQUENCE residual, and SPARSE_BLOCK64.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThreeStreams {
     /// Encoded command-stream length.
@@ -404,9 +404,6 @@ pub struct ThreeStreams {
     pub cmds: u32,
     /// Decoded literal byte count.
     pub lit_out: u32,
-    /// Offset width in bytes per copy command (2 for SEQUENCE_RANS u16
-    /// output-relative distances, 4 for BASE_SEQUENCE u32 base offsets).
-    pub off_per_copy: u32,
 }
 
 /// The three decoded streams.
@@ -420,28 +417,49 @@ pub struct DecodedStreams {
     pub offsets: Vec<u8>,
 }
 
+/// The object references shared by the three-stream families.
+#[derive(Debug, Clone, Copy)]
+pub struct StreamRefs {
+    /// Content id of the model object.
+    pub model: crate::core::extent::ChunkId,
+    /// Content id of the enc object.
+    pub enc_obj: crate::core::extent::ChunkId,
+    /// Model scale bits.
+    pub scale_bits: u8,
+    /// Codec.
+    pub codec: RansCodec,
+}
+
 /// Decode the three streams (commands, literals, offsets) from the model
 /// and enc objects, validating every length. Shared by the SEQUENCE_RANS
-/// materialize arm and the BASE_SEQUENCE residual arm. The decoded offset
-/// stream length must be exactly `off_per_copy × copy-count`; the caller
-/// validates its own command-walk semantics against this contract.
+/// / BASE_SEQUENCE materialize paths and the SPARSE_BLOCK64 arm.
+///
+/// `units` is the number of offset-stream entries: `None` derives it from
+/// the command stream (count of copy commands — the SequenceRans/Base-
+/// Sequence convention), `Some(n)` uses the caller's known count (the
+/// SPARSE_BLOCK64 nonzero-word count, a descriptor field). The decoded
+/// offset stream length must be exactly `units × off_per_copy`.
 pub fn decode_three_streams(
     ctx: &dyn crate::core::materialize::DecoderContext,
     limits: &crate::core::limits::Limits,
-    model: &crate::core::extent::ChunkId,
-    enc_obj: &crate::core::extent::ChunkId,
-    scale_bits: u8,
-    codec: RansCodec,
+    refs: StreamRefs,
     lens: ThreeStreams,
+    units: Option<u32>,
+    off_per_copy: u32,
 ) -> Result<DecodedStreams, crate::core::materialize::MaterializeError> {
     use crate::core::materialize::MaterializeError;
+    let StreamRefs {
+        model,
+        enc_obj,
+        scale_bits,
+        codec,
+    } = refs;
     let ThreeStreams {
         seq_len,
         lit_len,
         off_len,
         cmds,
         lit_out,
-        off_per_copy,
     } = lens;
     // Stream lengths must compose exactly to the enc object.
     let enc_total = (seq_len as u64)
@@ -456,10 +474,10 @@ pub fn decode_three_streams(
             max: limits.max_alloc_bytes,
         });
     }
-    let model_bytes = ctx.fetch_object(model)?;
+    let model_bytes = ctx.fetch_object(&model)?;
     let slots = parse_model_object(&model_bytes, max_model_object_bytes(limits.max_model_bytes))
         .map_err(|e| MaterializeError::Sequence(e.to_string()))?;
-    let enc = ctx.fetch_object(enc_obj)?;
+    let enc = ctx.fetch_object(&enc_obj)?;
     if enc.len() as u64 != enc_total {
         return Err(MaterializeError::InvalidDescriptor(
             "enc object length mismatch".into(),
@@ -491,7 +509,10 @@ pub fn decode_three_streams(
             "command stream decoded length mismatch".into(),
         ));
     }
-    let copies = commands.iter().filter(|&&b| b >= 0x80).count();
+    let copies = match units {
+        Some(u) => u as usize,
+        None => commands.iter().filter(|&&b| b >= 0x80).count(),
+    };
     let off_out = (copies as u64).checked_mul(off_per_copy as u64).ok_or(
         MaterializeError::InvalidDescriptor("offset stream length overflow".into()),
     )?;

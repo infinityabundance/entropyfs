@@ -263,6 +263,10 @@ fn mark_descriptor_refs(
             refs.push(*model);
             refs.push(*enc_obj);
         }
+        Representation::SparseBlock64 { model, enc_obj, .. } => {
+            refs.push(*model);
+            refs.push(*enc_obj);
+        }
         Representation::BaseResidual {
             residual: Residual::RansCoded { enc_obj, model, .. },
             ..
