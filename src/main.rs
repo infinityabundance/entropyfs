@@ -66,6 +66,10 @@ enum Command {
 enum SnapshotAction {
     /// Create a snapshot of the current root.
     Create(cli::snapshot::SnapshotCreateArgs),
+    /// Delete a snapshot.
+    Delete(cli::snapshot::SnapshotDeleteArgs),
+    /// Restore (roll back to) a snapshot.
+    Restore(cli::snapshot::SnapshotRestoreArgs),
 }
 
 fn main() {
@@ -79,6 +83,8 @@ fn main() {
         Command::Explain(a) => cli::explain::run(a),
         Command::Snapshot { action } => match action {
             SnapshotAction::Create(a) => cli::snapshot::run_create(a),
+            SnapshotAction::Delete(a) => cli::snapshot::run_delete(a),
+            SnapshotAction::Restore(a) => cli::snapshot::run_restore(a),
         },
         Command::Snapshots(a) => cli::snapshot::run_list(a),
         Command::Fsck(a) => cli::fsck::run_fsck(a),

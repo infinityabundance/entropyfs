@@ -28,10 +28,18 @@ fn small_store(dir: &TempDir) -> Store {
     Store::create(dir.path(), &cfg, [0x44; 16]).unwrap()
 }
 
-/// Incompressible-ish content (RAW fallback; exercises the physical path).
+/// Truly incompressible content (splitmix64 stream — no periodicity, no
+/// low-cardinality; RAW must win). Different seeds give different streams.
 fn incompressible(seed: u8, len: usize) -> Vec<u8> {
+    let mut state = 0x9E37_79B9_7F4A_7C15u64 ^ (seed as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     (0..len)
-        .map(|i| ((i as u32).wrapping_mul(2654435761) ^ (seed as u32)) as u8)
+        .map(|_| {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            (z ^ (z >> 31)) as u8
+        })
         .collect()
 }
 
@@ -180,4 +188,53 @@ fn delete_then_write_works_under_pressure() {
     store.truncate_file(3, 0).unwrap();
     let read = store.read_file(3, 0, 1024).unwrap();
     assert!(read.is_empty() || read.iter().all(|&b| b == 0));
+}
+
+#[test]
+fn gc_recovers_space_when_near_full() {
+    // The emergency reserve must let GC compact even when writes are
+    // refused at the watermark (§21: never discover the fs needs space it
+    // cannot have).
+    let dir = TempDir::new().unwrap();
+    let mut store = small_store(&dir);
+    let inode = crate::store::inode::Inode::new_file(1000, 1000, 0o644);
+    let mut tx = store.begin_tx().unwrap();
+    Store::put_inode_in_tx(&mut tx, 3, &inode).unwrap();
+    tx.commit(&CrashHooks::none()).unwrap();
+
+    // Overwrite the same file repeatedly: each version creates garbage.
+    let mut hit_full = false;
+    for i in 0..32u8 {
+        let content = incompressible(i, 512 * 1024);
+        match write_file(&mut store, 3, &content) {
+            Ok(()) => {}
+            Err(StoreError::Full(_)) => {
+                hit_full = true;
+                break;
+            }
+            Err(e) => panic!("unexpected: {e}"),
+        }
+    }
+    assert!(hit_full, "store should reach the watermark");
+    let before = store.physical_used();
+    // GC must run from the reserve (no commit is needed to start) and
+    // reclaim the garbage versions.
+    let reclaimed = crate::store::gc::collect(&mut store, &CrashHooks::none()).unwrap();
+    assert!(reclaimed > 0, "GC must reclaim space when full");
+    let after = store.physical_used();
+    assert!(
+        after < before,
+        "GC must reduce physical usage: before {before}, after {after}"
+    );
+    // The store accepts writes again.
+    let content = incompressible(200, 256 * 1024);
+    write_file(&mut store, 3, &content).expect("writes resume after GC");
+    let read = store.read_file(3, 0, content.len() as u64).unwrap();
+    assert_eq!(read, content);
+    let report = fsck(dir.path(), &FsckOptions::default()).unwrap();
+    assert!(
+        report.is_clean(),
+        "fsck after near-full GC: {}",
+        report.render()
+    );
 }

@@ -1128,6 +1128,40 @@ impl Store {
         if let Some(size) = new_size {
             let inode = Store::inode_for_tx(&tx, ino)?;
             let mut inode = inode;
+            // A smaller write must not leave extents past the new EOF
+            // (fsck invariant: extent end <= file size). Drop extents
+            // starting at or beyond the new size; the write's own updates
+            // already replaced any touched trailing chunk at its clipped
+            // logical length.
+            if let InodeData::File { extent_root } = &inode.data {
+                if !extent_root.is_zero() {
+                    let limits = tx.store.config.limits;
+                    let all = crate::store::extent_tree::scan_all(
+                        *extent_root,
+                        BTREE_ORDER,
+                        limits.max_fanout,
+                        &tx,
+                    )?;
+                    let mut keep_root = *extent_root;
+                    for (start, _) in all {
+                        if start >= size {
+                            let (nr, _) = crate::store::extent_tree::remove(
+                                keep_root,
+                                start,
+                                BTREE_ORDER,
+                                limits.max_fanout,
+                                &mut tx,
+                            )?;
+                            keep_root = nr;
+                        }
+                    }
+                    if keep_root != *extent_root {
+                        inode.data = InodeData::File {
+                            extent_root: keep_root,
+                        };
+                    }
+                }
+            }
             inode.size = size;
             inode.mtime = crate::store::inode::Timespec::now();
             Store::put_inode_in_tx(&mut tx, ino, &inode)?;
@@ -2186,6 +2220,74 @@ impl Store {
             self.config.limits.max_fanout,
             self,
         )?)
+    }
+
+    /// Look up a snapshot by name.
+    pub fn snapshot_lookup(
+        &self,
+        name: &[u8],
+    ) -> Result<Option<crate::store::snapshot::SnapshotEntry>, StoreError> {
+        Ok(crate::store::snapshot::lookup(
+            self.current_root().snapshot_tree_root,
+            name,
+            BTREE_ORDER,
+            self.config.limits.max_fanout,
+            self,
+        )?)
+    }
+
+    /// Delete a snapshot by name. Returns whether it existed.
+    pub fn delete_snapshot(
+        &mut self,
+        name: &[u8],
+        hooks: &crate::store::transaction::CrashHooks,
+    ) -> Result<bool, StoreError> {
+        let fanout = self.config.limits.max_fanout;
+        let mut tx = self.begin_tx()?;
+        let (new_root, present) = crate::store::snapshot::remove(
+            tx.root_mut().snapshot_tree_root,
+            name,
+            BTREE_ORDER,
+            fanout,
+            &mut tx,
+        )?;
+        tx.root_mut().snapshot_tree_root = new_root;
+        tx.commit(hooks)?;
+        Ok(present)
+    }
+
+    /// Restore (roll back to) a snapshot's root. The generation is bumped
+    /// so the superblock flip stays monotonic, and the restored-from
+    /// snapshot entry is re-inserted so the snapshot itself survives the
+    /// rollback (ZFS/btrfs-style semantics, §17).
+    pub fn restore_snapshot(
+        &mut self,
+        name: &[u8],
+        hooks: &crate::store::transaction::CrashHooks,
+    ) -> Result<(), StoreError> {
+        let entry = self
+            .snapshot_lookup(name)?
+            .ok_or_else(|| StoreError::Invariant("no such snapshot".into()))?;
+        let snap_bytes = self
+            .fetch_object(&entry.root_id)?
+            .ok_or_else(|| StoreError::Invariant("snapshot root object missing".into()))?;
+        let snap_root = crate::store::root::Root::decode(&snap_bytes)
+            .map_err(|e| StoreError::Superblock(format!("snapshot root decode: {e:?}")))?;
+        let fanout = self.config.limits.max_fanout;
+        let mut tx = self.begin_tx()?;
+        *tx.root_mut() = snap_root;
+        // Keep the restored-from snapshot (and older snapshots already in
+        // its tree) alive after the rollback.
+        tx.root_mut().snapshot_tree_root = crate::store::snapshot::insert(
+            tx.root_mut().snapshot_tree_root,
+            name,
+            entry,
+            BTREE_ORDER,
+            fanout,
+            &mut tx,
+        )?;
+        tx.commit(hooks)?;
+        Ok(())
     }
 
     // ------------------------------------------------------------------

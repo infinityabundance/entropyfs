@@ -180,6 +180,36 @@ fn partial_tail_chunk_never_exceeds_eof() {
 }
 
 #[test]
+fn shrinking_write_drops_extents_past_eof() {
+    // Committing extents with a smaller size must not leave extents past
+    // the new EOF (fsck invariant: extent end <= file size) — a real bug
+    // found by the near-full GC test. (POSIX write() never shrinks a file;
+    // this is the commit path the ENOSPC write stress uses.)
+    let dir = TempDir::new().unwrap();
+    let mut store = create_store(&dir);
+    create_file(&mut store, 3);
+    store
+        .write_region(3, 0, vec![0xAA; 3 * 65536].as_slice())
+        .unwrap();
+    // Commit a small content with a small size (the shrink case).
+    let content = b"shrink".to_vec();
+    let updates = encode_chunks(&content, &store);
+    store
+        .commit_file_extents(3, updates, Some(6), &CrashHooks::none())
+        .unwrap();
+    let size = store.get_inode(3).unwrap().unwrap().size;
+    assert_eq!(size, 6);
+    let exts = extents(&store, 3);
+    assert!(exts.iter().all(|(s, d)| *s + d.len() <= size));
+    assert_eq!(exts.len(), 1);
+    let read = store.read_file(3, 0, 16).unwrap();
+    assert_eq!(read, b"shrink");
+    // fsck is clean.
+    let report = crate::fsck::fsck(dir.path(), &crate::fsck::FsckOptions::default()).unwrap();
+    assert!(report.is_clean(), "fsck: {}", report.render());
+}
+
+#[test]
 fn create_commit_remount_roundtrip() {
     let dir = TempDir::new().unwrap();
     let mut store = create_store(&dir);

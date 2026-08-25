@@ -43,9 +43,20 @@ enum MarkKind {
 }
 
 /// Mark the live object set from all roots.
+///
+/// The chunk index is a *derived* structure (§34): its tree nodes are
+/// root-reachable and stay live, but the objects its entries reference are
+/// pinned only when the content id is actually referenced by a live extent
+/// (an EXACT_REF target or a BASE_RESIDUAL base). Without this, deleted
+/// data stays pinned by the ever-growing index and GC could never reclaim
+/// it.
 pub fn mark_live(store: &Store) -> Result<HashSet<ChunkId>, StoreError> {
     let mut live: HashSet<ChunkId> = HashSet::new();
     let mut worklist: Vec<(ChunkId, MarkKind)> = Vec::new();
+    // Content ids referenced by live extents (through EXACT_REF targets
+    // and BASE_RESIDUAL bases). Resolved through the chunk index after the
+    // main walk.
+    let mut referenced: HashSet<ChunkId> = HashSet::new();
 
     // Roots: current root object + snapshot roots.
     worklist.push((store.current_root().id(), MarkKind::Root));
@@ -90,33 +101,93 @@ pub fn mark_live(store: &Store) -> Result<HashSet<ChunkId>, StoreError> {
                     _ => {}
                 }
             }
-            MarkKind::TreeInodeIndex => {
-                walk_tree(store, &id, TreeValue::InodeId, &mut live, &mut worklist)?
-            }
-            MarkKind::TreeDirectory => {
-                walk_tree(store, &id, TreeValue::Directory, &mut live, &mut worklist)?
-            }
+            MarkKind::TreeInodeIndex => walk_tree(
+                store,
+                &id,
+                TreeValue::InodeId,
+                &mut live,
+                &mut worklist,
+                &mut referenced,
+            )?,
+            MarkKind::TreeDirectory => walk_tree(
+                store,
+                &id,
+                TreeValue::Directory,
+                &mut live,
+                &mut worklist,
+                &mut referenced,
+            )?,
             MarkKind::TreeExtent => walk_tree(
                 store,
                 &id,
                 TreeValue::ExtentDescriptor,
                 &mut live,
                 &mut worklist,
+                &mut referenced,
             )?,
             MarkKind::TreeChunkIndex => walk_tree(
                 store,
                 &id,
-                TreeValue::ChunkDescriptor,
+                TreeValue::ChunkIndexEntry,
                 &mut live,
                 &mut worklist,
+                &mut referenced,
             )?,
-            MarkKind::TreeSnapshot => {
-                walk_tree(store, &id, TreeValue::Snapshot, &mut live, &mut worklist)?
-            }
-            MarkKind::TreeXattr => {
-                walk_tree(store, &id, TreeValue::Xattr, &mut live, &mut worklist)?
-            }
+            MarkKind::TreeSnapshot => walk_tree(
+                store,
+                &id,
+                TreeValue::Snapshot,
+                &mut live,
+                &mut worklist,
+                &mut referenced,
+            )?,
+            MarkKind::TreeXattr => walk_tree(
+                store,
+                &id,
+                TreeValue::Xattr,
+                &mut live,
+                &mut worklist,
+                &mut referenced,
+            )?,
             MarkKind::Object => {}
+        }
+    }
+
+    // Resolve extent-referenced content ids through the chunk index:
+    // their descriptors pin objects, and their own references (chains of
+    // EXACT_REF / BASE_RESIDUAL) are followed, bounded by the depth cap.
+    let limits = store.config().limits;
+    let mut queue: Vec<ChunkId> = referenced.iter().copied().collect();
+    let mut seen: HashSet<ChunkId> = HashSet::new();
+    while let Some(cid) = queue.pop() {
+        if !seen.insert(cid) {
+            continue;
+        }
+        let Some(bytes) = store.chunk_descriptor(&cid)? else {
+            continue;
+        };
+        let desc = match crate::format::descriptor::decode(
+            &bytes,
+            limits.max_descriptor_bytes,
+            limits.max_inline_bytes,
+            limits.max_palette,
+            limits.max_period,
+            limits.max_chunk_size,
+        ) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        mark_descriptor_refs(&bytes, store, &mut live, &mut worklist)?;
+        use crate::core::representation::Representation;
+        let next = match &desc {
+            Representation::ExactRef { target, .. } => Some(*target),
+            Representation::BaseResidual { base, .. } => Some(*base),
+            _ => None,
+        };
+        if let Some(n) = next {
+            if !seen.contains(&n) {
+                queue.push(n);
+            }
         }
     }
     Ok(live)
@@ -128,7 +199,7 @@ enum TreeValue {
     InodeId,
     Directory,
     ExtentDescriptor,
-    ChunkDescriptor,
+    ChunkIndexEntry,
     Snapshot,
     Xattr,
 }
@@ -139,6 +210,7 @@ fn walk_tree(
     value_kind: TreeValue,
     live: &mut HashSet<ChunkId>,
     worklist: &mut Vec<(ChunkId, MarkKind)>,
+    referenced: &mut HashSet<ChunkId>,
 ) -> Result<(), StoreError> {
     if node_id.is_zero() {
         return Ok(());
@@ -161,7 +233,7 @@ fn walk_tree(
                 TreeValue::InodeId => MarkKind::TreeInodeIndex,
                 TreeValue::Directory => MarkKind::TreeDirectory,
                 TreeValue::ExtentDescriptor => MarkKind::TreeExtent,
-                TreeValue::ChunkDescriptor => MarkKind::TreeChunkIndex,
+                TreeValue::ChunkIndexEntry => MarkKind::TreeChunkIndex,
                 TreeValue::Snapshot => MarkKind::TreeSnapshot,
                 TreeValue::Xattr => MarkKind::TreeXattr,
             };
@@ -181,9 +253,10 @@ fn walk_tree(
                             })?);
                         worklist.push((inode_id, MarkKind::Inode));
                     }
-                    TreeValue::Directory | TreeValue::Xattr => {}
-                    TreeValue::ExtentDescriptor | TreeValue::ChunkDescriptor => {
+                    TreeValue::Directory | TreeValue::Xattr | TreeValue::ChunkIndexEntry => {}
+                    TreeValue::ExtentDescriptor => {
                         mark_descriptor_refs(&e.value, store, live, worklist)?;
+                        collect_descriptor_refs(&e.value, store, referenced)?;
                     }
                     TreeValue::Snapshot => {
                         let entry = crate::store::snapshot::SnapshotEntry::decode(&e.value)
@@ -193,6 +266,39 @@ fn walk_tree(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// Collect the content ids a live extent references through its
+/// descriptor (EXACT_REF targets, BASE_RESIDUAL bases). These cids pin
+/// their chunk-index entries (and objects) during GC.
+fn collect_descriptor_refs(
+    bytes: &[u8],
+    store: &Store,
+    referenced: &mut HashSet<ChunkId>,
+) -> Result<(), StoreError> {
+    let l = store.config().limits;
+    let desc = match crate::format::descriptor::decode(
+        bytes,
+        l.max_descriptor_bytes,
+        l.max_inline_bytes,
+        l.max_palette,
+        l.max_period,
+        l.max_chunk_size,
+    ) {
+        Ok(d) => d,
+        Err(_) => return Ok(()),
+    };
+    use crate::core::representation::Representation;
+    match &desc {
+        Representation::ExactRef { target, .. } => {
+            referenced.insert(*target);
+        }
+        Representation::BaseResidual { base, .. } => {
+            referenced.insert(*base);
+        }
+        _ => {}
     }
     Ok(())
 }
