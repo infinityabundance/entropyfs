@@ -65,6 +65,7 @@ physical storage (RAW fallback) — that is a success condition, not a failure.
 | 9 (9D) | **Anchor pool**: `shared_dict_pass` selects up to four per-directory anchors greedily by marginal savings against member incumbents; each extent picks its best pool anchor during the rewrite. Heterogeneous directories get per-file dictionary choice (pool saves ~2× the single-anchor on a two-cluster fixture) | ✅ implemented (sealed with 9E) |
 | 9 (9E) | **SequenceDeep** — deep-match family (tag 0x11, feature bit 14): repcodes (REP0/REP1 carry no offset symbol) + extended length codes (one XCOPY/XLIT + u16 extra instead of 131-byte continuation runs), fed by a deep background matcher (chain 256, lazy parse with a minimum-gain threshold, rep-distance priority). Background-only; terminal. Standalone deep floor **3.786× vs fast 3.736×** on the src pack (deep wins all chunks); ladder E4 densifies structured 50,528 → 50,238 B | ✅ implemented + evidence-sealed (`campaign-1787681660-9be6bd3/`) |
 | 9 (9F) | **Gap decomposition sealed** — the remaining gap to per-file zstd is measured, not asserted: zstd with the same per-directory anchor (`-D`, self-excluded) gains only ~8.5% (the anchor policy is NOT the cap); the residual gap is ~2/3 **per-extent persistence overhead** (multi-stream rANS models + descriptors on small files, ~26.5% of footprint) and ~1/3 coder quality. Also falsified: `scale_bits` does not shrink models (symbol-count-dominated encoding). Sets the 9G direction: amortized model sharing | ✅ sealed (`campaign-1787683904-da26c75/`) |
+| 9 (9G0) | **Model-cost-aware stream selection** — the stream-level RAW/rANS gate now includes the persisted model bytes (`enc + model < raw`), so a stream whose rANS gain is smaller than its model is stored RAW. The biggest single measured win since 9F: sequence model objects on the real tree 277.6 KB → 74.3 KB (per-extent overhead 26.5% → 11.1% of footprint); tree court 2.388× → 2.775× post shared-dict; src corpus 4.327×. Plus the model-sharing **oracle** (diagnostic): intra-extent partition sharing falsified (−125 KB), directory aggregate bundle validated (+49.6 KB), pools lose to the single aggregate | ✅ implemented + evidence-sealed (`campaign-1787684918-80e36c8/`) |
 
 ## Measured results
 
@@ -133,6 +134,20 @@ oversized-descriptor fix (Phase 6) eliminated.
   persistence overhead** (per-chunk multi-stream rANS models + descriptors
   on small files; ~26.5% of the EntropyFS footprint) and **~1/3 coder
   quality**. Recorded as current state, not claims.
+- **Phase-9G0 (sealed `80e36c8`) validated the 9F diagnosis directly**:
+  the per-stream RAW/rANS gate now includes the persisted model bytes
+  (was: rANS whenever `enc < raw`, which persisted models that could
+  never pay for themselves), cutting the sequence families' model objects
+  on the real tree from 277.6 KB to 74.3 KB — per-extent overhead 26.5% →
+  11.1% of footprint, tree court 2.388× → **2.775×** post shared-dict,
+  src corpus 4.327×. The model-sharing oracle (diagnostic) then decided
+  the 9G design: sharing one model across an extent's streams is
+  falsified (−125 KB); one aggregate model per stream type per directory
+  cohort is validated (+49.6 KB) and needs no format change (the model
+  object is content-addressed and CAS-amortized); bundle pools of 2/4
+  lose to the single aggregate. 9G0's sealed campaign numbers are in
+  `evidence/performance/INDEX.md`; the oracle is a diagnostic, not a
+  claim.
 - The campaign's H2 experiment (synthetic drift corpus) is now a sealed
   **controlled series**: `67d977a` +7.2% (RANS-era floor), `a6641d1`
   −24% (SequenceRans floor, positional residuals only), `43bf17e`
