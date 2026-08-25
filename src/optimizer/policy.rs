@@ -45,6 +45,12 @@ pub struct OptimizeOptions {
     /// (`SequenceEncoder`, ladder step E1). Gated separately so A1 and the
     /// "direct rANS" baseline measure pure byte rANS.
     pub allow_sequence_rans: bool,
+    /// SequenceDeep — the post-registration deep-match family
+    /// (`SequenceDeepEncoder`, ladder step E4, Phase-9E): repcodes +
+    /// extended length codes + a deep background matcher (chain 256, lazy
+    /// parse, rep-distance priority). Background-only; independent gate so
+    /// the fast floor (E1) and the deep floor (E4) attribute separately.
+    pub allow_sequence_rans_deep: bool,
     /// SequenceDict — the post-registration cross-chunk dictionary family
     /// (`SequenceDictEncoder`, ladder step E2): local-history + external
     /// same-file dictionary in one stream. Gated separately from base
@@ -76,6 +82,7 @@ impl Default for OptimizeOptions {
             allow_configurational: true,
             allow_byte_rans: true,
             allow_sequence_rans: true,
+            allow_sequence_rans_deep: true,
             allow_sequence_dict: true,
             allow_shared_dict: true,
             allow_bases: true,
@@ -94,6 +101,7 @@ impl OptimizeOptions {
             allow_configurational: false,
             allow_byte_rans: false,
             allow_sequence_rans: false,
+            allow_sequence_rans_deep: false,
             allow_sequence_dict: false,
             allow_shared_dict: false,
             allow_bases: false,
@@ -111,6 +119,7 @@ impl OptimizeOptions {
             allow_configurational: false,
             allow_byte_rans: true,
             allow_sequence_rans: false,
+            allow_sequence_rans_deep: false,
             allow_sequence_dict: false,
             allow_shared_dict: false,
             allow_bases: false,
@@ -128,6 +137,25 @@ impl OptimizeOptions {
             allow_configurational: false,
             allow_byte_rans: false,
             allow_sequence_rans: true,
+            allow_sequence_rans_deep: false,
+            allow_sequence_dict: false,
+            allow_shared_dict: false,
+            allow_bases: false,
+            allow_temporal_bases: false,
+            allow_universe: false,
+            allow_dsfb_ranking: false,
+        }
+    }
+
+    /// RAW + SequenceDeep only (the standalone deep-floor baseline:
+    /// repcodes + extended lengths + the deep matcher over nothing else).
+    pub const fn raw_sequence_deep() -> Self {
+        Self {
+            allow_exact_ref: false,
+            allow_configurational: false,
+            allow_byte_rans: false,
+            allow_sequence_rans: false,
+            allow_sequence_rans_deep: true,
             allow_sequence_dict: false,
             allow_shared_dict: false,
             allow_bases: false,
@@ -167,6 +195,7 @@ impl OptimizeOptions {
             Representation::Raw { .. } => true,
             Representation::Rans { .. } => self.allow_byte_rans,
             Representation::SequenceRans { .. } => self.allow_sequence_rans,
+            Representation::SequenceDeep { .. } => self.allow_sequence_rans_deep,
             Representation::SequenceDict { .. } => self.allow_sequence_dict,
             Representation::SequenceSharedDict { .. } => self.allow_shared_dict,
             Representation::ExactRef { .. } => self.allow_exact_ref,
@@ -242,6 +271,13 @@ impl OptimizeOptions {
                 },
             ),
             (
+                "no-deep",
+                OptimizeOptions {
+                    allow_sequence_rans_deep: false,
+                    ..Default::default()
+                },
+            ),
+            (
                 "no-sequence-dict",
                 OptimizeOptions {
                     allow_sequence_dict: false,
@@ -295,6 +331,7 @@ impl OptimizeOptions {
                     allow_configurational: false,
                     allow_byte_rans: true,
                     allow_sequence_rans: false,
+                    allow_sequence_rans_deep: false,
                     allow_sequence_dict: false,
                     allow_shared_dict: false,
                     allow_bases: false,
@@ -312,6 +349,7 @@ impl OptimizeOptions {
                     allow_configurational: false,
                     allow_byte_rans: true,
                     allow_sequence_rans: false,
+                    allow_sequence_rans_deep: false,
                     allow_sequence_dict: false,
                     allow_shared_dict: false,
                     allow_bases: true,
@@ -329,6 +367,7 @@ impl OptimizeOptions {
                     allow_configurational: true,
                     allow_byte_rans: true,
                     allow_sequence_rans: false,
+                    allow_sequence_rans_deep: false,
                     allow_sequence_dict: false,
                     allow_shared_dict: false,
                     allow_bases: true,
@@ -346,6 +385,7 @@ impl OptimizeOptions {
                     allow_configurational: true,
                     allow_byte_rans: true,
                     allow_sequence_rans: false,
+                    allow_sequence_rans_deep: false,
                     allow_sequence_dict: false,
                     allow_shared_dict: false,
                     allow_bases: true,
@@ -363,6 +403,7 @@ impl OptimizeOptions {
                     allow_configurational: true,
                     allow_byte_rans: true,
                     allow_sequence_rans: false,
+                    allow_sequence_rans_deep: false,
                     allow_sequence_dict: false,
                     allow_shared_dict: false,
                     allow_bases: true,
@@ -380,6 +421,7 @@ impl OptimizeOptions {
                     allow_configurational: true,
                     allow_byte_rans: true,
                     allow_sequence_rans: false,
+                    allow_sequence_rans_deep: false,
                     allow_sequence_dict: false,
                     allow_shared_dict: false,
                     allow_bases: true,
@@ -397,6 +439,7 @@ impl OptimizeOptions {
                     allow_configurational: true,
                     allow_byte_rans: true,
                     allow_sequence_rans: false,
+                    allow_sequence_rans_deep: false,
                     allow_sequence_dict: false,
                     allow_shared_dict: false,
                     allow_bases: true,
@@ -406,9 +449,17 @@ impl OptimizeOptions {
                 },
                 true,
             ),
-            // E1 = the post-registration SequenceRans floor (the current
-            // production pipeline: full + background pass).
-            ("E1-sequence-rans", OptimizeOptions::default(), true),
+            // E1 = the post-registration SequenceRans floor (fast matcher
+            // only; the deep family is excluded so the E1 boundary stays
+            // the fast floor).
+            (
+                "E1-sequence-rans",
+                OptimizeOptions {
+                    allow_sequence_rans_deep: false,
+                    ..Default::default()
+                },
+                true,
+            ),
             // E2 = E1 + the cross-chunk dictionary family (SequenceDict,
             // Phase-9B): local-history + external same-file dictionary in
             // one stream, depth-capped. The shared-dictionary family is
@@ -417,6 +468,7 @@ impl OptimizeOptions {
                 "E2-sequence-dict",
                 OptimizeOptions {
                     allow_shared_dict: false,
+                    allow_sequence_rans_deep: false,
                     ..Default::default()
                 },
                 true,
@@ -424,8 +476,19 @@ impl OptimizeOptions {
             // E3 = E2 + the shared amortized dictionary family
             // (SequenceSharedDict, Phase-9C): a cross-file shared
             // dictionary chosen by the background optimizer, counted as
-            // persistent state. The current production pipeline.
-            ("E3-shared-dict", OptimizeOptions::default(), true),
+            // persistent state.
+            (
+                "E3-shared-dict",
+                OptimizeOptions {
+                    allow_sequence_rans_deep: false,
+                    ..Default::default()
+                },
+                true,
+            ),
+            // E4 = E3 + the deep-match family (SequenceDeep, Phase-9E):
+            // repcodes + extended length codes + the deep background
+            // matcher. The current production pipeline.
+            ("E4-deep", OptimizeOptions::default(), true),
         ]
     }
 }

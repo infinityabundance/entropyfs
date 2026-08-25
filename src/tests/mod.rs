@@ -18,6 +18,7 @@ pub mod optimizer;
 pub mod persistent_store;
 pub mod rank_roundtrip;
 pub mod representation_roundtrip;
+pub mod seqdeep;
 pub mod seqdict;
 pub mod seqrans_versioned_repro;
 pub mod shared_dict;

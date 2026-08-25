@@ -1012,6 +1012,12 @@ impl Store {
             Representation::SequenceDict { .. } => {
                 features |= crate::format::features::Feature::SequenceDict.mask();
             }
+            Representation::SequenceSharedDict { .. } => {
+                features |= crate::format::features::Feature::SequenceSharedDict.mask();
+            }
+            Representation::SequenceDeep { .. } => {
+                features |= crate::format::features::Feature::SequenceDeep.mask();
+            }
             _ => {}
         }
         let bytes = crate::format::descriptor::encode(descriptor)?;

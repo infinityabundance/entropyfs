@@ -470,6 +470,63 @@ fn print_shared_dict_pass_on_real_tree() {
     );
 }
 
+/// Phase-9E diagnostic: the deep matcher (SEQUENCE_DEEP) versus the fast
+/// matcher (SEQUENCE_RANS) on the src pack chunks — the per-64K matcher
+/// quality question the 9E review told us to measure before deepening.
+#[test]
+fn print_deep_vs_fast_on_pack() {
+    use crate::core::candidate::{CandidateContext, Encoder};
+    use crate::core::cost::Policy;
+    use crate::core::limits::Limits;
+    use crate::rans::sequence::{SequenceDeepEncoder, SequenceEncoder};
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let pack = source_tree_pack(root).unwrap();
+    let limits = Limits::default();
+    let policy = Policy::default();
+    let mut fast_total = 0u64;
+    let mut deep_total = 0u64;
+    let mut deep_wins = 0usize;
+    let mut chunks = 0usize;
+    for c in pack.chunks(65536) {
+        if c.len() < 128 {
+            fast_total += c.len() as u64;
+            deep_total += c.len() as u64;
+            continue;
+        }
+        let ctx = CandidateContext {
+            limits: &limits,
+            policy: &policy,
+            content_id: crate::core::extent::ChunkId::of(c),
+            bases: &[],
+            dedup: None,
+        };
+        let f = SequenceEncoder
+            .encode(c, &ctx)
+            .into_iter()
+            .map(|cand| cand.cost.persisted_bytes())
+            .min()
+            .unwrap_or(c.len() as u64);
+        let d = SequenceDeepEncoder
+            .encode(c, &ctx)
+            .into_iter()
+            .map(|cand| cand.cost.persisted_bytes())
+            .min()
+            .unwrap_or(c.len() as u64);
+        fast_total += f;
+        deep_total += d;
+        if d < f {
+            deep_wins += 1;
+        }
+        chunks += 1;
+    }
+    println!("\n==== Phase-9E: deep vs fast matcher on the src pack ====");
+    println!(
+        "chunks {chunks}  fast total {fast_total} ({:.3}x)  deep total {deep_total} ({:.3}x)  deep wins {deep_wins}",
+        pack.len() as f64 / fast_total.max(1) as f64,
+        pack.len() as f64 / deep_total.max(1) as f64
+    );
+}
+
 /// Encode `b` against dictionary `dict` with the existing SequenceDict
 /// encoder; returns the candidate's total persisted bytes if it wins
 /// (marginal cost), else None.

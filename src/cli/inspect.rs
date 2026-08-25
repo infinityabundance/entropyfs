@@ -108,6 +108,7 @@ pub fn family_name(desc: &crate::core::representation::Representation) -> &'stat
         crate::core::representation::Representation::SequenceSharedDict { .. } => {
             "SEQUENCE_SHARED_DICT"
         }
+        crate::core::representation::Representation::SequenceDeep { .. } => "SEQUENCE_DEEP",
     }
 }
 

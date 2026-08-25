@@ -197,6 +197,8 @@ pub fn estimated_read_cycles(rep: &Representation) -> u64 {
         Representation::SequenceDict { .. } => len * 5 + 64,
         // As SequenceDict plus a second dictionary chunk materialization.
         Representation::SequenceSharedDict { .. } => len * 5 + 128,
+        // Four rANS streams + the repcode/extended-length command walk.
+        Representation::SequenceDeep { .. } => len * 5,
     }
 }
 
@@ -222,6 +224,9 @@ pub fn estimated_write_cycles(rep: &Representation) -> u64 {
         Representation::SequenceDict { .. } => len * 10,
         // LZ search over input + up to two dictionaries.
         Representation::SequenceSharedDict { .. } => len * 11,
+        // Deep hash-chain search (depth 256) + lazy parsing + four
+        // histograms + four rANS encodes.
+        Representation::SequenceDeep { .. } => len * 14,
     }
 }
 
@@ -253,6 +258,8 @@ pub fn dependent_reads(rep: &Representation) -> u32 {
         Representation::SequenceDict { .. } => 3,
         // Model + enc + file dictionary + shared dictionary.
         Representation::SequenceSharedDict { .. } => 4,
+        // Model object + enc object.
+        Representation::SequenceDeep { .. } => 2,
     }
 }
 

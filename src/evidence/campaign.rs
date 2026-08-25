@@ -418,6 +418,9 @@ pub struct Baselines {
     /// Standalone SequenceRans (RAW + SequenceRans only) on the source
     /// corpus — the E1 fast floor measured without byte rANS or dedup.
     pub sequence_rans_src: Option<RunMetrics>,
+    /// Standalone SequenceDeep (RAW + the deep family only) on the source
+    /// corpus — the E4 deep floor (Phase-9E).
+    pub sequence_deep_src: Option<RunMetrics>,
     /// Explicitly waived baselines with reasons.
     pub waived: Vec<String>,
 }
@@ -1005,6 +1008,15 @@ pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
             ),
         );
     }
+    if let Some(r) = &results.baselines.sequence_deep_src {
+        line(
+            &mut log,
+            &format!(
+                "  standalone SequenceDeep (src corpus): {} → {} bytes ({:.3}x)",
+                r.logical_bytes, r.reachable_bytes, r.ratio_reachable
+            ),
+        );
+    }
 
     // 8. Device writes.
     if let Some(before) = disk_before {
@@ -1148,6 +1160,33 @@ fn full_run(
 ) -> Result<RunOutcome, String> {
     let cpu0 = cpu_ticks();
     let o = write_only(store, 3, corpus, options)?;
+    finish_run(store, corpus, o, cpu0, options)
+}
+
+/// Phase-9E: the deep family is background-only, so a standalone deep
+/// baseline writes with the foreground profile (RAW-ish) and then runs the
+/// background optimizer pass with the same options before measuring.
+fn full_run_deep(
+    store: &Store,
+    corpus: &Corpus,
+    options: OptimizeOptions,
+) -> Result<RunOutcome, String> {
+    let cpu0 = cpu_ticks();
+    let o = write_only(store, 3, corpus, options)?;
+    crate::optimizer::background::optimize_pass(store, options, None, None)
+        .map_err(|e| e.to_string())?;
+    finish_run(store, corpus, o, cpu0, options)
+}
+
+/// The fsync + read-back + accounting half shared by every full-run
+/// variant.
+fn finish_run(
+    store: &Store,
+    corpus: &Corpus,
+    o: WriteOutcome,
+    cpu0: (f64, f64),
+    _options: OptimizeOptions,
+) -> Result<RunOutcome, String> {
     let (write_metrics, write_lats) = (o.metrics, o.latencies);
 
     // fsync (durability barrier) latency.
@@ -1458,7 +1497,8 @@ fn extent_decomposition(
             }
             Representation::Rans { model, enc_obj, .. }
             | Representation::SequenceRans { model, enc_obj, .. }
-            | Representation::SparseBlock64 { model, enc_obj, .. } => {
+            | Representation::SparseBlock64 { model, enc_obj, .. }
+            | Representation::SequenceDeep { model, enc_obj, .. } => {
                 model_objs.insert(*model);
                 payload_objs.insert(*enc_obj);
                 refs.push(*model);
@@ -1663,9 +1703,10 @@ fn run_baselines(
     b.zstd_per_64k_level_1 = zstd_per_64k_baseline(src_pack, 1);
     b.zstd_per_64k_level_19 = zstd_per_64k_baseline(src_pack, 19);
 
-    // Direct byte rANS (same backend, A1-pure) on the source corpus, and
-    // the standalone SequenceRans fast floor (RAW + SequenceRans only) so
-    // the two floors are measured separately.
+    // Direct byte rANS (same backend, A1-pure) on the source corpus, the
+    // standalone SequenceRans fast floor, and the standalone deep floor
+    // (Phase-9E: repcodes + extended lengths + deep matcher), so the three
+    // floors are measured separately.
     if let Some(src) = corpora.iter().find(|c| c.name == "src") {
         let tmp = scratch_tempdir(&opts.scratch_dir, "rans-")?;
         let store = fresh_store(tmp.path())?;
@@ -1675,6 +1716,10 @@ fn run_baselines(
         let store2 = fresh_store(tmp2.path())?;
         let outcome2 = full_run(&store2, src, OptimizeOptions::raw_sequence())?;
         b.sequence_rans_src = Some(outcome2.metrics);
+        let tmp3 = scratch_tempdir(&opts.scratch_dir, "deep-")?;
+        let store3 = fresh_store(tmp3.path())?;
+        let outcome3 = full_run_deep(&store3, src, OptimizeOptions::raw_sequence_deep())?;
+        b.sequence_deep_src = Some(outcome3.metrics);
     }
 
     // Explicit waivers: writable compressed-FS (btrfs) and read-only

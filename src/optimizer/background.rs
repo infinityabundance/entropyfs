@@ -138,7 +138,7 @@ pub fn optimize_pass(
             }
             stats.scanned += 1;
             resume_offset = 0; // next inode starts from its first extent
-            evaluate_commit_extent(store, at, start, desc_bytes, None, options, &mut stats)?;
+            evaluate_commit_extent(store, at, start, desc_bytes, &[], options, &mut stats)?;
         }
         idx += 1;
     }
@@ -153,16 +153,19 @@ pub fn optimize_pass(
 }
 
 /// Evaluate one extent against the full search (plus an optional shared
-/// dictionary, Phase-9C) and commit a strictly cheaper valid replacement
-/// with the CAS gate. Shared by `optimize_pass` (no shared dictionary) and
-/// `shared_dict_pass` (directory anchor), so the commit path, validation,
-/// and bookkeeping can never diverge between the two passes.
+/// dictionary POOL, Phase-9C/9D) and commit a strictly cheaper valid
+/// replacement with the CAS gate. Shared by `optimize_pass` (no shared
+/// dictionary) and `shared_dict_pass` (directory anchor pool), so the
+/// commit path, validation, and bookkeeping can never diverge between the
+/// two passes. Each pool anchor runs the full guided search (which
+/// includes every anchor-independent family), so the winner is the best
+/// across all anchors.
 fn evaluate_commit_extent(
     store: &Store,
     ino: u64,
     start: u64,
     desc_bytes: Vec<u8>,
-    shared: Option<crate::core::candidate::BaseChunk>,
+    shared_pool: &[crate::core::candidate::BaseChunk],
     options: OptimizeOptions,
     stats: &mut BackgroundStats,
 ) -> Result<(), StoreError> {
@@ -193,44 +196,65 @@ fn evaluate_commit_extent(
     // depth-0 encoding even when the guided search prefers the chain
     // (λ_depth tradeoff; §11).
     let rebased = crate::optimizer::rebase::flatten_if_deep(store, start, &desc, &bytes, &cid)?;
-    let ctx = GuidedContext {
-        ino,
-        offset: start,
-        target: &bytes,
-        prev_version: None,
-        // Phase-9B: the previous same-file chunk is the SequenceDict
-        // dictionary (background: from the committed store).
-        dictionary: if start >= limits.chunk_class {
-            store.base_chunk_at(ino, start - limits.chunk_class, bytes.len())?
-        } else {
-            None
-        },
-        // Phase-9C: the shared dictionary supplied by `shared_dict_pass`
-        // (None in the ordinary pass).
-        shared,
-        pending: None,
-        mode: SearchMode::Background,
-    };
-    let searched = match encode_guided(store, &ctx, options) {
-        Ok(o) => Some(o),
-        Err(_) => {
-            stats.errors += 1;
-            None
+    let mut searched: Vec<(crate::store::ExtentUpdate, u64)> = Vec::new();
+    if shared_pool.is_empty() {
+        let ctx = GuidedContext {
+            ino,
+            offset: start,
+            target: &bytes,
+            prev_version: None,
+            // Phase-9B: the previous same-file chunk is the SequenceDict
+            // dictionary (background: from the committed store).
+            dictionary: if start >= limits.chunk_class {
+                store.base_chunk_at(ino, start - limits.chunk_class, bytes.len())?
+            } else {
+                None
+            },
+            shared: None,
+            pending: None,
+            mode: SearchMode::Background,
+        };
+        match encode_guided(store, &ctx, options) {
+            Ok(o) => searched.push((o.update, 0)),
+            Err(_) => stats.errors += 1,
         }
-    };
-    // Choose the cheaper of the guided outcome and the rebased candidate
-    // (whichever is strictly cheaper than current). The persisted-byte
-    // total is category-agnostic: descriptor + new object payloads +
-    // attributable integrity.
+    } else {
+        for anchor in shared_pool {
+            let ctx = GuidedContext {
+                ino,
+                offset: start,
+                target: &bytes,
+                prev_version: None,
+                dictionary: if start >= limits.chunk_class {
+                    store.base_chunk_at(ino, start - limits.chunk_class, bytes.len())?
+                } else {
+                    None
+                },
+                // Phase-9D: the pool anchor (each full search also covers
+                // every anchor-independent family).
+                shared: Some(anchor.clone()),
+                pending: None,
+                mode: SearchMode::Background,
+            };
+            match encode_guided(store, &ctx, options) {
+                Ok(o) => searched.push((o.update, 0)),
+                Err(_) => stats.errors += 1,
+            }
+        }
+    }
+    // Choose the cheapest guided outcome (any anchor) and the rebased
+    // candidate, whichever is strictly cheaper than current. The
+    // persisted-byte total is category-agnostic: descriptor + new object
+    // payloads + attributable integrity.
     let current_bytes = current_persisted_bytes(store, &desc);
     let mut best: Option<crate::store::ExtentUpdate> = None;
     let mut best_bytes = u64::MAX;
-    if let Some(outcome) = &searched {
-        if outcome.update.descriptor != desc {
-            let b = update_persisted_bytes(&outcome.update);
+    for (update, _) in &searched {
+        if update.descriptor != desc {
+            let b = update_persisted_bytes(update);
             if b < best_bytes {
                 best_bytes = b;
-                best = Some(outcome.update.clone());
+                best = Some(update.clone());
             }
         }
     }
@@ -286,16 +310,17 @@ fn update_persisted_bytes(update: &crate::store::ExtentUpdate) -> u64 {
     total.saturating_add(4) // attributable integrity
 }
 
-/// Phase-9C: the shared amortized dictionary pass.
+/// Phase-9C/9D: the shared amortized dictionary pass.
 ///
-/// For each directory with ≥ 2 candidate chunks, select one *anchor*: the
-/// member first-chunk that minimizes the group's total encoded size when
-/// every member extent is encoded against it (bounded candidate set, exact
-/// deterministic cost, deterministic tie-break). The anchor is an existing
-/// terminal chunk — its persisted state is accounted where it is
-/// materialized, so the group pays only reference + read cost, which the
-/// strict-cheaper commit gate enforces. Then rewrite every member extent
-/// with the anchor as the SEQUENCE_SHARED_DICT dictionary when strictly
+/// For each directory with ≥ 2 candidate chunks, select a *pool* of
+/// anchors (Phase-9D): member first-chunks chosen greedily so that each
+/// added anchor maximizes the group's marginal SAVINGS against the
+/// members' incumbent persisted bytes (exact deterministic cost,
+/// deterministic tie-break). Each anchor is an existing terminal chunk —
+/// its persisted state is accounted where it is materialized, so the
+/// group pays only reference + read cost, which the strict-cheaper commit
+/// gate enforces. Then rewrite every member extent with the cheapest
+/// pool anchor as the SEQUENCE_SHARED_DICT dictionary when strictly
 /// cheaper (same commit path as `optimize_pass`, incl. the CAS gate and
 /// byte-exact validation).
 ///
@@ -308,16 +333,27 @@ pub fn shared_dict_pass(
     options: OptimizeOptions,
     max_extents: Option<u64>,
 ) -> Result<BackgroundStats, StoreError> {
+    shared_dict_pass_pool(store, options, max_extents, MAX_ANCHOR_POOL)
+}
+
+/// `shared_dict_pass` with an explicit pool-size bound (tests compare the
+/// single-anchor control against the default pool).
+pub(crate) fn shared_dict_pass_pool(
+    store: &Store,
+    options: OptimizeOptions,
+    max_extents: Option<u64>,
+    max_pool: usize,
+) -> Result<BackgroundStats, StoreError> {
     let mut stats = BackgroundStats::default();
     if !options.allow_shared_dict {
         return Ok(stats);
     }
     // 1. Inode → directory map (batched reverse scan, like `parent_of`).
     let dir_of = build_dir_map(store)?;
-    // 2. Group member first-chunks by directory, carrying the descriptor
-    //    and its incumbent persisted bytes so anchor selection optimizes
-    //    the ACTUAL rewrite objective (strictly-cheaper vs the current
-    //    representation), not a raw-bytes comparison.
+    // 2. Group member first-chunks by directory, carrying the incumbent
+    //    persisted bytes so anchor selection optimizes the ACTUAL rewrite
+    //    objective (strictly-cheaper vs the current representation), not a
+    //    raw-bytes comparison.
     let mut by_dir: std::collections::BTreeMap<u64, Vec<MemberChunk>> =
         std::collections::BTreeMap::new();
     for ino in store.all_inodes()? {
@@ -360,19 +396,20 @@ pub fn shared_dict_pass(
             .or_default()
             .push(MemberChunk { bytes, incumbent });
     }
-    // 3. Anchor selection per directory.
-    let mut anchors: std::collections::BTreeMap<u64, crate::core::candidate::BaseChunk> =
+    // 3. Anchor-pool selection per directory.
+    let mut pools: std::collections::BTreeMap<u64, Vec<crate::core::candidate::BaseChunk>> =
         std::collections::BTreeMap::new();
     for (dir, members) in &by_dir {
         if members.len() < 2 {
             continue;
         }
-        if let Some(anchor) = select_anchor(store, members)? {
-            anchors.insert(*dir, anchor);
+        let pool = select_anchor_pool(store, members, max_pool)?;
+        if !pool.is_empty() {
+            pools.insert(*dir, pool);
         }
     }
     // 4. Rewrite loop (the same per-extent evaluation + CAS + commit path
-    //    as `optimize_pass`, with the directory's anchor supplied).
+    //    as `optimize_pass`, with the directory's anchor pool supplied).
     let inos = store.all_inodes()?;
     let mut scanned = 0u64;
     'ino: for ino in &inos {
@@ -390,7 +427,7 @@ pub fn shared_dict_pass(
         let Some(dir) = dir_of.get(&at).copied() else {
             continue;
         };
-        let Some(anchor) = anchors.get(&dir).cloned() else {
+        let Some(pool) = pools.get(&dir) else {
             continue;
         };
         let limits = *store.limits();
@@ -408,15 +445,7 @@ pub fn shared_dict_pass(
             }
             scanned += 1;
             stats.scanned += 1;
-            evaluate_commit_extent(
-                store,
-                at,
-                start,
-                desc_bytes,
-                Some(anchor.clone()),
-                options,
-                &mut stats,
-            )?;
+            evaluate_commit_extent(store, at, start, desc_bytes, pool, options, &mut stats)?;
         }
     }
     Ok(stats)
@@ -461,8 +490,8 @@ fn build_dir_map(store: &Store) -> Result<std::collections::HashMap<u64, u64>, S
 /// Candidates are bounded: distinct first-chunks, largest first, at most
 /// `MAX_ANCHOR_CANDIDATES`, each at least `MIN_ANCHOR_BYTES`, and each
 /// must be a terminal descriptor (reference depth 0) so rewritten extents
-/// stay at depth ≤ 1. Returns `None` when no candidate saves anything (the
-/// group must save more than reference + read cost).
+/// stay at depth ≤ 1. Returns an empty pool when no candidate saves
+/// anything (the group must save more than reference + read cost).
 struct MemberChunk {
     /// Materialized first-chunk bytes.
     bytes: Vec<u8>,
@@ -470,10 +499,21 @@ struct MemberChunk {
     incumbent: u64,
 }
 
-fn select_anchor(
+/// Per-directory anchor-POOL selection (Phase-9D): instead of one anchor,
+/// pick up to `MAX_ANCHOR_POOL` member first-chunks greedily so each added
+/// anchor maximizes the group's MARGINAL savings (members already covered
+/// by a selected anchor contribute only the improvement). A member picks
+/// its best pool anchor during the rewrite, so heterogeneous directories
+/// (mixed styles/content classes) get per-file dictionary choice.
+///
+/// Deterministic: savings are exact candidate costs; ties break by ChunkId
+/// bytes. The self-member of each candidate is excluded from its score (a
+/// file can never use itself as its own dictionary).
+fn select_anchor_pool(
     store: &Store,
     members: &[MemberChunk],
-) -> Result<Option<crate::core::candidate::BaseChunk>, StoreError> {
+    max_pool: usize,
+) -> Result<Vec<crate::core::candidate::BaseChunk>, StoreError> {
     use crate::core::candidate::{CandidateContext, Encoder};
     let limits = *store.limits();
     let policy = *store.policy();
@@ -494,7 +534,13 @@ fn select_anchor(
             break;
         }
     }
-    let mut best: Option<(u64, crate::core::candidate::BaseChunk)> = None;
+    // Candidate metadata: chunk id, terminal check, savings per member.
+    struct Cand {
+        cid: ChunkId,
+        bytes: Vec<u8>,
+        saved: Vec<u64>, // per-member savings (0 for the self-member)
+    }
+    let mut pool_cands: Vec<Cand> = Vec::new();
     for c in cands {
         // Terminal anchors only (v1: no shared-dict chains).
         let Some(desc_bytes) = store.chunk_descriptor(&ChunkId::of(c))? else {
@@ -514,11 +560,10 @@ fn select_anchor(
             continue;
         }
         let cid = ChunkId::of(c);
-        // Savings vs the members' incumbents, excluding the anchor's own
-        // member (a file cannot reference itself).
-        let mut saved = 0u64;
+        let mut saved = Vec::with_capacity(members.len());
         for m in members {
             if m.bytes == c {
+                saved.push(0); // a file cannot reference itself
                 continue;
             }
             let ctx = CandidateContext {
@@ -542,32 +587,66 @@ fn select_anchor(
                 .map(|cand| cand.cost.persisted_bytes())
                 .min()
                 .unwrap_or(m.incumbent);
-            saved = saved.saturating_add(m.incumbent.saturating_sub(cost));
+            saved.push(m.incumbent.saturating_sub(cost));
         }
-        if saved == 0 {
-            continue;
-        }
-        let anchor = crate::core::candidate::BaseChunk {
-            id: cid,
+        pool_cands.push(Cand {
+            cid,
             bytes: c.to_vec(),
-            depth: 0,
-        };
-        let better = match &best {
-            Some((best_saved, best_anchor)) => {
-                saved > *best_saved
-                    || (saved == *best_saved && anchor.id.as_bytes() < best_anchor.id.as_bytes())
-            }
-            None => true,
-        };
-        if better {
-            best = Some((saved, anchor));
-        }
+            saved,
+        });
     }
-    Ok(best.map(|(_, a)| a))
+    // Greedy selection: repeatedly take the candidate with the largest
+    // marginal savings over the already-covered members, up to the pool
+    // size or until nothing more is gained.
+    let mut pool: Vec<crate::core::candidate::BaseChunk> = Vec::new();
+    let mut covered: Vec<u64> = vec![0; members.len()];
+    let mut selected: Vec<bool> = vec![false; pool_cands.len()];
+    for _ in 0..max_pool {
+        let mut best_idx: Option<usize> = None;
+        let mut best_gain: u64 = 0;
+        let mut best_id: ChunkId = ChunkId::ZERO;
+        for (i, cand) in pool_cands.iter().enumerate() {
+            if selected[i] {
+                continue;
+            }
+            let mut gain = 0u64;
+            for (m, &s) in cand.saved.iter().enumerate() {
+                gain = gain.saturating_add(s.saturating_sub(covered[m]));
+            }
+            let better = match best_idx {
+                None => gain > 0,
+                Some(_) => {
+                    gain > best_gain
+                        || (gain == best_gain && cand.cid.as_bytes() < best_id.as_bytes())
+                }
+            };
+            if better && gain > 0 {
+                best_idx = Some(i);
+                best_gain = gain;
+                best_id = cand.cid;
+            }
+        }
+        let Some(idx) = best_idx else {
+            break; // nothing more to gain
+        };
+        let cand = &pool_cands[idx];
+        for (m, &s) in cand.saved.iter().enumerate() {
+            covered[m] = covered[m].max(s);
+        }
+        selected[idx] = true;
+        pool.push(crate::core::candidate::BaseChunk {
+            id: cand.cid,
+            bytes: cand.bytes.clone(),
+            depth: 0,
+        });
+    }
+    Ok(pool)
 }
 
 /// Anchor-candidate bound per directory (largest first).
 const MAX_ANCHOR_CANDIDATES: usize = 12;
+/// Pool size bound (greedy marginal selection).
+const MAX_ANCHOR_POOL: usize = 4;
 /// Anchors smaller than this cannot amortize the reference cost.
 const MIN_ANCHOR_BYTES: usize = 512;
 

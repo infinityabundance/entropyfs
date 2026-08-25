@@ -1,5 +1,46 @@
 # EntropyFS changelog
 
+## v0.5.0 (2026-08-25)
+
+**Format note:** v0.5.0 retains **format version v1** (no format-version
+bump) and adds one new **incompat representation feature** as an explicit
+on-disk feature bit — `SEQUENCE_DEEP` (bit 14). An implementation that
+does not understand that bit must refuse the store. Additive,
+feature-gated, same pattern as v0.2.0 (bits 10/11), v0.3.0 (bit 12), and
+v0.4.0 (bit 13). **Correction:** the superblock feature-bit tracker now
+also records `SEQUENCE_SHARED_DICT` (bit 13) — the v0.4.0 write path
+committed the descriptors but the tracker missed the bit, so an old
+tool could open such a store and only fail at descriptor decode instead
+of at the incompat gate. The tracker is now exhaustive over the
+sequence families and regression-tested (`tests/shared_dict.rs`,
+`tests/seqdeep.rs`).
+
+Milestone content (Phase 9D + 9E):
+
+- Phase 9D — the anchor POOL: `shared_dict_pass` now selects up to four
+  per-directory anchors greedily by marginal savings against member
+  incumbents, and each extent picks its best pool anchor during the
+  rewrite. Heterogeneous directories (mixed styles/content classes) get
+  per-file dictionary choice; the pool beats the single anchor by ~2×
+  savings on a two-cluster directory fixture.
+- Phase 9E — `SEQUENCE_DEEP` (tag 0x11, feature bit 14): repcodes
+  (REP0/REP1 copies carry no offset symbol) + extended length codes (one
+  XCOPY/XLIT plus a u16 extra instead of runs of 131-byte continuation
+  commands) fed by a deep background matcher (hash chains to depth 256,
+  lazy parsing with a minimum-gain threshold, rep-distance priority).
+  Background-only; terminal (depth 0).
+- Ablation: `allow_sequence_rans_deep` gate, `no-deep` leave-one-out
+  mode, cumulative-ladder step E4 (post-registration extension),
+  `raw_sequence_deep()` standalone baseline (foreground write + a
+  background pass, since the family is background-only).
+- Evidence (sealed campaign, 7/7 admission): tree court on the real
+  source tree — EntropyFS per-file writes **2.214× → 2.380× post-GC**
+  after the shared-dict pool + deep background pass (155 extents, ~97.8
+  KiB saved); standalone deep floor **3.796× vs the fast floor 3.744×**
+  on the src pack (deep wins all 41 chunks); ladder E4 densifies the
+  structured corpus 50,528 → 50,238 B. Archived under
+  `evidence/performance/` (`INDEX.md` is authoritative).
+
 ## v0.4.0 (2026-08-25)
 
 **Format note:** v0.4.0 retains **format version v1** (no format-version

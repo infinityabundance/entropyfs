@@ -33,6 +33,8 @@ pub enum Feature {
     SequenceDict = 12,
     /// SEQUENCE_SHARED_DICT descriptors present (incompat).
     SequenceSharedDict = 13,
+    /// SEQUENCE_DEEP descriptors present (incompat).
+    SequenceDeep = 14,
 }
 
 impl Feature {
@@ -48,7 +50,8 @@ impl Feature {
             | Feature::SequenceRans
             | Feature::SparseBlock64
             | Feature::SequenceDict
-            | Feature::SequenceSharedDict => FeatureSetKind::Incompat,
+            | Feature::SequenceSharedDict
+            | Feature::SequenceDeep => FeatureSetKind::Incompat,
             Feature::Encrypted => FeatureSetKind::RoCompat,
             Feature::ExtentDeltaIndex | Feature::OptimizerRewrite => FeatureSetKind::Compat,
         }
@@ -158,7 +161,8 @@ pub fn check(on_disk: FeatureBits, _want_write: bool) -> Compatibility {
         | Feature::SequenceRans.mask()
         | Feature::SparseBlock64.mask()
         | Feature::SequenceDict.mask()
-        | Feature::SequenceSharedDict.mask();
+        | Feature::SequenceSharedDict.mask()
+        | Feature::SequenceDeep.mask();
     if on_disk.incompat & !supported_incompat != 0 {
         return Compatibility::Refused(format!(
             "unsupported incompat feature bits: 0x{:016x}",

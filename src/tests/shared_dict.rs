@@ -155,6 +155,12 @@ fn shared_dict_pass_rewrites_family_correlated_chunks() {
     // Byte-exact read-back.
     assert_eq!(store.read_file(ia, 0, 65536).unwrap(), a);
     assert_eq!(store.read_file(ib, 0, 65536).unwrap(), b);
+    // The superblock feature bits must carry the SEQUENCE_SHARED_DICT
+    // incompat bit (bit 13 ⇒ mask 1 << 12).
+    assert!(
+        store.features_in_use() & crate::format::features::Feature::SequenceSharedDict.mask() != 0,
+        "feature bit 13 must be set after a shared-dict rewrite"
+    );
     // Rewritten extents are terminal-anchored: depth exactly 1.
     for ino in [ia, ib] {
         let inode = store.get_inode(ino).unwrap().unwrap();
@@ -326,4 +332,73 @@ fn shared_dict_disabled_by_option() {
     assert_eq!(stats.rewritten, 0, "gated pass must not rewrite");
     assert_ne!(extent_family(&store, ia, 0), "SEQUENCE_SHARED_DICT");
     assert_ne!(extent_family(&store, ib, 0), "SEQUENCE_SHARED_DICT");
+}
+
+/// Phase-9D: the anchor POOL beats a single anchor when a directory mixes
+/// two style clusters. Two distinct random-looking headers (H1, H2) in ONE
+/// directory: a single anchor covers one cluster well; the pool must cover
+/// BOTH, so every member gets a dictionary win and the post-GC footprint
+/// is materially smaller than the single-anchor pass.
+#[test]
+fn anchor_pool_covers_heterogeneous_directory() {
+    let dir = TempDir::new().unwrap();
+    let store = create_store(&dir);
+    let d = create_dir_under(&store, 1, b"mixed");
+    let h1 = noise(8192, 0x1111_2222_3333_4444);
+    let h2 = noise(8192, 0x5555_6666_7777_8888);
+    let mut inos = Vec::new();
+    let mut data = Vec::new();
+    for i in 0..6u64 {
+        let h = if i % 2 == 0 { &h1 } else { &h2 };
+        let bytes = family_chunk(0x1000_0000 + i, h);
+        let ino = create_file_under(&store, d, format!("f{i}.bin").as_bytes());
+        store.write_region(ino, 0, &bytes).unwrap();
+        inos.push(ino);
+        data.push(bytes);
+    }
+
+    // Single-anchor control (pool of one) on a fresh store.
+    let d1 = TempDir::new().unwrap();
+    let s1 = create_store(&d1);
+    let dd = create_dir_under(&s1, 1, b"mixed");
+    for (i, bytes) in data.iter().enumerate() {
+        let ino = create_file_under(&s1, dd, format!("f{i}.bin").as_bytes());
+        s1.write_region(ino, 0, bytes).unwrap();
+    }
+    crate::optimizer::background::shared_dict_pass_pool(&s1, OptimizeOptions::default(), None, 1)
+        .unwrap();
+    crate::store::gc::collect(&s1, &CrashHooks::none()).unwrap();
+    let n1 = store_reachable(&s1);
+
+    // The pool pass (default) on the same data.
+    let stats =
+        crate::optimizer::background::shared_dict_pass(&store, OptimizeOptions::default(), None)
+            .unwrap();
+    crate::store::gc::collect(&store, &CrashHooks::none()).unwrap();
+    let n2 = store_reachable(&store);
+    assert!(
+        stats.rewritten as usize >= data.len() - 2,
+        "pool must rewrite nearly every member (got {})",
+        stats.rewritten
+    );
+    assert!(
+        n2 < n1,
+        "pool must beat single anchor: pool {n2} vs single {n1}"
+    );
+    for (i, &ino) in inos.iter().enumerate() {
+        assert_eq!(store.read_file(ino, 0, 65536).unwrap(), data[i]);
+    }
+    let report = crate::fsck::fsck(dir.path(), &crate::fsck::FsckOptions::default()).unwrap();
+    assert!(report.is_clean(), "fsck: {}", report.render());
+}
+
+fn store_reachable(store: &Store) -> u64 {
+    let unreachable = crate::store::gc::unreachable_bytes(store).unwrap();
+    let records_total: u64 = store
+        .object_index()
+        .iter()
+        .into_iter()
+        .map(|(_, loc)| loc.total_size())
+        .sum();
+    records_total.saturating_sub(unreachable)
 }

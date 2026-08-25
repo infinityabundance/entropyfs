@@ -473,6 +473,41 @@ pub enum Representation {
         /// Materialized length.
         len: u64,
     },
+    /// Deep-match entropy coding (Phase-9E): the SEQUENCE_RANS idea with a
+    /// deeper bounded matcher and a richer command language — recent-
+    /// distance repcodes (REP0/REP1 need no offset symbol) and extended
+    /// length codes (one XCOPY/XLIT command plus a u16 extra instead of a
+    /// run of 131-byte continuation commands). Background-only (the
+    /// foreground keeps the fast greedy matcher); the four streams
+    /// (commands, literals, offsets, lengths) share the SEQUENCE_RANS
+    /// rANS/raw codec. Decoder semantics are explicit and bounded: every
+    /// command carries its own length and the rep history is a fixed
+    /// two-slot register.
+    SequenceDeep {
+        /// Content id of the model object (4 length-prefixed slots).
+        model: ChunkId,
+        /// Content id of the encoded object (4 concatenated streams:
+        /// commands, literals, offsets, extended lengths).
+        enc_obj: ChunkId,
+        /// Model scale bits (shared by all four streams).
+        scale_bits: u8,
+        /// Codec used for the streams.
+        codec: RansCodec,
+        /// Encoded command-stream length (bytes).
+        seq_len: u32,
+        /// Encoded literal-stream length (bytes).
+        lit_len: u32,
+        /// Encoded offset-stream length (bytes).
+        off_len: u32,
+        /// Encoded extended-length-stream length (bytes).
+        len_len: u32,
+        /// Command count (= decoded command-stream length).
+        cmds: u32,
+        /// Decoded literal-stream length (total literal bytes).
+        lit_out: u32,
+        /// Materialized length.
+        len: u64,
+    },
 }
 
 impl Representation {
@@ -493,7 +528,8 @@ impl Representation {
             | Representation::SequenceRans { len, .. }
             | Representation::SparseBlock64 { len, .. }
             | Representation::SequenceDict { len, .. }
-            | Representation::SequenceSharedDict { len, .. } => *len,
+            | Representation::SequenceSharedDict { len, .. }
+            | Representation::SequenceDeep { len, .. } => *len,
             Representation::Inline { data } => data.len() as u64,
         }
     }
@@ -522,6 +558,7 @@ impl Representation {
             Representation::SparseBlock64 { .. } => 0x0E,
             Representation::SequenceDict { .. } => 0x0F,
             Representation::SequenceSharedDict { .. } => 0x10,
+            Representation::SequenceDeep { .. } => 0x11,
         }
     }
 
@@ -544,6 +581,7 @@ impl Representation {
             Representation::SparseBlock64 { .. } => "SPARSE_BLOCK64",
             Representation::SequenceDict { .. } => "SEQUENCE_DICT",
             Representation::SequenceSharedDict { .. } => "SEQUENCE_SHARED_DICT",
+            Representation::SequenceDeep { .. } => "SEQUENCE_DEEP",
         }
     }
 
@@ -585,6 +623,8 @@ impl Representation {
             Representation::SequenceSharedDict { .. } => {
                 32 + 4 + 32 + 4 + 32 + 32 + 1 + 1 + 4 + 4 + 4 + 4 + 4 + 4
             }
+            // model + enc + scale + codec + seq/lit/off/len/cmds/lit_out.
+            Representation::SequenceDeep { .. } => 32 + 32 + 1 + 1 + 4 + 4 + 4 + 4 + 4 + 4,
         };
         base + payload
     }
@@ -959,6 +999,42 @@ impl Representation {
                 }
                 let max_stream = limits.max_chunk_size.saturating_add(64);
                 for s in [*seq_len, *lit_len, *off_len, *src_len] {
+                    if s as u64 > max_stream {
+                        return Err(ReprError::SequenceStreamTooLarge);
+                    }
+                }
+                if (*lit_out as u64) > *len {
+                    return Err(ReprError::SequenceLitOutMismatch);
+                }
+                if *cmds == 0 && *len > 0 {
+                    return Err(ReprError::SequenceNoCommands);
+                }
+                if (*cmds as u64) > *len {
+                    return Err(ReprError::SequenceCmdsMismatch);
+                }
+            }
+            Representation::SequenceDeep {
+                model,
+                enc_obj,
+                scale_bits,
+                seq_len,
+                lit_len,
+                off_len,
+                len_len,
+                cmds,
+                lit_out,
+                len,
+                ..
+            } => {
+                check_len(*len, limits)?;
+                if model.is_zero() || enc_obj.is_zero() {
+                    return Err(ReprError::ZeroObjectId);
+                }
+                if !(1..=16).contains(scale_bits) {
+                    return Err(ReprError::BadScaleBits);
+                }
+                let max_stream = limits.max_chunk_size.saturating_add(64);
+                for s in [*seq_len, *lit_len, *off_len, *len_len] {
                     if s as u64 > max_stream {
                         return Err(ReprError::SequenceStreamTooLarge);
                     }

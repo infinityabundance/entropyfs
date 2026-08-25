@@ -291,6 +291,14 @@ pub fn encode_guided(
         }
         candidates.extend(cands.into_iter().map(|c| (Channel::Rans, c)));
     }
+    if options.allow_sequence_rans_deep && !decisive && ctx.mode == SearchMode::Background {
+        // E4 (Phase-9E): the deep-match family — repcodes + extended
+        // length codes + the deep background matcher (chain 256, lazy
+        // parse, rep-distance priority). Background-only: the foreground
+        // keeps the fast greedy matcher and its small CPU budget.
+        let cands = crate::rans::sequence::SequenceDeepEncoder.encode(ctx.target, &base_ctx);
+        candidates.extend(cands.into_iter().map(|c| (Channel::Rans, c)));
+    }
     if options.allow_sequence_dict && !decisive {
         // E2 (Phase-9B): the cross-chunk dictionary family. The previous
         // same-file chunk's bytes are already in hand (batch overlay / RMW

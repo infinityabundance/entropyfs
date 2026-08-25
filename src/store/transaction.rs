@@ -457,7 +457,8 @@ pub(crate) fn descriptor_objects(
         | Representation::SequenceRans { model, enc_obj, .. }
         | Representation::SparseBlock64 { model, enc_obj, .. }
         | Representation::SequenceDict { model, enc_obj, .. }
-        | Representation::SequenceSharedDict { model, enc_obj, .. } => {
+        | Representation::SequenceSharedDict { model, enc_obj, .. }
+        | Representation::SequenceDeep { model, enc_obj, .. } => {
             out.push(*model);
             out.push(*enc_obj);
         }

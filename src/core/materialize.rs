@@ -924,6 +924,165 @@ pub fn materialize(
             }
             Ok(())
         }
+        Representation::SequenceDeep {
+            model,
+            enc_obj,
+            scale_bits,
+            codec,
+            seq_len,
+            lit_len,
+            off_len,
+            len_len,
+            cmds,
+            lit_out,
+            len,
+        } => {
+            if *len > limits.max_alloc_bytes {
+                return Err(MaterializeError::AllocTooLarge {
+                    requested: *len,
+                    max: limits.max_alloc_bytes,
+                });
+            }
+            // Every command writes at least one byte, so the command count
+            // can never exceed the output length.
+            if (*cmds as u64) > *len {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "sequence command count exceeds output length".into(),
+                ));
+            }
+            let d = crate::rans::sequence::decode_deep_streams(
+                ctx,
+                limits,
+                crate::rans::sequence::StreamRefs {
+                    model: *model,
+                    enc_obj: *enc_obj,
+                    scale_bits: *scale_bits,
+                    codec: *codec,
+                },
+                crate::rans::sequence::DeepLens {
+                    seq_len: *seq_len,
+                    lit_len: *lit_len,
+                    off_len: *off_len,
+                    len_len: *len_len,
+                    cmds: *cmds,
+                    lit_out: *lit_out,
+                },
+            )?;
+            let (commands, literals, offsets, lengths) =
+                (d.commands, d.literals, d.offsets, d.lengths);
+            // Walk the commands: LIT appends verbatim; COPY/XCOPY consume a
+            // NEW u16 distance (byte-progressive copy) and update the rep
+            // register; REP0/REP1 copy at the remembered distance without
+            // consuming an offset; XCOPY/XLIT consume a u16 length extra.
+            let mut pos = 0usize;
+            let mut lit = 0usize;
+            let mut off = 0usize;
+            let mut lenp = 0usize;
+            let mut rep0 = 0usize;
+            let mut rep1 = 0usize;
+            for &cmd in &commands {
+                if cmd <= crate::rans::sequence::DEEP_LIT_MAX {
+                    let run = cmd as usize + 1;
+                    if pos + run > output.len() || lit + run > literals.len() {
+                        return Err(MaterializeError::InvalidDescriptor(
+                            "literal run overflow".into(),
+                        ));
+                    }
+                    output[pos..pos + run].copy_from_slice(&literals[lit..lit + run]);
+                    pos += run;
+                    lit += run;
+                    spend(run as u64, budget)?;
+                    continue;
+                }
+                // A copy: resolve (distance, clen) from the command byte.
+                let (clen, distance): (usize, usize) =
+                    if cmd <= crate::rans::sequence::DEEP_COPY_MAX {
+                        if off + 2 > offsets.len() {
+                            return Err(MaterializeError::InvalidDescriptor(
+                                "copy offset exhausted".into(),
+                            ));
+                        }
+                        let d = u16::from_le_bytes([offsets[off], offsets[off + 1]]) as usize;
+                        off += 2;
+                        (4 + (cmd - crate::rans::sequence::DEEP_COPY_MIN) as usize, d)
+                    } else if cmd <= crate::rans::sequence::DEEP_REP0_MAX {
+                        (
+                            4 + (cmd - crate::rans::sequence::DEEP_REP0_MIN) as usize,
+                            rep0,
+                        )
+                    } else if cmd <= crate::rans::sequence::DEEP_REP1_MAX {
+                        (
+                            4 + (cmd - crate::rans::sequence::DEEP_REP1_MIN) as usize,
+                            rep1,
+                        )
+                    } else if cmd == crate::rans::sequence::DEEP_XCOPY {
+                        if lenp + 2 > lengths.len() {
+                            return Err(MaterializeError::InvalidDescriptor(
+                                "extended length exhausted".into(),
+                            ));
+                        }
+                        let extra = u16::from_le_bytes([lengths[lenp], lengths[lenp + 1]]) as usize;
+                        lenp += 2;
+                        if off + 2 > offsets.len() {
+                            return Err(MaterializeError::InvalidDescriptor(
+                                "copy offset exhausted".into(),
+                            ));
+                        }
+                        let d = u16::from_le_bytes([offsets[off], offsets[off + 1]]) as usize;
+                        off += 2;
+                        (68 + extra, d)
+                    } else if cmd == crate::rans::sequence::DEEP_XLIT {
+                        if lenp + 2 > lengths.len() {
+                            return Err(MaterializeError::InvalidDescriptor(
+                                "extended length exhausted".into(),
+                            ));
+                        }
+                        let extra = u16::from_le_bytes([lengths[lenp], lengths[lenp + 1]]) as usize;
+                        lenp += 2;
+                        let run = 129 + extra;
+                        if pos + run > output.len() || lit + run > literals.len() {
+                            return Err(MaterializeError::InvalidDescriptor(
+                                "extended literal run overflow".into(),
+                            ));
+                        }
+                        output[pos..pos + run].copy_from_slice(&literals[lit..lit + run]);
+                        pos += run;
+                        lit += run;
+                        spend(run as u64, budget)?;
+                        continue;
+                    } else {
+                        return Err(MaterializeError::InvalidDescriptor(format!(
+                            "reserved deep command byte 0x{cmd:02x}"
+                        )));
+                    };
+                if distance == 0 || distance > pos {
+                    return Err(MaterializeError::InvalidDescriptor(
+                        "copy distance out of range".into(),
+                    ));
+                }
+                if pos + clen > output.len() {
+                    return Err(MaterializeError::InvalidDescriptor("copy overflow".into()));
+                }
+                for _ in 0..clen {
+                    output[pos] = output[pos - distance];
+                    pos += 1;
+                }
+                // NEW distances (COPY/XCOPY) update the rep register.
+                if cmd <= crate::rans::sequence::DEEP_COPY_MAX
+                    || cmd == crate::rans::sequence::DEEP_XCOPY
+                {
+                    rep1 = rep0;
+                    rep0 = distance;
+                }
+                spend(clen as u64, budget)?;
+            }
+            if pos != output.len() || lit != literals.len() {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "deep command walk did not cover the output".into(),
+                ));
+            }
+            Ok(())
+        }
     }
 }
 

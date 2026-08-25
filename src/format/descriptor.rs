@@ -43,6 +43,8 @@ pub const TAG_SPARSE_BLOCK64: u8 = 0x0E;
 pub const TAG_SEQUENCE_DICT: u8 = 0x0F;
 /// Tag: shared amortized dictionary match coding (Phase-9C).
 pub const TAG_SEQUENCE_SHARED_DICT: u8 = 0x10;
+/// Tag: deep-match repcode + extended-length coding (Phase-9E).
+pub const TAG_SEQUENCE_DEEP: u8 = 0x11;
 
 /// Residual kinds.
 pub const RESIDUAL_XOR_SPARSE: u8 = 0x01;
@@ -291,6 +293,32 @@ pub fn encode(rep: &Representation) -> Result<Vec<u8>, CodecError> {
             w.u32(*lit_len);
             w.u32(*off_len);
             w.u32(*src_len);
+            w.u32(*cmds);
+            w.u32(*lit_out);
+        }
+        Representation::SequenceDeep {
+            model,
+            enc_obj,
+            scale_bits,
+            codec,
+            seq_len,
+            lit_len,
+            off_len,
+            len_len,
+            cmds,
+            lit_out,
+            len,
+        } => {
+            w.u8(TAG_SEQUENCE_DEEP);
+            w.u32(*len as u32);
+            w.bytes(model.as_bytes());
+            w.bytes(enc_obj.as_bytes());
+            w.u8(*scale_bits);
+            w.u8(codec.tag());
+            w.u32(*seq_len);
+            w.u32(*lit_len);
+            w.u32(*off_len);
+            w.u32(*len_len);
             w.u32(*cmds);
             w.u32(*lit_out);
         }
@@ -609,6 +637,31 @@ pub fn decode(
                 lit_len,
                 off_len,
                 src_len,
+                cmds,
+                lit_out,
+                len,
+            }
+        }
+        TAG_SEQUENCE_DEEP => {
+            let model = read_id(&mut r)?;
+            let enc_obj = read_id(&mut r)?;
+            let scale_bits = r.u8()?;
+            let codec = RansCodec::from_u8(r.u8()?).ok_or(CodecError::Malformed)?;
+            let seq_len = r.u32()?;
+            let lit_len = r.u32()?;
+            let off_len = r.u32()?;
+            let len_len = r.u32()?;
+            let cmds = r.u32()?;
+            let lit_out = r.u32()?;
+            Representation::SequenceDeep {
+                model,
+                enc_obj,
+                scale_bits,
+                codec,
+                seq_len,
+                lit_len,
+                off_len,
+                len_len,
                 cmds,
                 lit_out,
                 len,

@@ -31,6 +31,7 @@ Phase-1 representation set (stable numeric tags, see
 | 0x0E | `SPARSE_BLOCK64` — blockwise-64 enumerative sparse coding (per-word popcount + C(64,k) rank, rANS/raw streams) |
 | 0x0F | `SEQUENCE_DICT` — SEQUENCE_RANS + a fourth copy-source stream over an external ≤64 KiB same-file dictionary (Phase-9B) |
 | 0x10 | `SEQUENCE_SHARED_DICT` — SEQUENCE_DICT + a shared cross-file dictionary selected by the background optimizer (Phase-9C) |
+| 0x11 | `SEQUENCE_DEEP` — repcodes (REP0/REP1) + extended length codes + the deep background matcher (Phase-9E) |
 
 `SEQUENCE_RANS` (0x0D) is the general-purpose compression floor added in
 Phase 8: pure rANS is an entropy coder, not a match finder, so the family
@@ -76,6 +77,20 @@ small files the previous-chunk dictionary gets almost no opportunity
 (279/282 files are single-chunk), and the shared dictionary recovers a
 measured part of the cross-file structure the packed stream exploits
 (2.182× → 2.328× post-GC).
+
+`SEQUENCE_DEEP` (0x11, Phase-9E) extends the general-purpose floor with a
+richer bounded command language: recent-distance repcodes (REP0/REP1
+copies carry no offset symbol) and extended length codes (one XCOPY/XLIT
+plus a u16 extra instead of runs of 131-byte continuation commands), fed
+by a deep background matcher (hash chains to depth 256, lazy parsing with
+a minimum-gain threshold, rep-distance priority). It is background-only
+(the foreground keeps the fast greedy matcher and its CPU budget),
+terminal (depth 0), and shares the rANS/raw codec. The 9D anchor POOL
+(up to four per directory, greedy marginal-savings selection) lets a
+heterogeneous directory give each file its best dictionary; the sealed
+tree court (9D+9E campaign) measures the pair: 2.214× → 2.380× post-GC
+on the real tree, and the standalone deep floor 3.796× vs the fast floor
+3.744× on the src pack.
 
 Hard rules:
 

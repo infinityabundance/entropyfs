@@ -176,6 +176,7 @@ Representation tags and payloads:
 | 0x0E | SPARSE_BLOCK64 | model `[u8;32]`, enc_obj `[u8;32]`, scale_bits u8, codec u8, pc_len u32, rank_len u32, lit_len u32, words u32, nonzero u32, lit_out u32 |
 | 0x0F | SEQUENCE_DICT | dictionary `[u8;32]`, dictionary_len u32, model `[u8;32]`, enc_obj `[u8;32]`, scale_bits u8, codec u8, seq_len u32, lit_len u32, off_len u32, src_len u32, cmds u32, lit_out u32 |
 | 0x10 | SEQUENCE_SHARED_DICT | dictionary `[u8;32]` (ZERO = absent), dictionary_len u32, shared `[u8;32]`, shared_len u32, model `[u8;32]`, enc_obj `[u8;32]`, scale_bits u8, codec u8, seq_len u32, lit_len u32, off_len u32, src_len u32, cmds u32, lit_out u32 |
+| 0x11 | SEQUENCE_DEEP | model `[u8;32]`, enc_obj `[u8;32]`, scale_bits u8, codec u8, seq_len u32, lit_len u32, off_len u32, len_len u32, cmds u32, lit_out u32 |
 
 SEQUENCE_RANS (0x0D) is the local-match + entropy floor: an LZ77-style
 hash-chain matcher turns the extent into three byte streams — *commands*,
@@ -243,6 +244,32 @@ byte-progressive; DICT/SHARED contiguous with advancing continuation
 offsets). Reference depth = max(file-dict depth, shared depth) + 1, capped
 by `max_reference_depth`; v1 anchors are terminal (depth 0), so rewritten
 extents carry depth ≤ 1.
+
+SEQUENCE_DEEP (0x11, Phase-9E) is the deep-match family: the background
+matcher (hash chains to depth 256, lazy parsing with a minimum-gain
+threshold, recent-distance priority) feeding a richer command language
+with repcodes and extended length codes. Command byte:
+
+| Command byte | Meaning |
+|--------------|---------|
+| 0x00..=0x7F | literal run of `b + 1` (1..=128) bytes from the literal stream |
+| 0x80..=0xBF | copy of `4 + (b - 0x80)` (4..=67) at a NEW u16 distance (byte-progressive; rep1 = rep0, rep0 = d) |
+| 0xC0..=0xDF | copy of `4 + (b - 0xC0)` (4..=35) at the REP0 distance (no offset symbol) |
+| 0xE0..=0xEF | copy of `4 + (b - 0xE0)` (4..=19) at the REP1 distance (no offset symbol) |
+| 0xF0 | extended copy: u16 extra in the lengths stream, length `68 + extra` (clamped to the chunk), then a NEW u16 distance (byte-progressive; reps update) |
+| 0xF1 | extended literal run: u16 extra in the lengths stream, run `129 + extra` |
+| 0xF2..=0xFF | reserved (malformed) |
+
+The rep register is two slots (REP0/REP1), initialized to 0 (a REP0/REP1
+copy with rep 0 is malformed), updated only by NEW-distance commands. The
+enc object is `[commands][literals][offsets][lengths]`; the offsets stream
+carries one u16 per COPY/XCOPY and the lengths stream one u16 per
+XCOPY/XLIT (both derived by a command walk at decode, so variable
+consumption is deterministic). The model object holds four slots. The
+family is evaluated only by the background optimizer (the foreground
+keeps the fast greedy `SequenceRans` matcher and its small CPU budget);
+it is terminal (reference depth 0) and shares the `SEQUENCE_RANS` rANS/raw
+codec.
 
 Residual (for BASE_RESIDUAL / ENTROPY_REF), kinds:
 
