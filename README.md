@@ -64,6 +64,7 @@ physical storage (RAW fallback) — that is a success condition, not a failure.
 | 9 (9C) | **SequenceSharedDict** — shared amortized dictionary match coding (tag 0x10, feature bit 13): local history + optional previous same-file chunk + a **shared cross-file dictionary** in one stream (third copy-source symbol `SRC_SHARED`). The background `shared_dict_pass` picks a per-directory anchor — an existing terminal chunk that maximizes savings against member incumbents — and rewrites strictly-cheaper extents through the same CAS-gated, byte-validated commit path. GC pins the anchor through the reference closure (survives owner deletion). Sealed by the campaign's **tree court**: 279/282 real-tree files are single-chunk (previous-chunk dictionaries get ~no opportunity on a real tree — the packed-stream density is cross-FILE structure); per-file writes **2.182× → 2.328× post-GC** (102 extents, ~85.2 KiB saved) vs zstd per-file 3.541× / per-64KiB 3.991× (-1). The modest real-text gain and the strong synthetic-family mechanism are both recorded as-is | ✅ implemented + evidence-sealed (`campaign-1787679299-8d6e147/`) |
 | 9 (9D) | **Anchor pool**: `shared_dict_pass` selects up to four per-directory anchors greedily by marginal savings against member incumbents; each extent picks its best pool anchor during the rewrite. Heterogeneous directories get per-file dictionary choice (pool saves ~2× the single-anchor on a two-cluster fixture) | ✅ implemented (sealed with 9E) |
 | 9 (9E) | **SequenceDeep** — deep-match family (tag 0x11, feature bit 14): repcodes (REP0/REP1 carry no offset symbol) + extended length codes (one XCOPY/XLIT + u16 extra instead of 131-byte continuation runs), fed by a deep background matcher (chain 256, lazy parse with a minimum-gain threshold, rep-distance priority). Background-only; terminal. Standalone deep floor **3.786× vs fast 3.736×** on the src pack (deep wins all chunks); ladder E4 densifies structured 50,528 → 50,238 B | ✅ implemented + evidence-sealed (`campaign-1787681660-9be6bd3/`) |
+| 9 (9F) | **Gap decomposition sealed** — the remaining gap to per-file zstd is measured, not asserted: zstd with the same per-directory anchor (`-D`, self-excluded) gains only ~8.5% (the anchor policy is NOT the cap); the residual gap is ~2/3 **per-extent persistence overhead** (multi-stream rANS models + descriptors on small files, ~26.5% of footprint) and ~1/3 coder quality. Also falsified: `scale_bits` does not shrink models (symbol-count-dominated encoding). Sets the 9G direction: amortized model sharing | ✅ sealed in the 9F tree court |
 
 ## Measured results
 
@@ -124,10 +125,14 @@ oversized-descriptor fix (Phase 6) eliminated.
   after the shared-dict pool + deep background pass** — so most of the
   packed-stream density was indeed cross-FILE structure, and the shared
   dictionary (plus the deep matcher, which lifts the standalone src-pack
-  floor from 3.736× to 3.786×) recovers a measured part of it. The rest
-  of the gap to per-file zstd is the fixed pool-size/anchor policy plus
-  the matcher's remaining distance-model overhead; recorded as current
-  state, not claims.
+  floor from 3.736× to 3.786×) recovers a measured part of it. The
+  Phase-9F gap decomposition (sealed in the 9F tree court) shows where
+  the remaining gap lives: the anchor policy is NOT the cap (zstd with
+  the same per-directory anchor gains only ~8.5%, less than EntropyFS's
+  pool already recovers), and the residual gap is **~2/3 per-extent
+  persistence overhead** (per-chunk multi-stream rANS models + descriptors
+  on small files; ~26.5% of the EntropyFS footprint) and **~1/3 coder
+  quality**. Recorded as current state, not claims.
 - The campaign's H2 experiment (synthetic drift corpus) is now a sealed
   **controlled series**: `67d977a` +7.2% (RANS-era floor), `a6641d1`
   −24% (SequenceRans floor, positional residuals only), `43bf17e`

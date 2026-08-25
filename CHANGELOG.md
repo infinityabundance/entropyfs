@@ -1,5 +1,29 @@
 # EntropyFS changelog
 
+## v0.5.1 (2026-08-25)
+
+**Evidence only (no codec change, no format change):** the Phase-9F gap
+decomposition is sealed into the tree court. Measured on the real source
+tree (280 files, per-file writes):
+
+- zstd -1 per-file 3.57×; zstd -1 per-file **with the same per-directory
+  anchor** (`-D`, self-matches excluded) 3.91× — a mature coder extracts
+  only ~8.5% from the shared-dictionary concept, less than EntropyFS's
+  pool + deep pass already recovers (2.22× → 2.39×). **The anchor policy
+  is not the cap.**
+- The residual gap to per-file zstd is **~2/3 per-extent persistence
+  overhead** — per-chunk multi-stream rANS model objects + descriptors on
+  small files: 309.7 KB = 26.5% of the EntropyFS footprint (11.1% of
+  logical; models alone 275.9 KB) — and **~1/3 coder quality**.
+- Falsified: `scale_bits` does not shrink model objects (the model
+  encoding is symbol-count-dominated: sb14 367 B vs sb8 295 B on a 3 KB
+  file).
+
+This refocuses the engineering target: **9G = amortized/shared entropy
+models** (model objects are content-addressed and immutable, so N extents
+can reference ONE persisted model object with no decoding chain), not
+more anchor tuning or parser deepening.
+
 ## v0.5.0 (2026-08-25)
 
 **Format note:** v0.5.0 retains **format version v1** (no format-version

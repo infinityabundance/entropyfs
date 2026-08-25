@@ -368,6 +368,18 @@ pub struct TreeCourt {
     pub shared_rewrites: u64,
     /// Shared-dict pass persisted bytes saved (extent-level, pre-GC).
     pub shared_saved_bytes: u64,
+    /// Phase-9F gap decomposition: zstd -1 per file with the directory's
+    /// largest file as a raw dictionary (self-matches excluded, mirroring
+    /// EntropyFS's no-self-reference rule) — the anchor-policy control:
+    /// what a mature coder extracts from the same shared-dictionary
+    /// advantage.
+    pub zstd_dir_anchor_l1: Option<CompressionBaseline>,
+    /// Per-extent persistence overhead after the shared-dict pass:
+    /// descriptor bytes (all extents).
+    pub per_extent_descriptor_bytes: u64,
+    /// Per-extent persistence overhead: model-object bytes (the structural
+    /// cost of per-chunk statistical models on small files).
+    pub per_extent_model_bytes: u64,
 }
 
 /// GC + background-optimizer traffic (methodology §6 maintenance metrics).
@@ -948,6 +960,29 @@ pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
     line(
         &mut log,
         &format!("  families after:  {:?}", tree_court.efs_shared_families),
+    );
+    if let Some(b) = &tree_court.zstd_dir_anchor_l1 {
+        line(
+            &mut log,
+            &format!(
+                "  zstd -1 per-file +dir anchor: {:>10} B  ({:.3}x)  [Phase-9F anchor-policy control]",
+                b.output_bytes, b.ratio
+            ),
+        );
+    }
+    let per_extent = tree_court
+        .per_extent_descriptor_bytes
+        .saturating_add(tree_court.per_extent_model_bytes);
+    line(
+        &mut log,
+        &format!(
+            "  per-extent overhead: {} B descriptors + {} B models = {} B ({:.1}% of footprint, {:.1}% of logical)  [Phase-9F]",
+            tree_court.per_extent_descriptor_bytes,
+            tree_court.per_extent_model_bytes,
+            per_extent,
+            100.0 * per_extent as f64 / tree_court.efs_shared_reachable.max(1) as f64,
+            100.0 * per_extent as f64 / tree_court.logical_bytes.max(1) as f64
+        ),
     );
 
     // 7. Baselines.
@@ -1830,6 +1865,144 @@ fn zstd_per_file_baseline(files: &[(String, Vec<u8>)], level: i32) -> Option<Com
     })
 }
 
+/// zstd per FILE with the directory's LARGEST file as a raw dictionary
+/// (`zstd -D`), summed — the Phase-9F anchor-policy control: what a mature
+/// coder extracts from the same shared-dictionary advantage EntropyFS's
+/// pool uses. The anchor file itself is EXCLUDED from the -D measurement
+/// and counted at its plain per-file size (EntropyFS forbids a file from
+/// using itself as its own dictionary, so zstd must not get self-matches
+/// either). The dictionary is one of the corpus files, so its own
+/// compressed bytes are already in the per-file total.
+fn zstd_dir_anchor_baseline(
+    files: &[(String, Vec<u8>)],
+    level: i32,
+) -> Option<CompressionBaseline> {
+    use std::collections::HashMap;
+    let logical: u64 = files.iter().map(|(_, b)| b.len() as u64).sum();
+    let mut dirs: HashMap<String, Vec<(String, Vec<u8>)>> = HashMap::new();
+    for (name, bytes) in files {
+        let d = name.rsplit('/').nth(1).unwrap_or(".").to_string();
+        dirs.entry(d)
+            .or_default()
+            .push((name.clone(), bytes.clone()));
+    }
+    let tmp = tempfile::Builder::new().prefix("zdd-").tempdir().ok()?;
+    let mut total_out = 0u64;
+    let t0 = Instant::now();
+    for (dir_no, members) in dirs.values().enumerate() {
+        let anchor = members
+            .iter()
+            .max_by_key(|(_, b)| b.len())
+            .map(|(_, b)| b.clone());
+        let anchor_path = tmp.path().join(format!("anchor-{dir_no}.dict"));
+        if let Some(a) = &anchor {
+            std::fs::write(&anchor_path, a).ok()?;
+        }
+        for (name, bytes) in members {
+            let in_path = tmp
+                .path()
+                .join(format!("in-{}.bin", name.replace('/', "_")));
+            std::fs::write(&in_path, bytes).ok()?;
+            let plain = std::process::Command::new("zstd")
+                .args(["-q", &format!("-{level}"), "-c"])
+                .arg(&in_path)
+                .output()
+                .ok()?
+                .stdout
+                .len() as u64;
+            let is_anchor = anchor.as_ref().map(|a| a == bytes).unwrap_or(false);
+            let out = if is_anchor || anchor.is_none() {
+                plain // the anchor pays its own plain compression (no self-dict)
+            } else {
+                let with = std::process::Command::new("zstd")
+                    .args(["-q", &format!("-{level}"), "-c", "-D"])
+                    .arg(&anchor_path)
+                    .arg(&in_path)
+                    .output()
+                    .ok()?
+                    .stdout
+                    .len() as u64;
+                if with == 0 && !bytes.is_empty() {
+                    plain // defensive: a failed -D run must not read as 0 bytes
+                } else {
+                    with
+                }
+            };
+            total_out = total_out.saturating_add(out);
+            let _ = std::fs::remove_file(&in_path);
+        }
+    }
+    let wall = t0.elapsed().as_secs_f64();
+    Some(CompressionBaseline {
+        tool: "zstd".into(),
+        version: "per-file+dir-anchor".into(),
+        level: level.to_string(),
+        input_bytes: logical,
+        output_bytes: total_out,
+        ratio: logical as f64 / total_out.max(1) as f64,
+        wall_s: wall,
+    })
+}
+
+/// Per-extent persistence overhead: descriptor bytes (all extents) and
+/// model-object bytes (only the rANS model objects of the sequence
+/// families; encoded-stream payloads are NOT overhead — they are the
+/// compressed bytes). This is the structural cost of per-chunk
+/// statistical models amortized over small files (Phase-9F).
+fn per_extent_overhead(store: &Store) -> Result<(u64, u64), String> {
+    use crate::core::representation::Representation as Rep;
+    let limits = *store.limits();
+    let mut descriptor_bytes = 0u64;
+    let mut model_ids: std::collections::HashSet<crate::core::extent::ChunkId> =
+        std::collections::HashSet::new();
+    for ino in store.all_inodes().map_err(|e| e.to_string())? {
+        let Some(inode) = store.get_inode(ino).map_err(|e| e.to_string())? else {
+            continue;
+        };
+        let root = match inode.data {
+            InodeData::File { extent_root } => extent_root,
+            _ => continue,
+        };
+        if root.is_zero() {
+            continue;
+        }
+        for (_, bytes) in
+            crate::store::extent_tree::scan_all(root, BTREE_ORDER, limits.max_fanout, store)
+                .map_err(|e| e.to_string())?
+        {
+            let Ok(d) = crate::format::descriptor::decode(
+                &bytes,
+                limits.max_descriptor_bytes,
+                limits.max_inline_bytes,
+                limits.max_palette,
+                limits.max_period,
+                limits.max_chunk_size,
+            ) else {
+                continue;
+            };
+            descriptor_bytes = descriptor_bytes.saturating_add(d.encoded_size());
+            match &d {
+                Rep::Rans { model, .. }
+                | Rep::SequenceRans { model, .. }
+                | Rep::SequenceDeep { model, .. }
+                | Rep::SparseBlock64 { model, .. }
+                | Rep::SequenceDict { model, .. }
+                | Rep::SequenceSharedDict { model, .. } => {
+                    model_ids.insert(*model);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut model_bytes = 0u64;
+    for id in &model_ids {
+        if let Some(loc) = store.object_index().get(id) {
+            model_bytes = model_bytes.saturating_add(loc.stored_len);
+        }
+    }
+    Ok((descriptor_bytes, model_bytes))
+}
+
 // ---------------------------------------------------------------------------
 // Phase-9C tree court
 // ---------------------------------------------------------------------------
@@ -1954,13 +2127,16 @@ fn run_tree_court(opts: &CampaignOptions) -> Result<TreeCourt, String> {
     let single_chunk = files.iter().filter(|(_, b)| b.len() <= 65536).count();
 
     // zstd baselines: whole-pack (cross-file oracle), per-file (the
-    // realistic floor), per-64KiB (the chunk horizon).
+    // realistic floor), per-64KiB (the chunk horizon), and the Phase-9F
+    // anchor-policy control (per-file with the directory's largest file as
+    // a raw dictionary, self-matches excluded).
     let zw1 = zstd_baseline(&pack, 1);
     let zw19 = zstd_baseline(&pack, 19);
     let zf1 = zstd_per_file_baseline(&files, 1);
     let zf19 = zstd_per_file_baseline(&files, 19);
     let zc1 = zstd_per_64k_baseline(&pack, 1);
     let zc19 = zstd_per_64k_baseline(&pack, 19);
+    let za1 = zstd_dir_anchor_baseline(&files, 1);
 
     // EntropyFS, per-file writes, before the shared-dict pass.
     let tmp = scratch_tempdir(&opts.scratch_dir, "tree-")?;
@@ -1977,6 +2153,9 @@ fn run_tree_court(opts: &CampaignOptions) -> Result<TreeCourt, String> {
     crate::store::gc::collect(&store, &CrashHooks::none()).map_err(|e| e.to_string())?;
     let n2 = store_numbers(&store)?;
     let fam2 = tree_families(&store)?;
+    // Phase-9F gap decomposition: per-extent persistence overhead after
+    // the pass (descriptor + model-object bytes over all extents).
+    let (desc_bytes, model_bytes) = per_extent_overhead(&store)?;
 
     Ok(TreeCourt {
         file_count: files.len(),
@@ -1996,6 +2175,9 @@ fn run_tree_court(opts: &CampaignOptions) -> Result<TreeCourt, String> {
         efs_shared_families: fam2,
         shared_rewrites: shared.rewritten,
         shared_saved_bytes: shared.saved_bytes,
+        zstd_dir_anchor_l1: za1,
+        per_extent_descriptor_bytes: desc_bytes,
+        per_extent_model_bytes: model_bytes,
     })
 }
 

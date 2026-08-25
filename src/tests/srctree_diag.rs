@@ -527,6 +527,323 @@ fn print_deep_vs_fast_on_pack() {
     );
 }
 
+/// Phase-9F gap decomposition on the REAL tree: how much of the remaining
+/// gap to per-file zstd is (a) the shared-dictionary ANCHOR POLICY vs (b)
+/// the coder/matcher and (c) per-extent overhead?
+///
+/// The decisive control: `zstd -D <dir-anchor>` compresses each file with
+/// the SAME per-directory shared-dictionary advantage EntropyFS's pool
+/// uses (the anchor is one of the directory's files, already counted in
+/// the per-file total). If zstd-with-anchor lands near zstd-per-file, the
+/// anchor policy is not the limiter — the coder is. If it lands near
+/// EntropyFS-with-pool, the anchor policy caps both.
+#[test]
+fn print_tree_gap_decomposition() {
+    use std::collections::HashMap;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let files = source_tree_files(root).unwrap();
+    let logical: u64 = files.iter().map(|(_, b)| b.len() as u64).sum();
+
+    // Group files by directory; per-directory anchor = largest file.
+    let mut dirs: HashMap<String, Vec<(String, Vec<u8>)>> = HashMap::new();
+    for (name, bytes) in &files {
+        let d = name.rsplit('/').nth(1).unwrap_or(".").to_string();
+        dirs.entry(d)
+            .or_default()
+            .push((name.clone(), bytes.clone()));
+    }
+
+    // zstd -1 per-file (no dict) and zstd -1 per-file with the dir anchor.
+    let tmp = tempfile::Builder::new().prefix("zdd-").tempdir().unwrap();
+    let mut z_per_file = 0u64;
+    let mut z_with_anchor = 0u64;
+    let mut z_with_anchor_files = 0u64;
+    let mut dirs_with_anchor = 0usize;
+    for members in dirs.values() {
+        // Anchor: largest member (mirrors the pool's largest-first bias).
+        // The anchor file itself is EXCLUDED from the -D measurement and
+        // counted at its plain per-file size: EntropyFS forbids a file
+        // from using itself as its own dictionary, so zstd must not get
+        // self-matches either.
+        let anchor = members
+            .iter()
+            .max_by_key(|(_, b)| b.len())
+            .map(|(_, b)| b.clone());
+        let anchor_path = tmp.path().join(format!("anchor-{dirs_with_anchor}.dict"));
+        if let Some(a) = &anchor {
+            std::fs::write(&anchor_path, a).unwrap();
+        }
+        for (name, bytes) in members {
+            let in_path = tmp
+                .path()
+                .join(format!("in-{}.bin", name.replace('/', "_")));
+            std::fs::write(&in_path, bytes).unwrap();
+            let plain = std::process::Command::new("zstd")
+                .args(["-q", "-1", "-c"])
+                .arg(&in_path)
+                .output()
+                .ok()
+                .map(|o| o.stdout.len() as u64)
+                .unwrap_or(bytes.len() as u64);
+            z_per_file += plain;
+            let is_anchor = anchor.as_ref().map(|a| a == bytes).unwrap_or(false);
+            if is_anchor {
+                // The anchor pays its own plain compression (no self-dict).
+                z_with_anchor += plain;
+                z_with_anchor_files += 1;
+            } else if anchor.is_some() {
+                let with = std::process::Command::new("zstd")
+                    .args(["-q", "-1", "-c", "-D"])
+                    .arg(&anchor_path)
+                    .arg(&in_path)
+                    .output()
+                    .ok()
+                    .map(|o| o.stdout.len() as u64)
+                    .unwrap_or(bytes.len() as u64);
+                z_with_anchor += with;
+                z_with_anchor_files += 1;
+            } else {
+                z_with_anchor += plain;
+                z_with_anchor_files += 1;
+            }
+            let _ = std::fs::remove_file(&in_path);
+        }
+        if anchor.is_some() {
+            dirs_with_anchor += 1;
+        }
+    }
+
+    // EntropyFS per-file after pool + deep (measured fresh so the numbers
+    // come from the same code revision).
+    let dir = TempDir::new().unwrap();
+    let cfg = crate::store::StoreConfig {
+        segment_size: 4 * 1024 * 1024,
+        ..Default::default()
+    };
+    let store = crate::store::Store::create(dir.path(), &cfg, [0x9f; 16]).unwrap();
+    let mut dir_cache: HashMap<String, u64> = HashMap::new();
+    dir_cache.insert(String::new(), store.current_root().root_dir_ino);
+    for (rel, bytes) in &files {
+        let (dir_part, name) = match rel.rsplit_once('/') {
+            Some((d, n)) => (d.to_string(), n.to_string()),
+            None => (String::new(), rel.clone()),
+        };
+        if !dir_cache.contains_key(&dir_part) {
+            let mut cur = String::new();
+            let mut cur_ino = store.current_root().root_dir_ino;
+            for comp in dir_part.split('/') {
+                if comp.is_empty() {
+                    continue;
+                }
+                let next_path = if cur.is_empty() {
+                    comp.to_string()
+                } else {
+                    format!("{cur}/{comp}")
+                };
+                let ino = match dir_cache.get(&next_path) {
+                    Some(&c) => c,
+                    None => {
+                        let existing = store.dir_lookup(cur_ino, comp.as_bytes()).unwrap();
+                        let ino = match existing {
+                            Some(e) => e.ino,
+                            None => store
+                                .create_entry(
+                                    cur_ino,
+                                    comp.as_bytes(),
+                                    crate::store::NewEntry::dir(0o755, 1000, 1000),
+                                    &crate::store::transaction::CrashHooks::none(),
+                                )
+                                .unwrap(),
+                        };
+                        dir_cache.insert(next_path.clone(), ino);
+                        ino
+                    }
+                };
+                cur = next_path;
+                cur_ino = ino;
+            }
+            dir_cache.insert(dir_part.clone(), cur_ino);
+        }
+        let ino = store
+            .create_entry(
+                dir_cache[&dir_part],
+                name.as_bytes(),
+                crate::store::NewEntry::file(0o644, 1000, 1000),
+                &crate::store::transaction::CrashHooks::none(),
+            )
+            .unwrap();
+        let mut writes: Vec<(u64, Vec<u8>)> = Vec::new();
+        let mut off = 0u64;
+        while off < bytes.len() as u64 {
+            let len = 65536u64.min(bytes.len() as u64 - off);
+            writes.push((off, bytes[off as usize..(off + len) as usize].to_vec()));
+            off += len;
+        }
+        store
+            .write_region_batch(
+                ino,
+                &writes,
+                crate::optimizer::policy::OptimizeOptions::default(),
+            )
+            .unwrap();
+    }
+    crate::store::gc::collect(&store, &crate::store::transaction::CrashHooks::none()).unwrap();
+    let (_, r_before, _b, _f) = numbers(&store);
+    crate::optimizer::background::shared_dict_pass(
+        &store,
+        crate::optimizer::policy::OptimizeOptions::default(),
+        None,
+    )
+    .unwrap();
+    crate::store::gc::collect(&store, &crate::store::transaction::CrashHooks::none()).unwrap();
+    let (_, r_after, _b2, _f2) = numbers(&store);
+
+    println!("\n==== Phase-9F: tree gap decomposition ====");
+    println!(
+        "logical {logical}  files {}  dirs {dirs_with_anchor}",
+        files.len()
+    );
+    println!(
+        "zstd -1 per-file:            {z_per_file:>9} B  ({:.3}x)",
+        logical as f64 / z_per_file as f64
+    );
+    println!(
+        "zstd -1 per-file +dir anchor: {z_with_anchor:>9} B  ({:.3}x)  ({z_with_anchor_files} files)",
+        logical as f64 / z_with_anchor.max(1) as f64
+    );
+    println!(
+        "efs tree (pre-pass):        {r_before:>9} B  ({:.3}x)",
+        logical as f64 / r_before.max(1) as f64
+    );
+    println!(
+        "efs tree + pool + deep:     {r_after:>9} B  ({:.3}x)",
+        logical as f64 / r_after.max(1) as f64
+    );
+    let anchor_gain = z_per_file.saturating_sub(z_with_anchor);
+    println!("anchor-policy headroom (zstd -D gain): {anchor_gain} B");
+
+    // Per-extent overhead component: descriptor + MODEL-object bytes over
+    // all file extents (the structural cost of per-chunk persistence on
+    // small files; zstd has no per-file model persistence). Encoded-stream
+    // payload objects are NOT overhead — they are the compressed bytes.
+    use crate::core::representation::Representation as Rep;
+    let mut descriptor_bytes = 0u64;
+    let mut model_bytes = 0u64;
+    let mut extent_count = 0u64;
+    let limits = *store.limits();
+    let mut model_ids: std::collections::HashSet<crate::core::extent::ChunkId> =
+        std::collections::HashSet::new();
+    for ino in store.all_inodes().unwrap() {
+        let Some(inode) = store.get_inode(ino).unwrap() else {
+            continue;
+        };
+        let root = match inode.data {
+            crate::store::inode::InodeData::File { extent_root } => extent_root,
+            _ => continue,
+        };
+        if root.is_zero() {
+            continue;
+        }
+        for (_, bytes) in crate::store::extent_tree::scan_all(
+            root,
+            crate::store::BTREE_ORDER,
+            limits.max_fanout,
+            &store,
+        )
+        .unwrap()
+        {
+            let Ok(d) = crate::format::descriptor::decode(
+                &bytes,
+                limits.max_descriptor_bytes,
+                limits.max_inline_bytes,
+                limits.max_palette,
+                limits.max_period,
+                limits.max_chunk_size,
+            ) else {
+                continue;
+            };
+            descriptor_bytes += d.encoded_size();
+            extent_count += 1;
+            match &d {
+                Rep::Rans { model, .. }
+                | Rep::SequenceRans { model, .. }
+                | Rep::SequenceDeep { model, .. }
+                | Rep::SparseBlock64 { model, .. }
+                | Rep::SequenceDict { model, .. }
+                | Rep::SequenceSharedDict { model, .. } => {
+                    model_ids.insert(*model);
+                }
+                _ => {}
+            }
+        }
+    }
+    for id in &model_ids {
+        if let Some(loc) = store.object_index().get(id) {
+            model_bytes += loc.stored_len;
+        }
+    }
+    println!(
+        "per-extent overhead: {extent_count} extents, descriptor {descriptor_bytes} B + model objects {model_bytes} B = {} B ({:.1}% of the {} B efs footprint; {:.1}% of logical)",
+        descriptor_bytes + model_bytes,
+        100.0 * (descriptor_bytes + model_bytes) as f64 / r_after.max(1) as f64,
+        r_after,
+        100.0 * (descriptor_bytes + model_bytes) as f64 / logical as f64
+    );
+}
+
+/// Phase-9F model-size diagnostic: the per-stream rANS model encoding is
+/// dominated by the number of DISTINCT symbols, not the scale bits — so
+/// lowering `scale_bits` for small files does NOT shrink models (the
+/// hypothesis is falsified; recorded so it is not re-tried). The overhead
+/// is the NUMBER of models per extent (the sequence families persist 3–4
+/// per-stream models), amortized over small files.
+#[test]
+fn print_model_size_vs_scale_bits() {
+    use crate::core::representation::RansCodec;
+    use crate::rans::metadata;
+    use crate::rans::model::normalize_histogram;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let files = source_tree_files(root).unwrap();
+    let mut sizes: Vec<usize> = Vec::new();
+    let mut total = 0usize;
+    for (_, b) in &files {
+        let mut hist = [0u32; 256];
+        for &x in b.iter() {
+            hist[x as usize] += 1;
+        }
+        if let Some(m) = normalize_histogram(&hist, 14, RansCodec::Interleaved2) {
+            let enc = metadata::encode_model(&m).len();
+            sizes.push(enc);
+            total += enc;
+        }
+    }
+    sizes.sort_unstable();
+    let n = sizes.len();
+    println!(
+        "\n==== Phase-9F: per-stream model size distribution ====\nfiles {n}  total {total}  avg {}  p50 {}  p90 {}  max {}",
+        total / n.max(1),
+        sizes[n / 2],
+        sizes[n * 9 / 10],
+        sizes[n - 1]
+    );
+    // scale_bits falsification on a representative small file.
+    let (_, sample) = files
+        .iter()
+        .find(|(_, b)| b.len() > 1500 && b.len() < 4000)
+        .unwrap();
+    let mut hist = [0u32; 256];
+    for &x in sample.iter() {
+        hist[x as usize] += 1;
+    }
+    let mut line = format!("scale_bits test on {} B file:", sample.len());
+    for sb in [14u8, 10, 8, 6] {
+        if let Some(m) = normalize_histogram(&hist, sb, RansCodec::Interleaved2) {
+            line.push_str(&format!(" sb{sb}={}B", metadata::encode_model(&m).len()));
+        }
+    }
+    println!("{line}");
+}
+
 /// Encode `b` against dictionary `dict` with the existing SequenceDict
 /// encoder; returns the candidate's total persisted bytes if it wins
 /// (marginal cost), else None.

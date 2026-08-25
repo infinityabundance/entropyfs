@@ -7,7 +7,7 @@
 
 [package]
 name = "entropyfs"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 rust-version = "1.87"
 description = "Entropy-native Linux filesystem: persist irreducible state, materialize structure, preserve exact bytes."
