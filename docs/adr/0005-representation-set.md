@@ -26,6 +26,20 @@ Phase-1 representation set (stable numeric tags, see
 | 0x09 | `PERIODIC` — period, pattern, count, tail |
 | 0x0A | `ENTROPY_REF` — universe + seed + coordinate + transform + residual |
 | 0x0B | `INLINE` — short literal bytes inside the descriptor |
+| 0x0C | `PERMUTATION` — factoradic rank over distinct symbols (len ≤ 34) |
+| 0x0D | `SEQUENCE_RANS` — local-match (LZ77) commands/literals/offsets, each rANS-coded or raw |
+
+`SEQUENCE_RANS` (0x0D) is the general-purpose compression floor added in
+Phase 8: pure rANS is an entropy coder, not a match finder, so the family
+adds a bounded hash-chain LZ77 matcher whose three streams are then
+entropy-coded with `ryg-rans-rs`. It is what makes EntropyFS competitive
+with zstd-class transparent compression on ordinary workloads while the
+structural/configurational families provide the differentiated ceiling.
+Copy semantics are byte-progressive (overlap allowed), so RLE and
+arbitrarily long matches are representable by repeated copies at one
+distance; every stream has a raw fallback so degenerate streams never
+force the family to lose. All three streams plus their models are
+persisted, content-addressed objects counted in the extent's byte total.
 
 Hard rules:
 

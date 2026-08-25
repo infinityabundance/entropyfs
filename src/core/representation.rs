@@ -279,6 +279,46 @@ pub enum Representation {
         /// Materialized length.
         len: u64,
     },
+    /// Local match coding + entropy: LZ77-style COPY/LITERAL token streams
+    /// entropy-coded with ryg-rans-rs (the general-purpose compression
+    /// floor, Phase-8 directive §4).
+    ///
+    /// Three byte streams, each rANS-coded:
+    ///
+    /// - *commands*: one byte per command. `0x00..=0x7F` is a literal run
+    ///   of length `b + 1` (1..=128); `0x80..=0xFF` is a copy of length
+    ///   `b - 0x80 + 4` (4..=131) whose offset (u16 LE) follows in the
+    ///   offset stream.
+    /// - *literals*: the literal-run bytes, in command order.
+    /// - *offsets*: one u16 LE offset per copy command.
+    ///
+    /// The `model` object holds the three models length-prefixed; the
+    /// `enc_obj` holds the three encoded streams concatenated (lengths in
+    /// the descriptor). Copy offsets are relative to the current output
+    /// position (local history), so the decoder needs only the decoded
+    /// output buffer.
+    SequenceRans {
+        /// Content id of the model object (3 length-prefixed models).
+        model: ChunkId,
+        /// Content id of the encoded object (3 concatenated streams).
+        enc_obj: ChunkId,
+        /// Model scale bits (shared by all three streams).
+        scale_bits: u8,
+        /// Codec used for the streams.
+        codec: RansCodec,
+        /// Encoded command-stream length (bytes).
+        seq_len: u32,
+        /// Encoded literal-stream length (bytes).
+        lit_len: u32,
+        /// Encoded offset-stream length (bytes).
+        off_len: u32,
+        /// Command count (= decoded command-stream length).
+        cmds: u32,
+        /// Decoded literal-stream length (total literal bytes).
+        lit_out: u32,
+        /// Materialized length.
+        len: u64,
+    },
 }
 
 impl Representation {
@@ -295,7 +335,8 @@ impl Representation {
             | Representation::Palette { len, .. }
             | Representation::Periodic { len, .. }
             | Representation::EntropyRef { len, .. }
-            | Representation::Permutation { len, .. } => *len,
+            | Representation::Permutation { len, .. }
+            | Representation::SequenceRans { len, .. } => *len,
             Representation::Inline { data } => data.len() as u64,
         }
     }
@@ -320,6 +361,7 @@ impl Representation {
             Representation::EntropyRef { .. } => 0x0A,
             Representation::Inline { .. } => 0x0B,
             Representation::Permutation { .. } => 0x0C,
+            Representation::SequenceRans { .. } => 0x0D,
         }
     }
 
@@ -338,6 +380,7 @@ impl Representation {
             Representation::EntropyRef { .. } => "ENTROPY_REF",
             Representation::Inline { .. } => "INLINE",
             Representation::Permutation { .. } => "PERMUTATION",
+            Representation::SequenceRans { .. } => "SEQUENCE_RANS",
         }
     }
 
@@ -369,6 +412,7 @@ impl Representation {
             } => 4 + *period as u64 + 4 + 4 + tail.len() as u64,
             Representation::EntropyRef { residual, .. } => 1 + 16 + 8 + 1 + residual.encoded_size(),
             Representation::Permutation { alphabet, .. } => 16 + alphabet.len() as u64,
+            Representation::SequenceRans { .. } => 32 + 32 + 1 + 1 + 4 + 4 + 4 + 4 + 4,
         };
         base + payload
     }
@@ -562,6 +606,49 @@ impl Representation {
                     return Err(ReprError::PermutationRankOutOfRange);
                 }
             }
+            Representation::SequenceRans {
+                model,
+                enc_obj,
+                scale_bits,
+                seq_len,
+                lit_len,
+                off_len,
+                cmds,
+                lit_out,
+                len,
+                ..
+            } => {
+                check_len(*len, limits)?;
+                if model.is_zero() || enc_obj.is_zero() {
+                    return Err(ReprError::ZeroObjectId);
+                }
+                if !(1..=16).contains(scale_bits) {
+                    return Err(ReprError::BadScaleBits);
+                }
+                // Stream-length sanity: every byte is bounded by the chunk
+                // class (streams cannot exceed the materialized size plus
+                // a generous constant), and a copy needs at least one
+                // command. `lit_out` must be <= len (literals are a subset
+                // of the output).
+                let max_stream = limits.max_chunk_size.saturating_add(64);
+                for s in [*seq_len, *lit_len, *off_len] {
+                    if s as u64 > max_stream {
+                        return Err(ReprError::SequenceStreamTooLarge);
+                    }
+                }
+                if (*lit_out as u64) > *len {
+                    return Err(ReprError::SequenceLitOutMismatch);
+                }
+                if *cmds == 0 && *len > 0 {
+                    return Err(ReprError::SequenceNoCommands);
+                }
+                // Every command writes at least one byte, so the command
+                // count cannot exceed the output length (bounds the decode
+                // allocation for the command stream).
+                if (*cmds as u64) > *len {
+                    return Err(ReprError::SequenceCmdsMismatch);
+                }
+            }
         }
         Ok(())
     }
@@ -736,6 +823,14 @@ pub enum ReprError {
     PermutationRankOutOfRange,
     /// Permutation alphabet must be strictly increasing with length == m.
     BadPermutationAlphabet,
+    /// SEQUENCE_RANS encoded stream exceeds the format limit.
+    SequenceStreamTooLarge,
+    /// SEQUENCE_RANS literal output exceeds the materialized length.
+    SequenceLitOutMismatch,
+    /// SEQUENCE_RANS with no commands for a non-empty extent.
+    SequenceNoCommands,
+    /// SEQUENCE_RANS command count exceeds the materialized length.
+    SequenceCmdsMismatch,
 }
 
 impl std::fmt::Display for ReprError {

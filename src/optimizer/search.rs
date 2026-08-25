@@ -194,13 +194,18 @@ pub fn encode_guided(
     }
     let mut rans_measurement: Option<f64> = None;
     if options.allow_rans && !decisive {
-        let rans_cands = crate::rans::residual::RansEncoder.encode(ctx.target, &base_ctx);
-        if let Some(best_rans) = pick_cheapest(&rans_cands, &policy) {
+        // P6 (conventional rANS) and the local-match floor (SequenceRans)
+        // are the general-purpose compression workhorses; both are always
+        // evaluated together.
+        let mut floor_cands: Vec<Candidate> =
+            crate::rans::residual::RansEncoder.encode(ctx.target, &base_ctx);
+        floor_cands.extend(crate::rans::sequence::SequenceEncoder.encode(ctx.target, &base_ctx));
+        if let Some(best_floor) = pick_cheapest(&floor_cands, &policy) {
             rans_measurement = Some(measurement_for_ratio(
-                best_rans.cost.persisted_bytes() as f64 / ctx.target.len() as f64,
+                best_floor.cost.persisted_bytes() as f64 / ctx.target.len() as f64,
             ));
         }
-        candidates.extend(rans_cands.into_iter().map(|c| (Channel::Rans, c)));
+        candidates.extend(floor_cands.into_iter().map(|c| (Channel::Rans, c)));
     }
     if let Some(r) = crate::core::candidate::raw_candidate(ctx.target, cid, &limits) {
         candidates.push((Channel::Raw, r));
@@ -455,10 +460,22 @@ fn pick_best_valid<'a>(
 
 /// A `DecoderContext` that resolves a candidate's own new objects first
 /// and falls back to the committed store (for bases/targets/models that
-/// already exist). Used only for §32 validation.
-struct CandidateResolver<'a> {
+/// already exist). Used for §32 validation (also by the store's commit
+/// gate for unguided `encode_chunk` updates).
+pub(crate) struct CandidateResolver<'a> {
     store: &'a Store,
     objects: std::collections::HashMap<ChunkId, Vec<u8>>,
+}
+
+impl<'a> CandidateResolver<'a> {
+    /// Build a resolver over the committed store plus the given new
+    /// objects.
+    pub(crate) fn new(
+        store: &'a Store,
+        objects: std::collections::HashMap<ChunkId, Vec<u8>>,
+    ) -> Self {
+        Self { store, objects }
+    }
 }
 
 impl DecoderContext for CandidateResolver<'_> {
@@ -583,6 +600,21 @@ mod tests {
         encode_guided(store, &ctx, OptimizeOptions::default()).unwrap()
     }
 
+    /// Cryptographically uniform deterministic bytes (BLAKE3 of a counter):
+    /// no exploitable 4-byte repeats, entropy ≈ 8 bits/symbol. The honest
+    /// H6 negative control.
+    fn noise(n: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(n);
+        let mut i: u64 = 0;
+        while out.len() < n {
+            let h = blake3::hash(&i.to_le_bytes());
+            let take = (n - out.len()).min(32);
+            out.extend_from_slice(&h.as_bytes()[..take]);
+            i += 1;
+        }
+        out
+    }
+
     #[test]
     fn guided_search_matches_exact_bytes() {
         let dir = TempDir::new().unwrap();
@@ -602,11 +634,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = create_store(&dir);
         let f = ino(&store);
-        // Pseudo-random (incompressible): no structural family can beat
+        // Crypto-uniform (incompressible): no structural family can beat
         // EXACT_REF for a second copy of the same chunk.
-        let data: Vec<u8> = (0..65536u32)
-            .map(|i| (i.wrapping_mul(2654435761) >> 8) as u8)
-            .collect();
+        let data = noise(65536);
         write(&store, f, &data);
         let out = search(&store, f, &data, None);
         assert!(
@@ -651,16 +681,43 @@ mod tests {
     }
 
     #[test]
-    fn raw_fallback_for_random_data() {
+    fn random_data_has_no_fake_density() {
         let dir = TempDir::new().unwrap();
         let store = create_store(&dir);
         let f = ino(&store);
-        // Pseudo-random: rANS cannot beat RAW on uniform data.
-        let data: Vec<u8> = (0..65536u32)
-            .map(|i| (i.wrapping_mul(2654435761) >> 8) as u8)
-            .collect();
+        // H6 negative control: crypto-uniform data must fall back toward
+        // RAW — the winner's persisted bytes must be ~raw-sized, and never
+        // a structural/configurational/generated family (those would be
+        // fabricated density).
+        let data = noise(65536);
         let out = search(&store, f, &data, None);
-        assert!(matches!(out.update.descriptor, Representation::Raw { .. }));
+        let persisted = out.update.descriptor.encoded_size()
+            + out
+                .update
+                .objects
+                .iter()
+                .map(|o| o.payload.len() as u64)
+                .sum::<u64>();
+        let raw = data.len() as u64 + 41; // payload + descriptor + crc
+        assert!(
+            persisted >= (raw as f64 * 0.98) as u64,
+            "random data must not show fake density: persisted {persisted} vs raw {raw} ({:?})",
+            out.update.descriptor.family()
+        );
+        assert!(
+            !matches!(
+                out.update.descriptor,
+                Representation::Zero { .. }
+                    | Representation::Fill { .. }
+                    | Representation::Sparse { .. }
+                    | Representation::Palette { .. }
+                    | Representation::Periodic { .. }
+                    | Representation::EntropyRef { .. }
+                    | Representation::ExactRef { .. }
+            ),
+            "structural/generated family on random data: {:?}",
+            out.update.descriptor.family()
+        );
     }
 
     #[test]

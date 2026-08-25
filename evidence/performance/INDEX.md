@@ -8,8 +8,10 @@ they document are admitted — nothing more.
 | Artifact | Revision | What it seals |
 | --- | --- | --- |
 | `campaign-1787658658-67d977a/` | `67d977a` | Store-level evidence campaign (methodology §1–§9): repeated runs, exact byte accounting, p50/p95/p99, fsync latency, CPU, device writes, GC traffic, ablation ladder, DSFB investigation, negative controls, baselines. All §8 admission rules OK. |
+| `campaign-1787664479-d90772c/` | `d90772c` | Same campaign with the **SequenceRans floor** (Phase 8 §4) and the write-batch group-commit path: src corpus 1.636× → **124.824×**; H2 sign flip (base+residual now loses to fresh re-encoding — the compression floor changed the economics); all §8 admission rules OK. |
 | `fuse-court-1787659785-027c959-head/` | `027c959` | FUSE-frontend perf court, **after** Phase 6 (current main). |
 | `fuse-court-1787659914-709a710-before/` | `709a710` | FUSE-frontend perf court, **before** Phase 6 (same workloads, same workload hash `82442892…`). |
+| `fuse-court-1787664579-d90772c/` | `d90772c` | FUSE-frontend perf court, **Phase 8** (concurrency refactor + writeback negotiation + batch group commit + SequenceRans floor; same deterministic shake_128 payload, same bindgen workload `82442892…`). |
 
 ## FUSE court pair (Phase 6 before/after)
 
@@ -17,19 +19,24 @@ Same script, same machine, same deterministic shake_128 payload, same
 bindgen workload (source hash `824428929fe76cd3c37276493c945d21d2cf86d08f15cf89694e90b2e711a106`,
 bindgen 0.70.1, cargo.lock `13659abc…`).
 
-| Workload | `709a710` (before) | `027c959` (after) |
-| --- | --- | --- |
-| 4K buffered writes | 0.6 MiB/s | 24.4 MiB/s |
-| 1M writes (trailing fsync) | 185.1 MiB/s | 652.6 MiB/s |
-| warm sequential read | 2207.1 MiB/s | 2343.8 MiB/s |
-| fsync p50 | 320 µs | 1647 µs |
-| 1M read p50 | 1173 µs | 1193 µs |
-| bindgen build (cold target on the mount) | **FAILED** — `proc-macro2` build script SIGSEGV, `libc` build script SIGBUS (the oversized-descriptor corruption Phase 6 fixed; full log in `bindgen-build.log`) | 9.47 s, OK |
+| Workload | `709a710` (before) | `027c959` (after) | `d90772c` (Phase 8) |
+| --- | --- | --- | --- |
+| 4K buffered writes | 0.6 MiB/s | 24.4 MiB/s | **335.2 MiB/s** |
+| 1M writes (trailing fsync) | 185.1 MiB/s | 652.6 MiB/s | 620.8 MiB/s |
+| warm sequential read | 2207.1 MiB/s | 2343.8 MiB/s | 2256.7 MiB/s |
+| fsync p50 | 320 µs | 1647 µs | 1649 µs |
+| 1M read p50 | 1173 µs | 1193 µs | 1137 µs |
+| bindgen build (cold target on the mount) | **FAILED** — SIGSEGV/SIGBUS | 9.47 s, OK | 10.47 s, OK |
 
 Notes:
 
+- The Phase-8 4K-buffered improvement (24.4 → 335.2 MiB/s) is the
+  measured result of the kernel writeback cache (`FUSE_WRITEBACK_CACHE`)
+  aggregating tiny writes into large `write()` requests plus the batch
+  group-commit transaction path (Phase-8 M1/M2).
 - 4K dsync (per-op durability) is high-variance (0.6–1.5 MiB/s both
   revisions; ~2.5–6.7 ms/op) — the synchronous write-through path dominates.
+  Phase-8: 0.5 MiB/s / 7.9 ms/op on this run (incompressible payload).
 - The fsync regression (320 → 1647 µs) is the measured price of deferred
   durability: pre-Phase-6 committed synchronously per write (cheap fsync,
   slow writes); post-Phase-6 batches commits and pays the full barrier at
@@ -40,6 +47,39 @@ Notes:
 - Environment (identical for both): CachyOS kernel 7.2.0-1-cachyos, AMD
   Ryzen 7 9800X3D (16 threads), governor `performance`, 131 GB RAM, backing
   device `/dev/nvme1n1p1` (ext4).
+
+## Campaign highlights (`campaign-1787664479-d90772c` — SequenceRans floor)
+
+Same methodology, same machine, same corpora as `67d977a`, with the
+SequenceRans general compression floor (Phase-8 §4) active in the write
+path and the versioned experiment now completing (the pre-fix encoder bug
+that aborted H2 is fixed and regression-tested).
+
+- **src corpus (source-tree pack): 1.636× → 124.824×** physical density.
+  The pack is a length-prefixed concatenation of source files — rANS-only
+  could not exploit its long-distance repeats; the LZ matcher can. This is
+  the floor doing its job: `docs/adr/0005-representation-set.md` 0x0D.
+- **H2 sign flip (honest negative finding):** with the cheaper floor,
+  fresh re-encoding of a mutated chunk now beats keeping a base+residual
+  chain on the drift corpus — sequential full 2.894× vs no-base 3.716× vs
+  shuffled 3.645× (−26% base savings). Each chain layer's descriptor and
+  the retained per-content-id chunk-index entries stay reachable, so chain
+  accumulation now costs more than re-encoding. The `67d977a` campaign's
+  +7.2% H2 result was conditional on the weaker RANS-era floor; the two
+  campaigns together are a controlled comparison of the mechanism's value
+  vs. the compression floor.
+- **DSFB investigation (repeated 5+5, structured):** physical byte-identical
+  across modes (17,151 B); write median 380.6 vs 370.1 MiB/s (DSFB on vs
+  off) — a smaller gap than the RANS-era 765 vs 335, consistent with DSFB
+  ordering cheaper candidates now that the floor handles the heavy lifting.
+- **Negative controls hold:** urandom 0.997×, compressed pack 0.994×;
+  shuffled history still removes temporal gains.
+- **GC traffic:** 50.9 MB unreachable → 47.9 MB reclaimed, physical
+  59.7 MB → 11.7 MB, 0.010 s.
+- **Baselines:** raw file (ext4) 1.000×; zstd -1 3.704×; zstd -19 5.331×;
+  direct rANS on the source pack 124.824× (== EntropyFS src ratio, as
+  expected when SequenceRans is the floor and the pack is match-dense);
+  btrfs/EROFS/SquashFS explicitly waived (root loop mounts).
 
 ## Campaign highlights (`campaign-1787658658-67d977a`)
 

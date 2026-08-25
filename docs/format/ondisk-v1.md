@@ -160,6 +160,29 @@ Representation tags and payloads:
 | 0x09 | PERIODIC | period u32, pattern (period bytes), count u32, tail_len u32, tail (tail_len bytes) |
 | 0x0A | ENTROPY_REF | universe_id u8, seed `[u8;16]`, coordinate u64, transform u8, residual (below) |
 | 0x0B | INLINE | data (len bytes, len ≤ 4096) |
+| 0x0C | PERMUTATION | rank u128, alphabet (len bytes; distinct, strictly increasing, len ≤ 34) |
+| 0x0D | SEQUENCE_RANS | model `[u8;32]`, enc_obj `[u8;32]`, scale_bits u8, codec u8, seq_len u32, lit_len u32, off_len u32, cmds u32, lit_out u32 |
+
+SEQUENCE_RANS (0x0D) is the local-match + entropy floor: an LZ77-style
+hash-chain matcher turns the extent into three byte streams — *commands*,
+*literals*, *offsets* — each of which is either rANS-coded (with its own
+model inside the model object) or stored raw when rANS cannot beat raw.
+
+Command encoding (one byte per command):
+
+| Command byte | Meaning |
+|--------------|---------|
+| 0x00..=0x7F | literal run of `b + 1` (1..=128) bytes, taken from the literal stream |
+| 0x80..=0xFF | copy of `b - 0x80 + 4` (4..=131) bytes at distance `d` (u16 LE, next 2 bytes of the offset stream), relative to the current output position |
+
+Copy semantics are byte-progressive (overlap allowed): `out[p+i] =
+out[p+i-d]` for `i in 0..len`, the standard LZ77 contract. The only
+constraint is `d <= p`. A long match is emitted as repeated copies at one
+distance. `seq_len`/`lit_len`/`off_len` are the *encoded* stream lengths
+and must sum to the enc object length; `cmds` is the decoded command count
+(≤ len) and `lit_out` the decoded literal byte count (≤ len). The enc
+object is `[commands][literals][offsets]` concatenated. The model object
+is three slots (below).
 
 Residual (for BASE_RESIDUAL / ENTROPY_REF), kinds:
 
@@ -185,6 +208,23 @@ is the *compressed XOR difference*.
 
 Decode rebuilds `RansByteEncSymbol`/`RansByteDecSymbol` arrays through the
 validated constructors and validates via `malformed::validate_freq_model`.
+
+## 8a. SEQUENCE_RANS model object (payload of tag 0x02)
+
+Three slots, one per stream (commands, literals, offsets):
+
+| Field | Type |
+|-------|------|
+| kind | u8 per slot: 0x00 = rANS model, 0x01 = raw stream, 0x02 = empty |
+| len | u16 LE per slot: encoded model length for kind 0x00; must be 0 otherwise |
+| bytes | the encoded model for kind 0x00 |
+
+For kind 0x01 the raw stream bytes live in the enc object (decoded length
+implied by the descriptor: `cmds`, `lit_out`, and `2 × copy-count`
+respectively). For kind 0x02 the decoded length must be 0. A stream whose
+histogram has ≤ 1 distinct symbol is stored raw (kind 0x01); an empty
+stream is kind 0x02; otherwise rANS is used only when strictly smaller
+than the raw stream.
 
 ## 9. Snapshot entry (value in snapshot tree)
 

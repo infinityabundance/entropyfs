@@ -25,6 +25,8 @@ pub enum Feature {
     ExtentDeltaIndex = 8,
     /// Optimizer rewrite history markers present (compat).
     OptimizerRewrite = 9,
+    /// SEQUENCE_RANS descriptors present (incompat).
+    SequenceRans = 10,
 }
 
 impl Feature {
@@ -36,7 +38,8 @@ impl Feature {
             | Feature::Chunk256K
             | Feature::EntropyRef
             | Feature::Palette
-            | Feature::Permutation => FeatureSetKind::Incompat,
+            | Feature::Permutation
+            | Feature::SequenceRans => FeatureSetKind::Incompat,
             Feature::Encrypted => FeatureSetKind::RoCompat,
             Feature::ExtentDeltaIndex | Feature::OptimizerRewrite => FeatureSetKind::Compat,
         }
@@ -142,7 +145,8 @@ pub fn check(on_disk: FeatureBits, _want_write: bool) -> Compatibility {
         | Feature::Chunk256K.mask()
         | Feature::EntropyRef.mask()
         | Feature::Palette.mask()
-        | Feature::Permutation.mask();
+        | Feature::Permutation.mask()
+        | Feature::SequenceRans.mask();
     if on_disk.incompat & !supported_incompat != 0 {
         return Compatibility::Refused(format!(
             "unsupported incompat feature bits: 0x{:016x}",

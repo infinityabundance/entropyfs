@@ -1,0 +1,1649 @@
+{
+  "campaign_dir": "evidence/performance/campaign-1787664479-d90772c",
+  "created_unix": 1787664479,
+  "runs": [
+    {
+      "corpus": "structured",
+      "mode": "full",
+      "run_count": 5,
+      "runs": [
+        {
+          "run": 0,
+          "write_mbps": 331.32439617526575,
+          "read_mbps": 3129.996991290392,
+          "write_wall_s": 0.048291041,
+          "read_wall_s": 0.005111826,
+          "cpu_user_s": 0.049999999999999996,
+          "cpu_sys_s": 0.0,
+          "logical_bytes": 16777216,
+          "written_bytes": 16777216,
+          "reachable_bytes": 17151,
+          "total_backing_bytes": 1092924,
+          "unreachable_bytes": 808545,
+          "ratio_reachable": 978.2062853477931,
+          "ratio_total_backing": 15.350761809604327,
+          "result_hash": "497f9bbeba753d09b02280c5704355ba5158568364e638904a3cb471fb20c9cc",
+          "hash_matches_input": true,
+          "families": {
+            "PERIODIC": 128,
+            "SEQUENCE_RANS": 64,
+            "ZERO": 64
+          },
+          "accounting": {
+            "payload_bytes": 0,
+            "model_bytes": 0,
+            "residual_bytes": 0,
+            "descriptor_bytes": 11584,
+            "metadata_bytes": 5567,
+            "integrity_bytes_est": 3984,
+            "allocator_overhead_bytes": 267228,
+            "unreclaimed_bytes": 808545,
+            "check": "ok"
+          }
+        },
+        {
+          "run": 1,
+          "write_mbps": 384.8568730518575,
+          "read_mbps": 3058.777467821661,
+          "write_wall_s": 0.041573897,
+          "read_wall_s": 0.005230848,
+          "cpu_user_s": 0.05000000000000002,
+          "cpu_sys_s": 0.0,
+          "logical_bytes": 16777216,
+          "written_bytes": 16777216,
+          "reachable_bytes": 17151,
+          "total_backing_bytes": 1092924,
+          "unreachable_bytes": 808545,
+          "ratio_reachable": 978.2062853477931,
+          "ratio_total_backing": 15.350761809604327,
+          "result_hash": "497f9bbeba753d09b02280c5704355ba5158568364e638904a3cb471fb20c9cc",
+          "hash_matches_input": true,
+          "families": {
+            "PERIODIC": 128,
+            "SEQUENCE_RANS": 64,
+            "ZERO": 64
+          },
+          "accounting": {
+            "payload_bytes": 0,
+            "model_bytes": 0,
+            "residual_bytes": 0,
+            "descriptor_bytes": 11584,
+            "metadata_bytes": 5567,
+            "integrity_bytes_est": 3984,
+            "allocator_overhead_bytes": 267228,
+            "unreclaimed_bytes": 808545,
+            "check": "ok"
+          }
+        },
+        {
+          "run": 2,
+          "write_mbps": 379.20547163159125,
+          "read_mbps": 3118.2203069420157,
+          "write_wall_s": 0.042193484,
+          "read_wall_s": 0.005131132,
+          "cpu_user_s": 0.04999999999999999,
+          "cpu_sys_s": 0.01,
+          "logical_bytes": 16777216,
+          "written_bytes": 16777216,
+          "reachable_bytes": 17151,
+          "total_backing_bytes": 1092924,
+          "unreachable_bytes": 808545,
+          "ratio_reachable": 978.2062853477931,
+          "ratio_total_backing": 15.350761809604327,
+          "result_hash": "497f9bbeba753d09b02280c5704355ba5158568364e638904a3cb471fb20c9cc",
+          "hash_matches_input": true,
+          "families": {
+            "PERIODIC": 128,
+            "SEQUENCE_RANS": 64,
+            "ZERO": 64
+          },
+          "accounting": {
+            "payload_bytes": 0,
+            "model_bytes": 0,
+            "residual_bytes": 0,
+            "descriptor_bytes": 11584,
+            "metadata_bytes": 5567,
+            "integrity_bytes_est": 3984,
+            "allocator_overhead_bytes": 267228,
+            "unreclaimed_bytes": 808545,
+            "check": "ok"
+          }
+        },
+        {
+          "run": 3,
+          "write_mbps": 388.35915755869377,
+          "read_mbps": 3110.3799990124544,
+          "write_wall_s": 0.041198977,
+          "read_wall_s": 0.005144066,
+          "cpu_user_s": 0.04000000000000001,
+          "cpu_sys_s": 0.0,
+          "logical_bytes": 16777216,
+          "written_bytes": 16777216,
+          "reachable_bytes": 17151,
+          "total_backing_bytes": 1092924,
+          "unreachable_bytes": 808545,
+          "ratio_reachable": 978.2062853477931,
+          "ratio_total_backing": 15.350761809604327,
+          "result_hash": "497f9bbeba753d09b02280c5704355ba5158568364e638904a3cb471fb20c9cc",
+          "hash_matches_input": true,
+          "families": {
+            "PERIODIC": 128,
+            "SEQUENCE_RANS": 64,
+            "ZERO": 64
+          },
+          "accounting": {
+            "payload_bytes": 0,
+            "model_bytes": 0,
+            "residual_bytes": 0,
+            "descriptor_bytes": 11584,
+            "metadata_bytes": 5567,
+            "integrity_bytes_est": 3984,
+            "allocator_overhead_bytes": 267228,
+            "unreclaimed_bytes": 808545,
+            "check": "ok"
+          }
+        },
+        {
+          "run": 4,
+          "write_mbps": 382.2769615222231,
+          "read_mbps": 3109.2049957151266,
+          "write_wall_s": 0.041854471,
+          "read_wall_s": 0.00514601,
+          "cpu_user_s": 0.040000000000000036,
+          "cpu_sys_s": 0.0,
+          "logical_bytes": 16777216,
+          "written_bytes": 16777216,
+          "reachable_bytes": 17151,
+          "total_backing_bytes": 1092924,
+          "unreachable_bytes": 808545,
+          "ratio_reachable": 978.2062853477931,
+          "ratio_total_backing": 15.350761809604327,
+          "result_hash": "497f9bbeba753d09b02280c5704355ba5158568364e638904a3cb471fb20c9cc",
+          "hash_matches_input": true,
+          "families": {
+            "PERIODIC": 128,
+            "SEQUENCE_RANS": 64,
+            "ZERO": 64
+          },
+          "accounting": {
+            "payload_bytes": 0,
+            "model_bytes": 0,
+            "residual_bytes": 0,
+            "descriptor_bytes": 11584,
+            "metadata_bytes": 5567,
+            "integrity_bytes_est": 3984,
+            "allocator_overhead_bytes": 267228,
+            "unreclaimed_bytes": 808545,
+            "check": "ok"
+          }
+        }
+      ],
+      "write_throughput": {
+        "count": 5,
+        "mean": 373.2045719879263,
+        "min": 331.32439617526575,
+        "p50": 382.2769615222231,
+        "p95": 388.35915755869377,
+        "p99": 388.35915755869377,
+        "max": 388.35915755869377
+      },
+      "read_throughput": {
+        "count": 5,
+        "mean": 3105.31595215633,
+        "min": 3058.777467821661,
+        "p50": 3110.3799990124544,
+        "p95": 3129.996991290392,
+        "p99": 3129.996991290392,
+        "max": 3129.996991290392
+      },
+      "write_latency_us": {
+        "count": 5,
+        "mean": 41685.872599999995,
+        "min": 40351.294,
+        "p50": 40907.583,
+        "p95": 45155.426,
+        "p99": 45155.426,
+        "max": 45155.426
+      },
+      "read_latency_us": {
+        "count": 1280,
+        "mean": 14.734022656249978,
+        "min": 5.621,
+        "p50": 20.157999999999998,
+        "p95": 21.901,
+        "p99": 27.06,
+        "max": 40.967000000000006
+      },
+      "fsync_latency_us": {
+        "count": 25,
+        "mean": 1856.0681200000001,
+        "min": 1617.39,
+        "p50": 1646.315,
+        "p95": 2801.7219999999998,
+        "p99": 2872.173,
+        "max": 2872.173
+      },
+      "cpu_user_s": {
+        "count": 5,
+        "mean": 0.046000000000000006,
+        "min": 0.04000000000000001,
+        "p50": 0.04999999999999999,
+        "p95": 0.05000000000000002,
+        "p99": 0.05000000000000002,
+        "max": 0.05000000000000002
+      },
+      "cpu_sys_s": {
+        "count": 5,
+        "mean": 0.002,
+        "min": 0.0,
+        "p50": 0.0,
+        "p95": 0.01,
+        "p99": 0.01,
+        "max": 0.01
+      },
+      "physical_median": 17151,
+      "ratio_median": 978.2062853477931
+    },
+    {
+      "corpus": "src",
+      "mode": "full",
+      "run_count": 3,
+      "runs": [
+        {
+          "run": 0,
+          "write_mbps": 54.39388321405702,
+          "read_mbps": 379.0389150559608,
+          "write_wall_s": 0.024255156,
+          "read_wall_s": 0.00348073,
+          "cpu_user_s": 0.02999999999999997,
+          "cpu_sys_s": 0.0,
+          "logical_bytes": 1383420,
+          "written_bytes": 1383420,
+          "reachable_bytes": 11083,
+          "total_backing_bytes": 490553,
+          "unreachable_bytes": 474858,
+          "ratio_reachable": 124.82360371740504,
+          "ratio_total_backing": 2.820123411741443,
+          "result_hash": "cc616dde6dff95f4e781ccff89167da981d6a9ac73c93a1db5354c2179d54ac2",
+          "hash_matches_input": true,
+          "families": {
+            "RANS": 1,
+            "SEQUENCE_RANS": 21
+          },
+          "accounting": {
+            "payload_bytes": 4559,
+            "model_bytes": 491,
+            "residual_bytes": 0,
+            "descriptor_bytes": 1982,
+            "metadata_bytes": 4051,
+            "integrity_bytes_est": 628,
+            "allocator_overhead_bytes": 4612,
+            "unreclaimed_bytes": 474858,
+            "check": "ok"
+          }
+        },
+        {
+          "run": 1,
+          "write_mbps": 55.777098057654534,
+          "read_mbps": 382.63703754053705,
+          "write_wall_s": 0.023653653,
+          "read_wall_s": 0.003447999,
+          "cpu_user_s": 0.030000000000000027,
+          "cpu_sys_s": 0.0,
+          "logical_bytes": 1383420,
+          "written_bytes": 1383420,
+          "reachable_bytes": 11083,
+          "total_backing_bytes": 490553,
+          "unreachable_bytes": 474858,
+          "ratio_reachable": 124.82360371740504,
+          "ratio_total_backing": 2.820123411741443,
+          "result_hash": "cc616dde6dff95f4e781ccff89167da981d6a9ac73c93a1db5354c2179d54ac2",
+          "hash_matches_input": true,
+          "families": {
+            "RANS": 1,
+            "SEQUENCE_RANS": 21
+          },
+          "accounting": {
+            "payload_bytes": 4559,
+            "model_bytes": 491,
+            "residual_bytes": 0,
+            "descriptor_bytes": 1982,
+            "metadata_bytes": 4051,
+            "integrity_bytes_est": 628,
+            "allocator_overhead_bytes": 4612,
+            "unreclaimed_bytes": 474858,
+            "check": "ok"
+          }
+        },
+        {
+          "run": 2,
+          "write_mbps": 56.14355321708321,
+          "read_mbps": 386.62053085921394,
+          "write_wall_s": 0.023499263,
+          "read_wall_s": 0.003412473,
+          "cpu_user_s": 0.02999999999999997,
+          "cpu_sys_s": 0.0,
+          "logical_bytes": 1383420,
+          "written_bytes": 1383420,
+          "reachable_bytes": 11083,
+          "total_backing_bytes": 490553,
+          "unreachable_bytes": 474858,
+          "ratio_reachable": 124.82360371740504,
+          "ratio_total_backing": 2.820123411741443,
+          "result_hash": "cc616dde6dff95f4e781ccff89167da981d6a9ac73c93a1db5354c2179d54ac2",
+          "hash_matches_input": true,
+          "families": {
+            "RANS": 1,
+            "SEQUENCE_RANS": 21
+          },
+          "accounting": {
+            "payload_bytes": 4559,
+            "model_bytes": 491,
+            "residual_bytes": 0,
+            "descriptor_bytes": 1982,
+            "metadata_bytes": 4051,
+            "integrity_bytes_est": 628,
+            "allocator_overhead_bytes": 4612,
+            "unreclaimed_bytes": 474858,
+            "check": "ok"
+          }
+        }
+      ],
+      "write_throughput": {
+        "count": 3,
+        "mean": 55.43817816293159,
+        "min": 54.39388321405702,
+        "p50": 55.777098057654534,
+        "p95": 56.14355321708321,
+        "p99": 56.14355321708321,
+        "max": 56.14355321708321
+      },
+      "read_throughput": {
+        "count": 3,
+        "mean": 382.76549448523724,
+        "min": 379.0389150559608,
+        "p50": 382.63703754053705,
+        "p95": 386.62053085921394,
+        "p99": 386.62053085921394,
+        "max": 386.62053085921394
+      },
+      "write_latency_us": {
+        "count": 3,
+        "mean": 23742.684999999998,
+        "min": 23448.679,
+        "p50": 23604.04,
+        "p95": 24175.336,
+        "p99": 24175.336,
+        "max": 24175.336
+      },
+      "read_latency_us": {
+        "count": 66,
+        "mean": 151.28390909090913,
+        "min": 31.619999999999997,
+        "p50": 152.605,
+        "p95": 213.269,
+        "p99": 217.70700000000002,
+        "max": 217.70700000000002
+      },
+      "fsync_latency_us": {
+        "count": 15,
+        "mean": 1800.7502000000004,
+        "min": 1618.783,
+        "p50": 1649.621,
+        "p95": 2439.756,
+        "p99": 2439.756,
+        "max": 2439.756
+      },
+      "cpu_user_s": {
+        "count": 3,
+        "mean": 0.02999999999999999,
+        "min": 0.02999999999999997,
+        "p50": 0.02999999999999997,
+        "p95": 0.030000000000000027,
+        "p99": 0.030000000000000027,
+        "max": 0.030000000000000027
+      },
+      "cpu_sys_s": {
+        "count": 3,
+        "mean": 0.0,
+        "min": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "max": 0.0
+      },
+      "physical_median": 11083,
+      "ratio_median": 124.82360371740504
+    },
+    {
+      "corpus": "urandom",
+      "mode": "full",
+      "run_count": 3,
+      "runs": [
+        {
+          "run": 0,
+          "write_mbps": 97.22423354855376,
+          "read_mbps": 4122.40661976055,
+          "write_wall_s": 0.082284012,
+          "read_wall_s": 0.001940614,
+          "cpu_user_s": 0.08000000000000002,
+          "cpu_sys_s": 0.0,
+          "logical_bytes": 8388608,
+          "written_bytes": 8388608,
+          "reachable_bytes": 8413743,
+          "total_backing_bytes": 9134614,
+          "unreachable_bytes": 714564,
+          "ratio_reachable": 0.9970126256530536,
+          "ratio_total_backing": 0.9183319623576869,
+          "result_hash": "604c808e92b08b0eced8fa162979d9415f523cf2d02c97baeceb59d689254014",
+          "hash_matches_input": true,
+          "families": {
+            "RAW": 128
+          },
+          "accounting": {
+            "payload_bytes": 8396032,
+            "model_bytes": 0,
+            "residual_bytes": 0,
+            "descriptor_bytes": 4736,
+            "metadata_bytes": 12975,
+            "integrity_bytes_est": 3184,
+            "allocator_overhead_bytes": 6307,
+            "unreclaimed_bytes": 714564,
+            "check": "ok"
+          }
+        },
+        {
+          "run": 1,
+          "write_mbps": 97.99095394058924,
+          "read_mbps": 4181.974435590275,
+          "write_wall_s": 0.081640189,
+          "read_wall_s": 0.001912972,
+          "cpu_user_s": 0.08000000000000002,
+          "cpu_sys_s": 0.009999999999999998,
+          "logical_bytes": 8388608,
+          "written_bytes": 8388608,
+          "reachable_bytes": 8413743,
+          "total_backing_bytes": 9134614,
+          "unreachable_bytes": 714564,
+          "ratio_reachable": 0.9970126256530536,
+          "ratio_total_backing": 0.9183319623576869,
+          "result_hash": "604c808e92b08b0eced8fa162979d9415f523cf2d02c97baeceb59d689254014",
+          "hash_matches_input": true,
+          "families": {
+            "RAW": 128
+          },
+          "accounting": {
+            "payload_bytes": 8396032,
+            "model_bytes": 0,
+            "residual_bytes": 0,
+            "descriptor_bytes": 4736,
+            "metadata_bytes": 12975,
+            "integrity_bytes_est": 3184,
+            "allocator_overhead_bytes": 6307,
+            "unreclaimed_bytes": 714564,
+            "check": "ok"
+          }
+        },
+        {
+          "run": 2,
+          "write_mbps": 96.30427528384482,
+          "read_mbps": 4021.098704904635,
+          "write_wall_s": 0.08307004,
+          "read_wall_s": 0.001989506,
+          "cpu_user_s": 0.07999999999999996,
+          "cpu_sys_s": 0.0,
+          "logical_bytes": 8388608,
+          "written_bytes": 8388608,
+          "reachable_bytes": 8413743,
+          "total_backing_bytes": 9134614,
+          "unreachable_bytes": 714564,
+          "ratio_reachable": 0.9970126256530536,
+          "ratio_total_backing": 0.9183319623576869,
+          "result_hash": "604c808e92b08b0eced8fa162979d9415f523cf2d02c97baeceb59d689254014",
+          "hash_matches_input": true,
+          "families": {
+            "RAW": 128
+          },
+          "accounting": {
+            "payload_bytes": 8396032,
+            "model_bytes": 0,
+            "residual_bytes": 0,
+            "descriptor_bytes": 4736,
+            "metadata_bytes": 12975,
+            "integrity_bytes_est": 3184,
+            "allocator_overhead_bytes": 6307,
+            "unreclaimed_bytes": 714564,
+            "check": "ok"
+          }
+        }
+      ],
+      "write_throughput": {
+        "count": 3,
+        "mean": 97.1731542576626,
+        "min": 96.30427528384482,
+        "p50": 97.22423354855376,
+        "p95": 97.99095394058924,
+        "p99": 97.99095394058924,
+        "max": 97.99095394058924
+      },
+      "read_throughput": {
+        "count": 3,
+        "mean": 4108.493253418486,
+        "min": 4021.098704904635,
+        "p50": 4122.40661976055,
+        "p95": 4181.974435590275,
+        "p99": 4181.974435590275,
+        "max": 4181.974435590275
+      },
+      "write_latency_us": {
+        "count": 3,
+        "mean": 81904.74333333332,
+        "min": 81300.47499999999,
+        "p50": 81823.81199999999,
+        "p95": 82589.943,
+        "p99": 82589.943,
+        "max": 82589.943
+      },
+      "read_latency_us": {
+        "count": 384,
+        "mean": 9.728578125000004,
+        "min": 7.865,
+        "p50": 9.648,
+        "p95": 10.79,
+        "p99": 16.691,
+        "max": 28.283
+      },
+      "fsync_latency_us": {
+        "count": 15,
+        "mean": 2336.4947333333334,
+        "min": 1617.972,
+        "p50": 1663.326,
+        "p95": 5284.338000000001,
+        "p99": 5284.338000000001,
+        "max": 5284.338000000001
+      },
+      "cpu_user_s": {
+        "count": 3,
+        "mean": 0.08,
+        "min": 0.07999999999999996,
+        "p50": 0.08000000000000002,
+        "p95": 0.08000000000000002,
+        "p99": 0.08000000000000002,
+        "max": 0.08000000000000002
+      },
+      "cpu_sys_s": {
+        "count": 3,
+        "mean": 0.0033333333333333327,
+        "min": 0.0,
+        "p50": 0.0,
+        "p95": 0.009999999999999998,
+        "p99": 0.009999999999999998,
+        "max": 0.009999999999999998
+      },
+      "physical_median": 8413743,
+      "ratio_median": 0.9970126256530536
+    },
+    {
+      "corpus": "compressed-z19",
+      "mode": "full",
+      "run_count": 3,
+      "runs": [
+        {
+          "run": 0,
+          "write_mbps": 97.13908200650505,
+          "read_mbps": 3806.9519257021784,
+          "write_wall_s": 0.002547868,
+          "read_wall_s": 0.000065012,
+          "cpu_user_s": 0.0,
+          "cpu_sys_s": 0.0,
+          "logical_bytes": 259520,
+          "written_bytes": 259520,
+          "reachable_bytes": 261181,
+          "total_backing_bytes": 269302,
+          "unreachable_bytes": 3509,
+          "ratio_reachable": 0.9936404256052316,
+          "ratio_total_backing": 0.9636764673117912,
+          "result_hash": "27a2ea01938611f1de72624781e841c92b5902c383673f012900f2782f3c146d",
+          "hash_matches_input": true,
+          "families": {
+            "RAW": 4
+          },
+          "accounting": {
+            "payload_bytes": 259752,
+            "model_bytes": 0,
+            "residual_bytes": 0,
+            "descriptor_bytes": 148,
+            "metadata_bytes": 1281,
+            "integrity_bytes_est": 180,
+            "allocator_overhead_bytes": 4612,
+            "unreclaimed_bytes": 3509,
+            "check": "ok"
+          }
+        },
+        {
+          "run": 1,
+          "write_mbps": 100.43761143358553,
+          "read_mbps": 3799.3546190437814,
+          "write_wall_s": 0.002464192,
+          "read_wall_s": 0.000065142,
+          "cpu_user_s": 0.0,
+          "cpu_sys_s": 0.0,
+          "logical_bytes": 259520,
+          "written_bytes": 259520,
+          "reachable_bytes": 261181,
+          "total_backing_bytes": 269302,
+          "unreachable_bytes": 3509,
+          "ratio_reachable": 0.9936404256052316,
+          "ratio_total_backing": 0.9636764673117912,
+          "result_hash": "27a2ea01938611f1de72624781e841c92b5902c383673f012900f2782f3c146d",
+          "hash_matches_input": true,
+          "families": {
+            "RAW": 4
+          },
+          "accounting": {
+            "payload_bytes": 259752,
+            "model_bytes": 0,
+            "residual_bytes": 0,
+            "descriptor_bytes": 148,
+            "metadata_bytes": 1281,
+            "integrity_bytes_est": 180,
+            "allocator_overhead_bytes": 4612,
+            "unreclaimed_bytes": 3509,
+            "check": "ok"
+          }
+        },
+        {
+          "run": 2,
+          "write_mbps": 98.14870233990798,
+          "read_mbps": 4012.281082819972,
+          "write_wall_s": 0.002521659,
+          "read_wall_s": 0.000061685,
+          "cpu_user_s": 0.010000000000000009,
+          "cpu_sys_s": 0.0,
+          "logical_bytes": 259520,
+          "written_bytes": 259520,
+          "reachable_bytes": 261181,
+          "total_backing_bytes": 269302,
+          "unreachable_bytes": 3509,
+          "ratio_reachable": 0.9936404256052316,
+          "ratio_total_backing": 0.9636764673117912,
+          "result_hash": "27a2ea01938611f1de72624781e841c92b5902c383673f012900f2782f3c146d",
+          "hash_matches_input": true,
+          "families": {
+            "RAW": 4
+          },
+          "accounting": {
+            "payload_bytes": 259752,
+            "model_bytes": 0,
+            "residual_bytes": 0,
+            "descriptor_bytes": 148,
+            "metadata_bytes": 1281,
+            "integrity_bytes_est": 180,
+            "allocator_overhead_bytes": 4612,
+            "unreclaimed_bytes": 3509,
+            "check": "ok"
+          }
+        }
+      ],
+      "write_throughput": {
+        "count": 3,
+        "mean": 98.57513192666619,
+        "min": 97.13908200650505,
+        "p50": 98.14870233990798,
+        "p95": 100.43761143358553,
+        "p99": 100.43761143358553,
+        "max": 100.43761143358553
+      },
+      "read_throughput": {
+        "count": 3,
+        "mean": 3872.8625425219775,
+        "min": 3799.3546190437814,
+        "p50": 3806.9519257021784,
+        "p95": 4012.281082819972,
+        "p99": 4012.281082819972,
+        "max": 4012.281082819972
+      },
+      "write_latency_us": {
+        "count": 3,
+        "mean": 2503.2746666666667,
+        "min": 2458.731,
+        "p50": 2516.299,
+        "p95": 2534.794,
+        "p99": 2534.794,
+        "max": 2534.794
+      },
+      "read_latency_us": {
+        "count": 12,
+        "mean": 9.610666666666667,
+        "min": 6.832999999999999,
+        "p50": 7.534,
+        "p95": 16.762,
+        "p99": 16.762,
+        "max": 16.762
+      },
+      "fsync_latency_us": {
+        "count": 15,
+        "mean": 1796.5911333333336,
+        "min": 1632.8700000000001,
+        "p50": 1652.576,
+        "p95": 2450.346,
+        "p99": 2450.346,
+        "max": 2450.346
+      },
+      "cpu_user_s": {
+        "count": 3,
+        "mean": 0.003333333333333336,
+        "min": 0.0,
+        "p50": 0.0,
+        "p95": 0.010000000000000009,
+        "p99": 0.010000000000000009,
+        "max": 0.010000000000000009
+      },
+      "cpu_sys_s": {
+        "count": 3,
+        "mean": 0.0,
+        "min": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "max": 0.0
+      },
+      "physical_median": 261181,
+      "ratio_median": 0.9936404256052316
+    },
+    {
+      "corpus": "versioned",
+      "mode": "full",
+      "run_count": 3,
+      "runs": [
+        {
+          "run": 0,
+          "write_mbps": 97.08131076431111,
+          "read_mbps": 926.5045623400911,
+          "write_wall_s": 0.329620601,
+          "read_wall_s": 0.004317302,
+          "cpu_user_s": 0.32000000000000006,
+          "cpu_sys_s": 0.01999999999999999,
+          "logical_bytes": 4194304,
+          "written_bytes": 33554432,
+          "reachable_bytes": 1449257,
+          "total_backing_bytes": 44398221,
+          "unreachable_bytes": 42884973,
+          "ratio_reachable": 2.894106428328447,
+          "ratio_total_backing": 0.09447009149308032,
+          "result_hash": "52755c6a695ae50351c33c5c6345bc78c4a4bf04763d9270b2238ff8f626ec92",
+          "hash_matches_input": true,
+          "families": {
+            "BASE_RESIDUAL": 64
+          },
+          "accounting": {
+            "payload_bytes": 1049504,
+            "model_bytes": 0,
+            "residual_bytes": 101491,
+            "descriptor_bytes": 104115,
+            "metadata_bytes": 295638,
+            "integrity_bytes_est": 15752,
+            "allocator_overhead_bytes": 63991,
+            "unreclaimed_bytes": 42884973,
+            "check": "ok"
+          }
+        },
+        {
+          "run": 1,
+          "write_mbps": 97.07371910795356,
+          "read_mbps": 856.7256929250949,
+          "write_wall_s": 0.329646379,
+          "read_wall_s": 0.004668939,
+          "cpu_user_s": 0.31999999999999984,
+          "cpu_sys_s": 0.010000000000000009,
+          "logical_bytes": 4194304,
+          "written_bytes": 33554432,
+          "reachable_bytes": 1449257,
+          "total_backing_bytes": 44398221,
+          "unreachable_bytes": 42884973,
+          "ratio_reachable": 2.894106428328447,
+          "ratio_total_backing": 0.09447009149308032,
+          "result_hash": "52755c6a695ae50351c33c5c6345bc78c4a4bf04763d9270b2238ff8f626ec92",
+          "hash_matches_input": true,
+          "families": {
+            "BASE_RESIDUAL": 64
+          },
+          "accounting": {
+            "payload_bytes": 1049504,
+            "model_bytes": 0,
+            "residual_bytes": 101491,
+            "descriptor_bytes": 104115,
+            "metadata_bytes": 295638,
+            "integrity_bytes_est": 15752,
+            "allocator_overhead_bytes": 63991,
+            "unreclaimed_bytes": 42884973,
+            "check": "ok"
+          }
+        },
+        {
+          "run": 2,
+          "write_mbps": 97.46627019053003,
+          "read_mbps": 929.8167354459854,
+          "write_wall_s": 0.328318709,
+          "read_wall_s": 0.004301923,
+          "cpu_user_s": 0.31000000000000005,
+          "cpu_sys_s": 0.01999999999999999,
+          "logical_bytes": 4194304,
+          "written_bytes": 33554432,
+          "reachable_bytes": 1449257,
+          "total_backing_bytes": 44398221,
+          "unreachable_bytes": 42884973,
+          "ratio_reachable": 2.894106428328447,
+          "ratio_total_backing": 0.09447009149308032,
+          "result_hash": "52755c6a695ae50351c33c5c6345bc78c4a4bf04763d9270b2238ff8f626ec92",
+          "hash_matches_input": true,
+          "families": {
+            "BASE_RESIDUAL": 64
+          },
+          "accounting": {
+            "payload_bytes": 1049504,
+            "model_bytes": 0,
+            "residual_bytes": 101491,
+            "descriptor_bytes": 104115,
+            "metadata_bytes": 295638,
+            "integrity_bytes_est": 15752,
+            "allocator_overhead_bytes": 63991,
+            "unreclaimed_bytes": 42884973,
+            "check": "ok"
+          }
+        }
+      ],
+      "write_throughput": {
+        "count": 3,
+        "mean": 97.20710002093158,
+        "min": 97.07371910795356,
+        "p50": 97.08131076431111,
+        "p95": 97.46627019053003,
+        "p99": 97.46627019053003,
+        "max": 97.46627019053003
+      },
+      "read_throughput": {
+        "count": 3,
+        "mean": 904.3489969037237,
+        "min": 856.7256929250949,
+        "p50": 926.5045623400911,
+        "p95": 929.8167354459854,
+        "p99": 929.8167354459854,
+        "max": 929.8167354459854
+      },
+      "write_latency_us": {
+        "count": 24,
+        "mean": 40899.19191666666,
+        "min": 14769.351,
+        "p50": 27185.417,
+        "p95": 82961.20599999999,
+        "p99": 83088.21299999999,
+        "max": 83088.21299999999
+      },
+      "read_latency_us": {
+        "count": 192,
+        "mean": 63.70213020833329,
+        "min": 16.781000000000002,
+        "p50": 52.107,
+        "p95": 129.54199999999997,
+        "p99": 153.827,
+        "max": 155.089
+      },
+      "fsync_latency_us": {
+        "count": 15,
+        "mean": 4618.056,
+        "min": 1628.942,
+        "p50": 1650.823,
+        "p95": 18365.076,
+        "p99": 18365.076,
+        "max": 18365.076
+      },
+      "cpu_user_s": {
+        "count": 3,
+        "mean": 0.31666666666666665,
+        "min": 0.31000000000000005,
+        "p50": 0.31999999999999984,
+        "p95": 0.32000000000000006,
+        "p99": 0.32000000000000006,
+        "max": 0.32000000000000006
+      },
+      "cpu_sys_s": {
+        "count": 3,
+        "mean": 0.016666666666666663,
+        "min": 0.010000000000000009,
+        "p50": 0.01999999999999999,
+        "p95": 0.01999999999999999,
+        "p99": 0.01999999999999999,
+        "max": 0.01999999999999999
+      },
+      "physical_median": 1449257,
+      "ratio_median": 2.894106428328447
+    },
+    {
+      "corpus": "versioned",
+      "mode": "no-base",
+      "run_count": 3,
+      "runs": [
+        {
+          "run": 0,
+          "write_mbps": 98.74664920603728,
+          "read_mbps": 1123.9822691797037,
+          "write_wall_s": 0.324061629,
+          "read_wall_s": 0.003558775,
+          "cpu_user_s": 0.31000000000000005,
+          "cpu_sys_s": 0.010000000000000009,
+          "logical_bytes": 4194304,
+          "written_bytes": 33554432,
+          "reachable_bytes": 1128735,
+          "total_backing_bytes": 14175366,
+          "unreachable_bytes": 12982640,
+          "ratio_reachable": 3.7159333235879104,
+          "ratio_total_backing": 0.2958868222520674,
+          "result_hash": "52755c6a695ae50351c33c5c6345bc78c4a4bf04763d9270b2238ff8f626ec92",
+          "hash_matches_input": true,
+          "families": {
+            "RANS": 16,
+            "RAW": 16,
+            "SEQUENCE_RANS": 32
+          },
+          "accounting": {
+            "payload_bytes": 1056867,
+            "model_bytes": 11566,
+            "residual_bytes": 0,
+            "descriptor_bytes": 4640,
+            "metadata_bytes": 55662,
+            "integrity_bytes_est": 13192,
+            "allocator_overhead_bytes": 63991,
+            "unreclaimed_bytes": 12982640,
+            "check": "ok"
+          }
+        },
+        {
+          "run": 1,
+          "write_mbps": 97.91474906112838,
+          "read_mbps": 1130.154209541892,
+          "write_wall_s": 0.326814911,
+          "read_wall_s": 0.00353934,
+          "cpu_user_s": 0.31999999999999984,
+          "cpu_sys_s": 0.010000000000000009,
+          "logical_bytes": 4194304,
+          "written_bytes": 33554432,
+          "reachable_bytes": 1128735,
+          "total_backing_bytes": 14175366,
+          "unreachable_bytes": 12982640,
+          "ratio_reachable": 3.7159333235879104,
+          "ratio_total_backing": 0.2958868222520674,
+          "result_hash": "52755c6a695ae50351c33c5c6345bc78c4a4bf04763d9270b2238ff8f626ec92",
+          "hash_matches_input": true,
+          "families": {
+            "RANS": 16,
+            "RAW": 16,
+            "SEQUENCE_RANS": 32
+          },
+          "accounting": {
+            "payload_bytes": 1056867,
+            "model_bytes": 11566,
+            "residual_bytes": 0,
+            "descriptor_bytes": 4640,
+            "metadata_bytes": 55662,
+            "integrity_bytes_est": 13192,
+            "allocator_overhead_bytes": 63991,
+            "unreclaimed_bytes": 12982640,
+            "check": "ok"
+          }
+        },
+        {
+          "run": 2,
+          "write_mbps": 98.92858915842952,
+          "read_mbps": 1096.3190266441154,
+          "write_wall_s": 0.323465646,
+          "read_wall_s": 0.003648573,
+          "cpu_user_s": 0.31999999999999984,
+          "cpu_sys_s": 0.0,
+          "logical_bytes": 4194304,
+          "written_bytes": 33554432,
+          "reachable_bytes": 1128735,
+          "total_backing_bytes": 14175366,
+          "unreachable_bytes": 12982640,
+          "ratio_reachable": 3.7159333235879104,
+          "ratio_total_backing": 0.2958868222520674,
+          "result_hash": "52755c6a695ae50351c33c5c6345bc78c4a4bf04763d9270b2238ff8f626ec92",
+          "hash_matches_input": true,
+          "families": {
+            "RANS": 16,
+            "RAW": 16,
+            "SEQUENCE_RANS": 32
+          },
+          "accounting": {
+            "payload_bytes": 1056867,
+            "model_bytes": 11566,
+            "residual_bytes": 0,
+            "descriptor_bytes": 4640,
+            "metadata_bytes": 55662,
+            "integrity_bytes_est": 13192,
+            "allocator_overhead_bytes": 63991,
+            "unreclaimed_bytes": 12982640,
+            "check": "ok"
+          }
+        }
+      ],
+      "write_throughput": {
+        "count": 3,
+        "mean": 98.52999580853172,
+        "min": 97.91474906112838,
+        "p50": 98.74664920603728,
+        "p95": 98.92858915842952,
+        "p99": 98.92858915842952,
+        "max": 98.92858915842952
+      },
+      "read_throughput": {
+        "count": 3,
+        "mean": 1116.8185017885705,
+        "min": 1096.3190266441154,
+        "p50": 1123.9822691797037,
+        "p95": 1130.154209541892,
+        "p99": 1130.154209541892,
+        "max": 1130.154209541892
+      },
+      "write_latency_us": {
+        "count": 24,
+        "mean": 40345.285625,
+        "min": 15891.186000000002,
+        "p50": 43760.0,
+        "p95": 45735.228,
+        "p99": 46178.506,
+        "max": 46178.506
+      },
+      "read_latency_us": {
+        "count": 192,
+        "mean": 50.54034895833333,
+        "min": 7.944999999999999,
+        "p50": 41.858,
+        "p95": 111.368,
+        "p99": 118.642,
+        "max": 144.19
+      },
+      "fsync_latency_us": {
+        "count": 15,
+        "mean": 2774.6060666666667,
+        "min": 1628.962,
+        "p50": 1658.8880000000001,
+        "p95": 7914.651,
+        "p99": 7914.651,
+        "max": 7914.651
+      },
+      "cpu_user_s": {
+        "count": 3,
+        "mean": 0.3166666666666666,
+        "min": 0.31000000000000005,
+        "p50": 0.31999999999999984,
+        "p95": 0.31999999999999984,
+        "p99": 0.31999999999999984,
+        "max": 0.31999999999999984
+      },
+      "cpu_sys_s": {
+        "count": 3,
+        "mean": 0.006666666666666672,
+        "min": 0.0,
+        "p50": 0.010000000000000009,
+        "p95": 0.010000000000000009,
+        "p99": 0.010000000000000009,
+        "max": 0.010000000000000009
+      },
+      "physical_median": 1128735,
+      "ratio_median": 3.7159333235879104
+    },
+    {
+      "corpus": "shuffled",
+      "mode": "full",
+      "run_count": 3,
+      "runs": [
+        {
+          "run": 0,
+          "write_mbps": 86.02436638027112,
+          "read_mbps": 1093.882761474215,
+          "write_wall_s": 0.371987628,
+          "read_wall_s": 0.003656699,
+          "cpu_user_s": 0.3700000000000001,
+          "cpu_sys_s": 0.01999999999999999,
+          "logical_bytes": 4194304,
+          "written_bytes": 33554432,
+          "reachable_bytes": 1150655,
+          "total_backing_bytes": 15849101,
+          "unreachable_bytes": 14638364,
+          "ratio_reachable": 3.6451447219192548,
+          "ratio_total_backing": 0.26463986821713104,
+          "result_hash": "e9304c30daddc9e80c3b8d57483c518ea5637c6241ca02d835618299e3d194ac",
+          "hash_matches_input": true,
+          "families": {
+            "BASE_RESIDUAL": 4,
+            "RANS": 16,
+            "RAW": 16,
+            "SEQUENCE_RANS": 28
+          },
+          "accounting": {
+            "payload_bytes": 1056867,
+            "model_bytes": 11566,
+            "residual_bytes": 3361,
+            "descriptor_bytes": 7801,
+            "metadata_bytes": 74421,
+            "integrity_bytes_est": 13144,
+            "allocator_overhead_bytes": 60082,
+            "unreclaimed_bytes": 14638364,
+            "check": "ok"
+          }
+        },
+        {
+          "run": 1,
+          "write_mbps": 86.36627233832934,
+          "read_mbps": 1083.8398930033259,
+          "write_wall_s": 0.370515007,
+          "read_wall_s": 0.003690582,
+          "cpu_user_s": 0.3599999999999999,
+          "cpu_sys_s": 0.010000000000000009,
+          "logical_bytes": 4194304,
+          "written_bytes": 33554432,
+          "reachable_bytes": 1150655,
+          "total_backing_bytes": 15849101,
+          "unreachable_bytes": 14638364,
+          "ratio_reachable": 3.6451447219192548,
+          "ratio_total_backing": 0.26463986821713104,
+          "result_hash": "e9304c30daddc9e80c3b8d57483c518ea5637c6241ca02d835618299e3d194ac",
+          "hash_matches_input": true,
+          "families": {
+            "BASE_RESIDUAL": 4,
+            "RANS": 16,
+            "RAW": 16,
+            "SEQUENCE_RANS": 28
+          },
+          "accounting": {
+            "payload_bytes": 1056867,
+            "model_bytes": 11566,
+            "residual_bytes": 3361,
+            "descriptor_bytes": 7801,
+            "metadata_bytes": 74421,
+            "integrity_bytes_est": 13144,
+            "allocator_overhead_bytes": 60082,
+            "unreclaimed_bytes": 14638364,
+            "check": "ok"
+          }
+        },
+        {
+          "run": 2,
+          "write_mbps": 86.11782932594286,
+          "read_mbps": 1044.1944874884616,
+          "write_wall_s": 0.371583913,
+          "read_wall_s": 0.003830704,
+          "cpu_user_s": 0.3700000000000001,
+          "cpu_sys_s": 0.0,
+          "logical_bytes": 4194304,
+          "written_bytes": 33554432,
+          "reachable_bytes": 1150655,
+          "total_backing_bytes": 15849101,
+          "unreachable_bytes": 14638364,
+          "ratio_reachable": 3.6451447219192548,
+          "ratio_total_backing": 0.26463986821713104,
+          "result_hash": "e9304c30daddc9e80c3b8d57483c518ea5637c6241ca02d835618299e3d194ac",
+          "hash_matches_input": true,
+          "families": {
+            "BASE_RESIDUAL": 4,
+            "RANS": 16,
+            "RAW": 16,
+            "SEQUENCE_RANS": 28
+          },
+          "accounting": {
+            "payload_bytes": 1056867,
+            "model_bytes": 11566,
+            "residual_bytes": 3361,
+            "descriptor_bytes": 7801,
+            "metadata_bytes": 74421,
+            "integrity_bytes_est": 13144,
+            "allocator_overhead_bytes": 60082,
+            "unreclaimed_bytes": 14638364,
+            "check": "ok"
+          }
+        }
+      ],
+      "write_throughput": {
+        "count": 3,
+        "mean": 86.1694893481811,
+        "min": 86.02436638027112,
+        "p50": 86.11782932594286,
+        "p95": 86.36627233832934,
+        "p99": 86.36627233832934,
+        "max": 86.36627233832934
+      },
+      "read_throughput": {
+        "count": 3,
+        "mean": 1073.972380655334,
+        "min": 1044.1944874884616,
+        "p50": 1083.8398930033259,
+        "p95": 1093.882761474215,
+        "p99": 1093.882761474215,
+        "max": 1093.882761474215
+      },
+      "write_latency_us": {
+        "count": 24,
+        "mean": 46157.26633333333,
+        "min": 15949.224000000002,
+        "p50": 50534.431,
+        "p95": 54224.191,
+        "p99": 55430.103,
+        "max": 55430.103
+      },
+      "read_latency_us": {
+        "count": 192,
+        "mean": 52.78234374999999,
+        "min": 8.175,
+        "p50": 42.459,
+        "p95": 113.562,
+        "p99": 148.367,
+        "max": 151.022
+      },
+      "fsync_latency_us": {
+        "count": 15,
+        "mean": 2814.324133333333,
+        "min": 1628.101,
+        "p50": 1654.4489999999998,
+        "p95": 7521.967,
+        "p99": 7521.967,
+        "max": 7521.967
+      },
+      "cpu_user_s": {
+        "count": 3,
+        "mean": 0.3666666666666667,
+        "min": 0.3599999999999999,
+        "p50": 0.3700000000000001,
+        "p95": 0.3700000000000001,
+        "p99": 0.3700000000000001,
+        "max": 0.3700000000000001
+      },
+      "cpu_sys_s": {
+        "count": 3,
+        "mean": 0.01,
+        "min": 0.0,
+        "p50": 0.010000000000000009,
+        "p95": 0.01999999999999999,
+        "p99": 0.01999999999999999,
+        "max": 0.01999999999999999
+      },
+      "physical_median": 1150655,
+      "ratio_median": 3.6451447219192548
+    }
+  ],
+  "ablation": {
+    "corpus": "structured",
+    "size_mib": 16,
+    "rows": [
+      {
+        "mode": "full",
+        "physical": 17151,
+        "ratio": 978.2062853477931,
+        "write_mbps": 384.25598518923726,
+        "cpu_user_s": 0.040000000000000036,
+        "families": {
+          "PERIODIC": 128,
+          "SEQUENCE_RANS": 64,
+          "ZERO": 64
+        }
+      },
+      {
+        "mode": "raw",
+        "physical": 277382,
+        "ratio": 60.48415542464904,
+        "write_mbps": 544.6175734543592,
+        "cpu_user_s": 0.020000000000000018,
+        "families": {
+          "RAW": 256
+        }
+      },
+      {
+        "mode": "raw-rans",
+        "physical": 29046,
+        "ratio": 577.6084830957791,
+        "write_mbps": 250.66858795783713,
+        "cpu_user_s": 0.05999999999999994,
+        "families": {
+          "SEQUENCE_RANS": 256
+        }
+      },
+      {
+        "mode": "no-dedup",
+        "physical": 17151,
+        "ratio": 978.2062853477931,
+        "write_mbps": 374.7359136477297,
+        "cpu_user_s": 0.040000000000000036,
+        "families": {
+          "PERIODIC": 128,
+          "SEQUENCE_RANS": 64,
+          "ZERO": 64
+        }
+      },
+      {
+        "mode": "no-base",
+        "physical": 17151,
+        "ratio": 978.2062853477931,
+        "write_mbps": 384.6875042751404,
+        "cpu_user_s": 0.039999999999999925,
+        "families": {
+          "PERIODIC": 128,
+          "SEQUENCE_RANS": 64,
+          "ZERO": 64
+        }
+      },
+      {
+        "mode": "no-config",
+        "physical": 29046,
+        "ratio": 577.6084830957791,
+        "write_mbps": 265.71488039367784,
+        "cpu_user_s": 0.06000000000000005,
+        "families": {
+          "SEQUENCE_RANS": 256
+        }
+      },
+      {
+        "mode": "no-rans",
+        "physical": 79235,
+        "ratio": 211.7399634000126,
+        "write_mbps": 446.66881793536106,
+        "cpu_user_s": 0.030000000000000027,
+        "families": {
+          "PERIODIC": 128,
+          "RAW": 64,
+          "ZERO": 64
+        }
+      },
+      {
+        "mode": "no-universe",
+        "physical": 17151,
+        "ratio": 978.2062853477931,
+        "write_mbps": 376.5648003181596,
+        "cpu_user_s": 0.039999999999999925,
+        "families": {
+          "PERIODIC": 128,
+          "SEQUENCE_RANS": 64,
+          "ZERO": 64
+        }
+      },
+      {
+        "mode": "no-dsfb",
+        "physical": 17151,
+        "ratio": 978.2062853477931,
+        "write_mbps": 372.87151828598047,
+        "cpu_user_s": 0.040000000000000036,
+        "families": {
+          "PERIODIC": 128,
+          "SEQUENCE_RANS": 64,
+          "ZERO": 64
+        }
+      }
+    ]
+  },
+  "dsfb_investigation": {
+    "corpus": "structured",
+    "runs": 5,
+    "full": [
+      {
+        "write_mbps": 378.1235665276511,
+        "cpu_user_s": 0.040000000000000036,
+        "physical": 17151,
+        "write_p50_us": 41139.176,
+        "write_p95_us": 41139.176,
+        "write_p99_us": 41139.176
+      },
+      {
+        "write_mbps": 373.9640698593865,
+        "cpu_user_s": 0.050000000000000044,
+        "physical": 17151,
+        "write_p50_us": 41646.783,
+        "write_p95_us": 41646.783,
+        "write_p99_us": 41646.783
+      },
+      {
+        "write_mbps": 380.59683101757605,
+        "cpu_user_s": 0.040000000000000036,
+        "physical": 17151,
+        "write_p50_us": 40865.624,
+        "write_p95_us": 40865.624,
+        "write_p99_us": 40865.624
+      },
+      {
+        "write_mbps": 386.24524670908187,
+        "cpu_user_s": 0.039999999999999813,
+        "physical": 17151,
+        "write_p50_us": 40241.95,
+        "write_p95_us": 40241.95,
+        "write_p99_us": 40241.95
+      },
+      {
+        "write_mbps": 388.19395431587975,
+        "cpu_user_s": 0.040000000000000036,
+        "physical": 17151,
+        "write_p50_us": 40098.151999999995,
+        "write_p95_us": 40098.151999999995,
+        "write_p99_us": 40098.151999999995
+      }
+    ],
+    "no_dsfb": [
+      {
+        "write_mbps": 377.79278297252034,
+        "cpu_user_s": 0.040000000000000036,
+        "physical": 17151,
+        "write_p50_us": 41272.665,
+        "write_p95_us": 41272.665,
+        "write_p99_us": 41272.665
+      },
+      {
+        "write_mbps": 366.3246453719861,
+        "cpu_user_s": 0.040000000000000036,
+        "physical": 17151,
+        "write_p50_us": 42438.852999999996,
+        "write_p95_us": 42438.852999999996,
+        "write_p99_us": 42438.852999999996
+      },
+      {
+        "write_mbps": 369.26765338830194,
+        "cpu_user_s": 0.040000000000000036,
+        "physical": 17151,
+        "write_p50_us": 42229.221,
+        "write_p95_us": 42229.221,
+        "write_p99_us": 42229.221
+      },
+      {
+        "write_mbps": 370.0522025703687,
+        "cpu_user_s": 0.050000000000000044,
+        "physical": 17151,
+        "write_p50_us": 41980.878,
+        "write_p95_us": 41980.878,
+        "write_p99_us": 41980.878
+      },
+      {
+        "write_mbps": 378.5201456819948,
+        "cpu_user_s": 0.039999999999999813,
+        "physical": 17151,
+        "write_p50_us": 41321.596000000005,
+        "write_p95_us": 41321.596000000005,
+        "write_p99_us": 41321.596000000005
+      }
+    ],
+    "physical_identical": true,
+    "write_mbps_full": {
+      "count": 5,
+      "mean": 381.4247336859151,
+      "min": 373.9640698593865,
+      "p50": 380.59683101757605,
+      "p95": 388.19395431587975,
+      "p99": 388.19395431587975,
+      "max": 388.19395431587975
+    },
+    "write_mbps_no_dsfb": {
+      "count": 5,
+      "mean": 372.3914859970344,
+      "min": 366.3246453719861,
+      "p50": 370.0522025703687,
+      "p95": 378.5201456819948,
+      "p99": 378.5201456819948,
+      "max": 378.5201456819948
+    },
+    "cpu_user_s_full": {
+      "count": 5,
+      "mean": 0.041999999999999996,
+      "min": 0.039999999999999813,
+      "p50": 0.040000000000000036,
+      "p95": 0.050000000000000044,
+      "p99": 0.050000000000000044,
+      "max": 0.050000000000000044
+    },
+    "cpu_user_s_no_dsfb": {
+      "count": 5,
+      "mean": 0.041999999999999996,
+      "min": 0.039999999999999813,
+      "p50": 0.040000000000000036,
+      "p95": 0.050000000000000044,
+      "p99": 0.050000000000000044,
+      "max": 0.050000000000000044
+    }
+  },
+  "versioned_experiment": {
+    "corpus": "versioned",
+    "versions": 8,
+    "sequential_full": [
+      1449257,
+      1449257,
+      1449257
+    ],
+    "sequential_no_base": [
+      1128735,
+      1128735,
+      1128735
+    ],
+    "shuffled_full": [
+      1150655,
+      1150655,
+      1150655
+    ],
+    "sequential_ratio": 2.894106428328447,
+    "shuffled_ratio": 3.6451447219192548,
+    "base_savings_reachable_bytes": -298602,
+    "base_savings_pct": -25.95061073910077
+  },
+  "gc_traffic": {
+    "unreachable_before": 50903851,
+    "reclaimed_bytes": 47922933,
+    "unreachable_after": 2981156,
+    "physical_before": 59651602,
+    "physical_after": 11669508,
+    "gc_wall_s": 0.009513315,
+    "optimizer_scanned": 128,
+    "optimizer_rewritten": 0,
+    "optimizer_saved_bytes": 0
+  },
+  "baselines": {
+    "raw_file": {
+      "path": "/mnt/1tb_kingston/entropyfs/target/campaign-scratch/baseline-raw.bin",
+      "fstype": "ext4",
+      "bytes": 1383420,
+      "write_mbps": 3288.473108863019,
+      "ratio": 1.0
+    },
+    "zstd_level_1": {
+      "tool": "zstd",
+      "version": "*** Zstandard CLI (64-bit) v1.5.7, by Yann Collet ***",
+      "level": "1",
+      "input_bytes": 1383420,
+      "output_bytes": 373536,
+      "ratio": 3.70357877152403,
+      "wall_s": 0.004122939
+    },
+    "zstd_level_19": {
+      "tool": "zstd",
+      "version": "*** Zstandard CLI (64-bit) v1.5.7, by Yann Collet ***",
+      "level": "19",
+      "input_bytes": 1383420,
+      "output_bytes": 259520,
+      "ratio": 5.330687422934648,
+      "wall_s": 0.199929688
+    },
+    "direct_rans_src": {
+      "run": 0,
+      "write_mbps": 58.49823063245961,
+      "read_mbps": 383.23623334481715,
+      "write_wall_s": 0.022553368,
+      "read_wall_s": 0.003442608,
+      "cpu_user_s": 0.03000000000000025,
+      "cpu_sys_s": 0.0,
+      "logical_bytes": 1383420,
+      "written_bytes": 1383420,
+      "reachable_bytes": 11083,
+      "total_backing_bytes": 490553,
+      "unreachable_bytes": 474858,
+      "ratio_reachable": 124.82360371740504,
+      "ratio_total_backing": 2.820123411741443,
+      "result_hash": "cc616dde6dff95f4e781ccff89167da981d6a9ac73c93a1db5354c2179d54ac2",
+      "hash_matches_input": false,
+      "families": {
+        "RANS": 1,
+        "SEQUENCE_RANS": 21
+      },
+      "accounting": {
+        "payload_bytes": 4559,
+        "model_bytes": 491,
+        "residual_bytes": 0,
+        "descriptor_bytes": 1982,
+        "metadata_bytes": 4051,
+        "integrity_bytes_est": 628,
+        "allocator_overhead_bytes": 4612,
+        "unreclaimed_bytes": 474858,
+        "check": "ok"
+      }
+    },
+    "waived": [
+      "btrfs with compression: waived — writable compressed-FS baseline requires root for loop-mounting a test image",
+      "EROFS/SquashFS: waived — read-only compressed-image baseline deferred (requires root and/or mkfs.erofs)"
+    ]
+  },
+  "device_writes": {
+    "device": "nvme1n1p1",
+    "reads": 0,
+    "read_sectors": 0,
+    "writes": 3890,
+    "write_sectors": 652784
+  },
+  "admission": [
+    {
+      "rule": "benchmark context complete (revision, Cargo.lock, kernel, CPU, governor, device, cache state, command)",
+      "met": true,
+      "note": "environment.json (revision, cargo_lock_hash, kernel_*, cpu_*, governor, store_device, cache_state, command) + corpus-manifest.json archived in this directory"
+    },
+    {
+      "rule": "every required byte is counted (payload/models/residuals/descriptors/metadata/integrity/allocator/unreclaimed)",
+      "met": true,
+      "note": "per-run Accounting tables pass the reachable-bytes cross-check"
+    },
+    {
+      "rule": "all listed baselines run or explicitly waived",
+      "met": true,
+      "note": "raw file present; zstd present; direct rANS present; waivers: 2"
+    },
+    {
+      "rule": "ablations identify which mechanism caused the gain",
+      "met": true,
+      "note": "ablation ladder has 9 rows (A0–A8 families)"
+    },
+    {
+      "rule": "negative controls included (random → RAW, compressed → no gain, shuffled history → temporal gains disappear)",
+      "met": true,
+      "note": "urandom ratio 0.997x (expected ≤1.5x); compressed present true; shuffled present true"
+    },
+    {
+      "rule": "materialized output hashes match the input corpus hashes",
+      "met": true,
+      "note": "result-hashes.json: all runs match corpus content hashes"
+    },
+    {
+      "rule": "raw result artifacts are archived",
+      "met": true,
+      "note": "raw-output.txt, results.json, results.csv, environment.json, corpus-manifest.json, result-hashes.json, report.md"
+    }
+  ]
+}

@@ -282,6 +282,73 @@ fn verify_materialized_full_chain() {
 }
 
 #[test]
+fn verify_materialized_with_dedup_aliases() {
+    // A deduped (EXACT_REF) extent's content id maps to the original
+    // descriptor, not the alias bytes; the binding check must prove the
+    // link by materialization, not descriptor-byte equality (§33).
+    let dir = TempDir::new().unwrap();
+    let store = create_store(&dir);
+    let inode = crate::store::inode::Inode::new_file(1000, 1000, 0o644);
+    let mut tx = store.begin_tx().unwrap();
+    Store::put_inode_in_tx(&mut tx, 3, &inode).unwrap();
+    Store::put_inode_in_tx(&mut tx, 4, &inode).unwrap();
+    tx.commit(&CrashHooks::none()).unwrap();
+    // Structured content that dedups exactly: two files, same bytes.
+    let mut content = Vec::new();
+    content.extend_from_slice(b"dedup-dedup-dedup-".repeat(300).as_slice());
+    content.extend_from_slice(&[0u8; 8192]);
+    for i in 0..9000u32 {
+        content.push((i % 23) as u8);
+    }
+    write_file(&store, 3, &content);
+    // Real write path for the second copy: dedup turns it into EXACT_REF.
+    store.write_region(4, 0, &content).unwrap();
+    // The second file must have deduplicated to EXACT_REF.
+    let second = store.get_inode(4).unwrap().unwrap();
+    let second_root = match second.data {
+        crate::store::inode::InodeData::File { extent_root } => extent_root,
+        _ => panic!("not a file"),
+    };
+    let (_, second_desc) = crate::store::extent_tree::covering(
+        second_root,
+        0,
+        crate::store::BTREE_ORDER,
+        store.limits().max_fanout,
+        &store,
+    )
+    .unwrap()
+    .unwrap();
+    let desc = crate::format::descriptor::decode(
+        &second_desc,
+        store.limits().max_descriptor_bytes,
+        store.limits().max_inline_bytes,
+        store.limits().max_palette,
+        store.limits().max_period,
+        store.limits().max_chunk_size,
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            desc,
+            crate::core::representation::Representation::ExactRef { .. }
+        ),
+        "expected EXACT_REF alias, got {:?}",
+        desc.family()
+    );
+    drop(store);
+    let opts = FsckOptions {
+        verify_materialized: true,
+        ..Default::default()
+    };
+    let report = fsck(dir.path(), &opts).unwrap();
+    assert!(
+        report.is_clean(),
+        "deduped store must pass materialized verification:\n{}",
+        report.render()
+    );
+}
+
+#[test]
 fn fsck_refuses_mounted_store() {
     let dir = TempDir::new().unwrap();
     let _store = build_store(&dir); // holds the mount lock

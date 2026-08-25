@@ -35,6 +35,8 @@ pub const TAG_ENTROPY_REF: u8 = 0x0A;
 pub const TAG_INLINE: u8 = 0x0B;
 /// Tag: permutation (factoradic rank).
 pub const TAG_PERMUTATION: u8 = 0x0C;
+/// Tag: local-match + entropy (three rANS/raw streams).
+pub const TAG_SEQUENCE_RANS: u8 = 0x0D;
 
 /// Residual kinds.
 pub const RESIDUAL_XOR_SPARSE: u8 = 0x01;
@@ -169,6 +171,30 @@ pub fn encode(rep: &Representation) -> Result<Vec<u8>, CodecError> {
             w.u32(*len as u32);
             w.u128(*rank);
             w.bytes(alphabet);
+        }
+        Representation::SequenceRans {
+            model,
+            enc_obj,
+            scale_bits,
+            codec,
+            seq_len,
+            lit_len,
+            off_len,
+            cmds,
+            lit_out,
+            len,
+        } => {
+            w.u8(TAG_SEQUENCE_RANS);
+            w.u32(*len as u32);
+            w.bytes(model.as_bytes());
+            w.bytes(enc_obj.as_bytes());
+            w.u8(*scale_bits);
+            w.u8(codec.tag());
+            w.u32(*seq_len);
+            w.u32(*lit_len);
+            w.u32(*off_len);
+            w.u32(*cmds);
+            w.u32(*lit_out);
         }
     }
     Ok(w.into_bytes())
@@ -357,6 +383,29 @@ pub fn decode(
                 len,
             }
         }
+        TAG_SEQUENCE_RANS => {
+            let model = read_id(&mut r)?;
+            let enc_obj = read_id(&mut r)?;
+            let scale_bits = r.u8()?;
+            let codec = RansCodec::from_u8(r.u8()?).ok_or(CodecError::Malformed)?;
+            let seq_len = r.u32()?;
+            let lit_len = r.u32()?;
+            let off_len = r.u32()?;
+            let cmds = r.u32()?;
+            let lit_out = r.u32()?;
+            Representation::SequenceRans {
+                model,
+                enc_obj,
+                scale_bits,
+                codec,
+                seq_len,
+                lit_len,
+                off_len,
+                cmds,
+                lit_out,
+                len,
+            }
+        }
         _ => return Err(CodecError::Malformed),
     };
     if !r.done() {
@@ -525,6 +574,18 @@ mod tests {
                 rank: 42,
                 alphabet: (200u8..230).collect(),
                 len: 30,
+            },
+            Representation::SequenceRans {
+                model: id,
+                enc_obj: id,
+                scale_bits: 14,
+                codec: RansCodec::Interleaved2,
+                seq_len: 100,
+                lit_len: 50,
+                off_len: 20,
+                cmds: 30,
+                lit_out: 40,
+                len: 4096,
             },
         ]
     }

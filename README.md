@@ -50,6 +50,9 @@ physical storage (RAW fallback) — that is a success condition, not a failure.
 | 5 | Snapshots, GC, robustness: snapshot create/list/delete/restore (live verified), GC pins snapshot roots, chunk-index reachability fix (deleted data reclaimable), near-full GC recovery from the emergency reserve, shrink-write extent fix, snapshot crash-court matrix | ✅ implemented (live + fsck verified) |
 | 6 | Performance: deferred durability (logical commit + fsync barrier), search fast path, oversized-descriptor validation fix (SIGBUS root cause), multi-threaded FUSE. Sealed before/after FUSE court pair (`evidence/performance/INDEX.md`): 1M writes 185→653 MiB/s, 4K buffered 0.6→24.4 MiB/s, bindgen cold build FAILED (SIGSEGV/SIGBUS) → 9.5 s; fsync p50 320→1647 µs (deferred-durability tradeoff, reported honestly) | ✅ implemented (evidence-sealed) |
 | 7 | Experimental ublk frontend: `src/ublk/` over the same engine — BlockStore adapter (4K blocks, read/write/flush/discard via the entropy engine, device = hidden store file), libublk target glue + `ublk run` CLI (root + `ublk_drv` required), `ublk bench` (kernel-free), unit tests, ADR-0020 | ✅ implemented (adapter live-verified; kernel binding needs root) |
+| 8 (M1) | Concurrency refactor: `Store` interior mutability (root/superblock behind `RwLock`, 64-shard object index, per-inode lock table, short commit coordinator), reads traverse root snapshots without the global writer lock; FUSE writeback-cache negotiation (`FUSE_WRITEBACK_CACHE | ASYNC_READ | PARALLEL_DIROPS | BIG_WRITES`, 1 MiB max_write, background queues) | ✅ implemented (`d90772c`, 264→278 tests) |
+| 8 (M2) | Write aggregation: `write_region_batch` group commit (one transaction + generation per batch, in-batch overlay for overlapping partial chunks), deferred durability, live 4K writes 24.4 → 319 MiB/s (13×), 1M writes 653 MiB/s, reads 2212 MiB/s | ✅ implemented (live court) |
+| 8 (M3) | **SequenceRans** — the general-purpose compression floor: bounded LZ77 hash-chain matcher + three rANS-coded (or raw) streams over `ryg-rans-rs` (tag 0x0D, feature bit 10). Fixes two real defects found by the H2 campaign: encoder tail-remainder bug (`0x7F` corruption for 1–3-byte copy tails) and the flatten-on-write §32 validation gap. src corpus density 1.636× → **124.824×**; urandom still 0.997× | ✅ implemented (evidence-sealed `campaign-1787664479-d90772c/`) |
 
 ## Measured results
 
@@ -83,13 +86,17 @@ oversized-descriptor fix (Phase 6) eliminated.
   user CPU halves — evidence for DSFB's assigned role as candidate-search
   budget intelligence, not compression. Single synthetic corpus; under
   further study.
-- The campaign's H2 experiment (synthetic drift corpus) is a partial
-  result: temporal adjacency saves 7.2% vs shuffled history, but the
-  current base+residual implementation loses to re-encoding because the
-  derived chunk index retains full per-content-id descriptors — an
-  identified structural cost, not a claimed win.
+- The campaign's H2 experiment (synthetic drift corpus) is now a sealed
+  **controlled pair**: with the RANS-era floor (`67d977a`) temporal
+  adjacency saved 7.2% vs shuffled history; with the SequenceRans floor
+  (`d90772c`) the sign flipped (−26%): fresh re-encoding of a mutated
+  chunk is now cheaper than keeping a base+residual chain, because each
+  chain layer's descriptor and retained chunk-index entries stay
+  reachable. The mechanism's value is conditional on the compression
+  floor — that conditionality is the finding, and both campaigns are
+  archived.
 - Random/encrypted/already-compressed data falls back toward RAW (urandom
-  0.997×, zstd -19 pack 0.993×) — the honest negative control.
+  0.997×, zstd -19 pack 0.994×) — the honest negative control.
 
 ## Honesty rules
 

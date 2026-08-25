@@ -137,6 +137,7 @@ pub fn print_alternatives(store: &Store, desc: &crate::core::representation::Rep
         Box::new(crate::entropy::palette::PaletteEncoder),
         Box::new(crate::entropy::periodic::PeriodicEncoder),
         Box::new(crate::rans::residual::RansEncoder),
+        Box::new(crate::rans::sequence::SequenceEncoder),
     ] {
         cands.extend(enc.encode(&bytes, &ctx));
     }

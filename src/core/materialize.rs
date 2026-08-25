@@ -81,6 +81,8 @@ pub enum MaterializeError {
     RangeOutOfBounds,
     /// rANS decode failed (bad model or stream).
     RansDecode(String),
+    /// SequenceRans decode failed (bad model object, streams, or commands).
+    Sequence(String),
     /// Universe materialization failed.
     Universe(String),
     /// A residual could not be applied (structurally invalid).
@@ -377,6 +379,200 @@ pub fn materialize(
             // alphabet to recover the bytes.
             for (i, &idx) in seq.iter().enumerate() {
                 output[i] = alphabet[idx as usize];
+            }
+            Ok(())
+        }
+        Representation::SequenceRans {
+            model,
+            enc_obj,
+            scale_bits,
+            codec,
+            seq_len,
+            lit_len,
+            off_len,
+            cmds,
+            lit_out,
+            len,
+        } => {
+            if *len > limits.max_alloc_bytes {
+                return Err(MaterializeError::AllocTooLarge {
+                    requested: *len,
+                    max: limits.max_alloc_bytes,
+                });
+            }
+            // Every command writes at least one byte, so the command count
+            // can never exceed the output length (bounds the decode_rans
+            // allocation below).
+            if (*cmds as u64) > *len {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "sequence command count exceeds output length".into(),
+                ));
+            }
+            // Stream lengths must compose exactly to the enc object.
+            let enc_total = (*seq_len as u64)
+                .checked_add(*lit_len as u64)
+                .and_then(|v| v.checked_add(*off_len as u64))
+                .ok_or(MaterializeError::InvalidDescriptor(
+                    "sequence stream lengths overflow".into(),
+                ))?;
+            if enc_total > limits.max_alloc_bytes {
+                return Err(MaterializeError::AllocTooLarge {
+                    requested: enc_total,
+                    max: limits.max_alloc_bytes,
+                });
+            }
+            let model_bytes = ctx.fetch_object(model)?;
+            let slots = crate::rans::sequence::parse_model_object(
+                &model_bytes,
+                crate::rans::sequence::max_model_object_bytes(limits.max_model_bytes),
+            )
+            .map_err(|e| MaterializeError::Sequence(e.to_string()))?;
+            let enc = ctx.fetch_object(enc_obj)?;
+            if enc.len() as u64 != enc_total {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "sequence enc object length mismatch".into(),
+                ));
+            }
+            let seq_slice = &enc[..*seq_len as usize];
+            let lit_slice = &enc[*seq_len as usize..*seq_len as usize + *lit_len as usize];
+            let off_slice = &enc[*seq_len as usize + *lit_len as usize..];
+
+            // Commands.
+            let commands: Vec<u8> = match &slots[0] {
+                crate::rans::sequence::StreamSlot::Rans(m) => {
+                    ctx.decode_rans(m, seq_slice, *scale_bits, *codec, *cmds as u64)?
+                }
+                crate::rans::sequence::StreamSlot::Raw => {
+                    if *seq_len != *cmds {
+                        return Err(MaterializeError::InvalidDescriptor(
+                            "raw command stream length mismatch".into(),
+                        ));
+                    }
+                    seq_slice.to_vec()
+                }
+                crate::rans::sequence::StreamSlot::Empty => {
+                    return Err(MaterializeError::InvalidDescriptor(
+                        "empty command stream".into(),
+                    ));
+                }
+            };
+            if commands.len() as u64 != *cmds as u64 {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "command stream decoded length mismatch".into(),
+                ));
+            }
+            let copies = commands.iter().filter(|&&b| b >= 0x80).count();
+            let off_out =
+                (copies as u64)
+                    .checked_mul(2)
+                    .ok_or(MaterializeError::InvalidDescriptor(
+                        "offset stream length overflow".into(),
+                    ))?;
+            if off_out > limits.max_alloc_bytes {
+                return Err(MaterializeError::AllocTooLarge {
+                    requested: off_out,
+                    max: limits.max_alloc_bytes,
+                });
+            }
+            // Literals.
+            let literals: Vec<u8> = match &slots[1] {
+                crate::rans::sequence::StreamSlot::Rans(m) => {
+                    ctx.decode_rans(m, lit_slice, *scale_bits, *codec, *lit_out as u64)?
+                }
+                crate::rans::sequence::StreamSlot::Raw => {
+                    if *lit_len != *lit_out {
+                        return Err(MaterializeError::InvalidDescriptor(
+                            "raw literal stream length mismatch".into(),
+                        ));
+                    }
+                    lit_slice.to_vec()
+                }
+                crate::rans::sequence::StreamSlot::Empty => {
+                    if *lit_out != 0 || *lit_len != 0 {
+                        return Err(MaterializeError::InvalidDescriptor(
+                            "non-empty literal stream without a model".into(),
+                        ));
+                    }
+                    Vec::new()
+                }
+            };
+            if literals.len() as u64 != *lit_out as u64 {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "literal stream decoded length mismatch".into(),
+                ));
+            }
+            // Offsets.
+            let offsets: Vec<u8> = match &slots[2] {
+                crate::rans::sequence::StreamSlot::Rans(m) => {
+                    ctx.decode_rans(m, off_slice, *scale_bits, *codec, off_out)?
+                }
+                crate::rans::sequence::StreamSlot::Raw => {
+                    if *off_len as u64 != off_out {
+                        return Err(MaterializeError::InvalidDescriptor(
+                            "raw offset stream length mismatch".into(),
+                        ));
+                    }
+                    off_slice.to_vec()
+                }
+                crate::rans::sequence::StreamSlot::Empty => {
+                    if off_out != 0 {
+                        return Err(MaterializeError::InvalidDescriptor(
+                            "non-empty offset stream without a model".into(),
+                        ));
+                    }
+                    Vec::new()
+                }
+            };
+            if offsets.len() as u64 != off_out {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "offset stream decoded length mismatch".into(),
+                ));
+            }
+
+            // Walk the commands (byte-progressive copy; overlap allowed).
+            let mut pos = 0usize;
+            let mut lit = 0usize;
+            let mut off = 0usize;
+            for &cmd in &commands {
+                if cmd < 0x80 {
+                    let run = cmd as usize + 1;
+                    if pos + run > output.len() || lit + run > literals.len() {
+                        return Err(MaterializeError::InvalidDescriptor(
+                            "literal run overflow".into(),
+                        ));
+                    }
+                    output[pos..pos + run].copy_from_slice(&literals[lit..lit + run]);
+                    pos += run;
+                    lit += run;
+                    spend(run as u64, budget)?;
+                } else {
+                    let clen = cmd as usize - 0x80 + 4;
+                    if off + 2 > offsets.len() {
+                        return Err(MaterializeError::InvalidDescriptor(
+                            "copy offset exhausted".into(),
+                        ));
+                    }
+                    let dist = u16::from_le_bytes([offsets[off], offsets[off + 1]]) as usize;
+                    off += 2;
+                    if dist == 0 || dist > pos {
+                        return Err(MaterializeError::InvalidDescriptor(
+                            "copy distance out of range".into(),
+                        ));
+                    }
+                    if pos + clen > output.len() {
+                        return Err(MaterializeError::InvalidDescriptor("copy overflow".into()));
+                    }
+                    for _ in 0..clen {
+                        output[pos] = output[pos - dist];
+                        pos += 1;
+                    }
+                    spend(clen as u64, budget)?;
+                }
+            }
+            if pos != output.len() || lit != literals.len() {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "sequence command walk did not cover the output".into(),
+                ));
             }
             Ok(())
         }

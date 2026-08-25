@@ -27,6 +27,7 @@ Feature bit registry (v1):
 | 7 | ro_compat | `ENCRYPTED` record payloads (AEAD) — ro without key material |
 | 8 | compat | `EXTENT_DELTA_INDEX` derived index present (disposable) |
 | 9 | compat | `OPTIMIZER_REWRITE` history markers present |
+| 10 | incompat | `SEQUENCE_RANS` descriptors present |
 
 `CHUNK_64K` is the baseline and needs no bit (v1 always supports it).
 

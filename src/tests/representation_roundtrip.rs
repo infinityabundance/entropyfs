@@ -16,6 +16,7 @@ use crate::entropy::residual::BaseResidualEncoder;
 use crate::entropy::sparse::SparseEncoder;
 use crate::entropy::universe::UniverseEncoder;
 use crate::rans::residual::{RansEncoder, RansResidualEncoder};
+use crate::rans::sequence::SequenceEncoder;
 use crate::tests::helpers::MemResolver;
 
 fn ctx<'a>(
@@ -48,6 +49,7 @@ fn assert_all_candidates_roundtrip(input: &[u8], bases: &[crate::core::candidate
         Box::new(UniverseEncoder),
         Box::new(RansEncoder),
         Box::new(RansResidualEncoder),
+        Box::new(SequenceEncoder),
     ];
     let mut resolver = MemResolver::empty();
     for base in bases {
@@ -169,6 +171,58 @@ fn rans_roundtrip() {
         .map(|i| ((i * 5 + i / 64) % 97) as u8)
         .collect();
     assert_all_candidates_roundtrip(&input, &[]);
+}
+
+#[test]
+fn sequence_rans_roundtrip_on_text() {
+    // English-ish text with long-distance repeats: SequenceRans must
+    // propose, round-trip byte-exactly, and beat plain rANS.
+    let sentence =
+        b"the quick brown fox jumps over the lazy dog and then walks back to the riverbed ";
+    let mut input = Vec::new();
+    for i in 0..40 {
+        input.extend_from_slice(sentence);
+        input.extend_from_slice(format!("sentence number {i} has a unique tail ").as_bytes());
+    }
+    assert_all_candidates_roundtrip(&input, &[]);
+    let limits = Limits::default();
+    let policy = Policy::default();
+    let cctx = ctx(&input, &limits, &policy, &[]);
+    let seq = SequenceEncoder.encode(&input, &cctx);
+    assert_eq!(seq.len(), 1, "text must produce a sequence candidate");
+    let rans = RansEncoder.encode(&input, &cctx);
+    let best_rans = rans
+        .iter()
+        .min_by_key(|c| c.total(&policy))
+        .map(|c| c.cost.persisted_bytes())
+        .unwrap_or(input.len() as u64);
+    assert!(
+        seq[0].cost.persisted_bytes() < best_rans,
+        "sequence {} not better than plain rans {}",
+        seq[0].cost.persisted_bytes(),
+        best_rans
+    );
+}
+
+#[test]
+fn sequence_rans_skips_crypto_random() {
+    // H6 negative control at the encoder level: crypto-uniform data must
+    // produce no SequenceRans candidate (raw/rans floor wins instead).
+    let mut input = Vec::new();
+    let mut i: u64 = 0;
+    while input.len() < 65536 {
+        let h = blake3::hash(&i.to_le_bytes());
+        input.extend_from_slice(&h.as_bytes()[..32]);
+        i += 1;
+    }
+    assert_all_candidates_roundtrip(&input, &[]);
+    let limits = Limits::default();
+    let policy = Policy::default();
+    let cctx = ctx(&input, &limits, &policy, &[]);
+    assert!(
+        SequenceEncoder.encode(&input, &cctx).is_empty(),
+        "crypto-random data must not produce a sequence candidate"
+    );
 }
 
 #[test]

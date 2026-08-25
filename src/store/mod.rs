@@ -997,6 +997,9 @@ impl Store {
             Representation::Permutation { .. } => {
                 features |= crate::format::features::Feature::Permutation.mask();
             }
+            Representation::SequenceRans { .. } => {
+                features |= crate::format::features::Feature::SequenceRans.mask();
+            }
             _ => {}
         }
         let bytes = crate::format::descriptor::encode(descriptor)?;
@@ -1265,6 +1268,7 @@ impl Store {
             Box::new(crate::entropy::palette::PaletteEncoder),
             Box::new(crate::entropy::periodic::PeriodicEncoder),
             Box::new(crate::rans::residual::RansEncoder),
+            Box::new(crate::rans::sequence::SequenceEncoder),
         ] {
             cands.extend(enc.encode(chunk, &ctx));
         }
@@ -1279,6 +1283,34 @@ impl Store {
             content_id,
             objects: best.objects.clone(),
         })
+    }
+
+    /// §32 gate for unguided updates: materialize the update's descriptor
+    /// through a resolver that sees both the committed store and the
+    /// update's own new objects, and require the result to hash to the
+    /// update's content id. The guided write path validates inside the
+    /// search; this closes the bypass for `encode_chunk` call sites
+    /// (flatten-on-write, truncate re-encoding).
+    fn validate_update(&self, u: &ExtentUpdate) -> Result<(), StoreError> {
+        let resolver = crate::optimizer::search::CandidateResolver::new(
+            self,
+            u.objects
+                .iter()
+                .map(|o| (o.id, o.payload.clone()))
+                .collect(),
+        );
+        let bytes = crate::core::materialize::materialize_to_vec(
+            &u.descriptor,
+            &resolver,
+            &self.config.limits,
+        )
+        .map_err(|e| StoreError::Descriptor(e.to_string()))?;
+        if crate::core::extent::ChunkId::of(&bytes) != u.content_id {
+            return Err(StoreError::Invariant(
+                "update does not materialize to its content id".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Commit a set of extent updates for a file region (the FUSE write
@@ -1515,6 +1547,9 @@ impl Store {
         }
         // Stage the trimmed trailing extent (if any).
         if let Some((start, cid, update)) = trim {
+            // §32 gate: the re-encoded prefix must materialize to its
+            // content id before it may be persisted.
+            self.validate_update(&update)?;
             for obj in &update.objects {
                 let tag = match obj.kind {
                     crate::core::candidate::ObjectKind::Data => RecordTag::Data,
@@ -2341,6 +2376,12 @@ impl Store {
                 if p.depth >= crate::optimizer::rebase::REBASE_DEPTH_THRESHOLD {
                     let policy = self.config.policy;
                     let flat = Store::encode_chunk(&p.bytes, chunk_off, p.id, &limits, &policy)?;
+                    // §32 gate: the unguided cheap path bypasses the
+                    // guided search's validation; every persisted
+                    // representation must materialize to its content id
+                    // (this catches any encoder defect at the commit
+                    // boundary).
+                    self.validate_update(&flat)?;
                     flatten_updates.push(flat);
                     prev_version = Some(crate::core::candidate::BaseChunk {
                         id: p.id,

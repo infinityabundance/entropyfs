@@ -1,0 +1,33 @@
+{
+  "timestamp_unix": 1787664579,
+  "revision": "d90772c",
+  "kernel": "7.2.0-1-cachyos",
+  "governor": "performance",
+  "cpu_model": "AMD Ryzen 7 9800X3D 8-Core Processor",
+  "cpu_count": 16,
+  "memory_kib": 131533140,
+  "backing_device": "/dev/nvme1n1p1",
+  "backing_fstype": "ext4",
+  "cache_state": "warm (retained page cache)",
+  "payload_mib": 64,
+  "writes_4k_dsync_mbps": 0.5,
+  "writes_4k_buffered_mbps": 335.2,
+  "writes_1m_mbps": 620.8,
+  "read_warm_mbps": 2256.7,
+  "read_cold_mbps": null,
+  "fsync_latency_us": {
+    "p50": 1649.0,
+    "p95": 2854.0,
+    "p99": 2854.0
+  },
+  "read_1m_latency_us": {
+    "p50": 1137.0,
+    "p95": 1295.0,
+    "p99": 1366.0
+  },
+  "bindgen_build_wall_s": 10.47,
+  "bindgen_build_result": "ok",
+  "bindgen_workload_source_hash": "824428929fe76cd3c37276493c945d21d2cf86d08f15cf89694e90b2e711a106",
+  "device_write_sectors_delta": 3979720,
+  "device_read_sectors_delta": 4
+}

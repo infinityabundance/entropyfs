@@ -386,17 +386,6 @@ fn verify_extent_content(ctx: &mut FsckCtx, ino: u64, start: u64, desc: &Represe
         return;
     }
     let cid = crate::core::extent::ChunkId::of(&bytes);
-    let encoded = match crate::format::descriptor::encode(desc) {
-        Ok(e) => e,
-        Err(e) => {
-            ctx.issues.push(FsckIssue::new(
-                Severity::Error,
-                Category::Extent,
-                format!("ino {ino}: extent at {start}: descriptor re-encode failed: {e:?}"),
-            ));
-            return;
-        }
-    };
     let root = match &ctx.root {
         Some(r) => r,
         None => return,
@@ -408,14 +397,51 @@ fn verify_extent_content(ctx: &mut FsckCtx, ino: u64, start: u64, desc: &Represe
         ctx.options.max_fanout,
         ctx,
     ) {
-        Ok(Some(v)) if v == encoded => {}
-        Ok(Some(_)) => ctx.issues.push(FsckIssue::new(
-            Severity::Error,
-            Category::ChunkIndex,
-            format!(
-                "ino {ino}: extent at {start} materializes to content {cid} but the chunk index maps that id to a different descriptor"
-            ),
-        )),
+        Ok(Some(v)) => {
+            // The chunk index must map the materialized content id to a
+            // descriptor that materializes to these exact bytes. The index
+            // entry may legitimately differ from the extent's own
+            // descriptor (e.g. an EXACT_REF alias resolves to the original
+            // descriptor for the shared content), so the binding is proven
+            // by materialization, not descriptor-byte equality (§33).
+            let idx_desc = match crate::format::descriptor::decode(
+                &v,
+                ctx.options.max_descriptor_bytes,
+                ctx.options.max_inline_bytes,
+                ctx.options.max_palette,
+                ctx.options.max_period,
+                ctx.options.max_chunk_size,
+            ) {
+                Ok(d) => d,
+                Err(e) => {
+                    ctx.issues.push(FsckIssue::new(
+                        Severity::Error,
+                        Category::ChunkIndex,
+                        format!(
+                            "ino {ino}: extent at {start}: chunk index entry for {cid} does not decode: {e:?}"
+                        ),
+                    ));
+                    return;
+                }
+            };
+            match crate::core::materialize::materialize_to_vec(&idx_desc, ctx, &limits) {
+                Ok(idx_bytes) if idx_bytes == bytes => {}
+                Ok(_) => ctx.issues.push(FsckIssue::new(
+                    Severity::Error,
+                    Category::ChunkIndex,
+                    format!(
+                        "ino {ino}: extent at {start} materializes to content {cid} but the chunk index entry for that id materializes to different bytes"
+                    ),
+                )),
+                Err(e) => ctx.issues.push(FsckIssue::new(
+                    Severity::Error,
+                    Category::ChunkIndex,
+                    format!(
+                        "ino {ino}: extent at {start}: chunk index entry for {cid} failed to materialize: {e}"
+                    ),
+                )),
+            }
+        }
         Ok(None) => ctx.issues.push(FsckIssue::new(
             Severity::Error,
             Category::ChunkIndex,

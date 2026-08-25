@@ -13,3 +13,4 @@ pub mod dispatch;
 pub mod metadata;
 pub mod model;
 pub mod residual;
+pub mod sequence;

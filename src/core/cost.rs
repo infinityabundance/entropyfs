@@ -186,6 +186,9 @@ pub fn estimated_read_cycles(rep: &Representation) -> u64 {
         Representation::Periodic { .. } => len / 8,
         Representation::EntropyRef { .. } => len * 8,
         Representation::Permutation { .. } => len * 4,
+        // Three rANS streams (≈len·4 total symbols) plus the copy/literal
+        // walk (≈len byte copies) — slightly heavier than plain RANS.
+        Representation::SequenceRans { .. } => len * 5,
     }
 }
 
@@ -203,6 +206,8 @@ pub fn estimated_write_cycles(rep: &Representation) -> u64 {
         Representation::Periodic { .. } => len / 8,
         Representation::EntropyRef { .. } => len * 10,
         Representation::Permutation { .. } => len * 8,
+        // LZ hash search + three histograms + three rANS encodes.
+        Representation::SequenceRans { .. } => len * 8,
     }
 }
 
@@ -225,6 +230,8 @@ pub fn dependent_reads(rep: &Representation) -> u32 {
             crate::core::representation::Residual::RansCoded { .. } => 2, // encoded + model
             _ => 0,
         },
+        // Model object + enc object.
+        Representation::SequenceRans { .. } => 2,
     }
 }
 
