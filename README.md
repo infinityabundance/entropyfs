@@ -1,5 +1,7 @@
 # EntropyFS
 
+de Beer, R. (2026). *EntropyFS: Entropy-Native Configurational Storage as a Filesystem Substrate - Broad Prior-Art Technical Disclosure and Research Architecture* (Version v1.0). Zenodo. https://doi.org/10.5281/zenodo.22092869
+
 **Persist irreducible state. Materialize structure. Preserve exact bytes.
 Measure everything.**
 
