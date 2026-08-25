@@ -167,7 +167,9 @@ pub fn encode_guided(
     // apparent savings are vacuous (cross-extent dedup already happened
     // in the foreground write path).
     if ctx.mode == SearchMode::Foreground {
-        let mut dd = dedup_candidates(store, ctx.target, cid, &limits, ctx.pending, &options)?;
+        let mut dd = store.perf().time("search_dedup", || {
+            dedup_candidates(store, ctx.target, cid, &limits, ctx.pending, &options)
+        })?;
         if !options.allow_exact_ref {
             // Content-addressed object sharing is a store invariant, not a
             // representation: reusing a canonical descriptor of an allowed
@@ -188,12 +190,14 @@ pub fn encode_guided(
         dedup: None,
     };
     if options.allow_configurational {
-        if let Some(z) = crate::core::candidate::zero_candidate(ctx.target, cid, &limits) {
-            candidates.push((Channel::Raw, z)); // attribution: structural
-        }
-        if let Some(f) = crate::core::candidate::fill_candidate(ctx.target, cid) {
-            candidates.push((Channel::Raw, f));
-        }
+        store.perf().time("search_zero_fill", || {
+            if let Some(z) = crate::core::candidate::zero_candidate(ctx.target, cid, &limits) {
+                candidates.push((Channel::Raw, z)); // attribution: structural
+            }
+            if let Some(f) = crate::core::candidate::fill_candidate(ctx.target, cid) {
+                candidates.push((Channel::Raw, f));
+            }
+        });
     }
 
     // P0 (previous version) is evaluated early in the foreground: its
@@ -209,16 +213,18 @@ pub fn encode_guided(
                     bases: std::slice::from_ref(b),
                     dedup: None,
                 };
-                let cands =
-                    crate::entropy::residual::BaseResidualEncoder.encode(ctx.target, &p0_ctx);
-                candidates.extend(cands.into_iter().map(|c| (Channel::PrevVersion, c)));
-                // Large diffs may compress well as a rANS-coded residual.
-                let rans_cands =
-                    crate::rans::residual::RansResidualEncoder.encode(ctx.target, &p0_ctx);
-                candidates.extend(rans_cands.into_iter().map(|c| (Channel::PrevVersion, c)));
-                // Shift-aware copy/literal deltas (insertions/deletions).
-                let delta_cands = crate::rans::delta::DeltaEncoder.encode(ctx.target, &p0_ctx);
-                candidates.extend(delta_cands.into_iter().map(|c| (Channel::PrevVersion, c)));
+                store.perf().time("search_p0_bases", || {
+                    let cands =
+                        crate::entropy::residual::BaseResidualEncoder.encode(ctx.target, &p0_ctx);
+                    candidates.extend(cands.into_iter().map(|c| (Channel::PrevVersion, c)));
+                    // Large diffs may compress well as a rANS-coded residual.
+                    let rans_cands =
+                        crate::rans::residual::RansResidualEncoder.encode(ctx.target, &p0_ctx);
+                    candidates.extend(rans_cands.into_iter().map(|c| (Channel::PrevVersion, c)));
+                    // Shift-aware copy/literal deltas (insertions/deletions).
+                    let delta_cands = crate::rans::delta::DeltaEncoder.encode(ctx.target, &p0_ctx);
+                    candidates.extend(delta_cands.into_iter().map(|c| (Channel::PrevVersion, c)));
+                });
             }
         }
     }
@@ -244,18 +250,20 @@ pub fn encode_guided(
         .map(|c| metric(c) <= raw_bytes / 8)
         .unwrap_or(false);
     if !decisive && options.allow_configurational {
-        for enc in [
-            Box::new(crate::entropy::sparse::SparseEncoder) as Box<dyn Encoder>,
-            Box::new(crate::entropy::palette::PaletteEncoder),
-            Box::new(crate::entropy::periodic::PeriodicEncoder),
-            Box::new(crate::entropy::sparse64::SparseBlock64Encoder),
-        ] {
-            candidates.extend(
-                enc.encode(ctx.target, &base_ctx)
-                    .into_iter()
-                    .map(|c| (Channel::Raw, c)),
-            );
-        }
+        store.perf().time("search_configurational", || {
+            for enc in [
+                Box::new(crate::entropy::sparse::SparseEncoder) as Box<dyn Encoder>,
+                Box::new(crate::entropy::palette::PaletteEncoder),
+                Box::new(crate::entropy::periodic::PeriodicEncoder),
+                Box::new(crate::entropy::sparse64::SparseBlock64Encoder),
+            ] {
+                candidates.extend(
+                    enc.encode(ctx.target, &base_ctx)
+                        .into_iter()
+                        .map(|c| (Channel::Raw, c)),
+                );
+            }
+        });
         decisive = candidates
             .iter()
             .map(|(_, c)| c)
@@ -267,7 +275,9 @@ pub fn encode_guided(
     if options.allow_byte_rans && !decisive {
         // P6: conventional byte-level rANS (the original methodology's
         // "rANS" — the pure entropy coder over the raw alphabet).
-        let cands = crate::rans::residual::RansEncoder.encode(ctx.target, &base_ctx);
+        let cands = store.perf().time("search_byte_rans", || {
+            crate::rans::residual::RansEncoder.encode(ctx.target, &base_ctx)
+        });
         if let Some(best_floor) = pick_cheapest(&cands, &policy) {
             rans_measurement = Some(measurement_for_ratio(
                 best_floor.cost.persisted_bytes() as f64 / ctx.target.len() as f64,
@@ -283,7 +293,9 @@ pub fn encode_guided(
     }
     if options.allow_sequence_rans && !decisive {
         // E1: the post-registration local-match floor (SequenceRans).
-        let cands = crate::rans::sequence::SequenceEncoder.encode(ctx.target, &base_ctx);
+        let cands = store.perf().time("search_sequence_rans", || {
+            crate::rans::sequence::SequenceEncoder.encode(ctx.target, &base_ctx)
+        });
         if let Some(best_floor) = pick_cheapest(&cands, &policy) {
             rans_measurement = Some(measurement_for_ratio(
                 best_floor.cost.persisted_bytes() as f64 / ctx.target.len() as f64,
@@ -296,7 +308,9 @@ pub fn encode_guided(
         // length codes + the deep background matcher (chain 256, lazy
         // parse, rep-distance priority). Background-only: the foreground
         // keeps the fast greedy matcher and its small CPU budget.
-        let cands = crate::rans::sequence::SequenceDeepEncoder.encode(ctx.target, &base_ctx);
+        let cands = store.perf().time("search_sequence_deep", || {
+            crate::rans::sequence::SequenceDeepEncoder.encode(ctx.target, &base_ctx)
+        });
         candidates.extend(cands.into_iter().map(|c| (Channel::Rans, c)));
     }
     if options.allow_sequence_dict && !decisive {
@@ -317,7 +331,9 @@ pub fn encode_guided(
                     dict_bytes: dict.bytes.clone(),
                     dict_depth: dict.depth,
                 };
-                let cands = enc.encode(ctx.target, &base_ctx);
+                let cands = store
+                    .perf()
+                    .time("search_sequence_dict", || enc.encode(ctx.target, &base_ctx));
                 candidates.extend(cands.into_iter().map(|c| (Channel::PrevInFile, c)));
             }
         }
@@ -349,7 +365,9 @@ pub fn encode_guided(
                     shared_bytes: shared.bytes.clone(),
                     shared_depth: shared.depth,
                 };
-                let cands = enc.encode(ctx.target, &base_ctx);
+                let cands = store
+                    .perf()
+                    .time("search_shared_dict", || enc.encode(ctx.target, &base_ctx));
                 candidates.extend(cands.into_iter().map(|c| (Channel::SharedDict, c)));
             }
         }
@@ -445,23 +463,31 @@ pub fn encode_guided(
                 bases: std::slice::from_ref(b),
                 dedup: None,
             };
-            let cands = crate::entropy::residual::BaseResidualEncoder.encode(ctx.target, &base_ctx);
-            produced += cands.len();
-            candidates.extend(cands.into_iter().map(|c| (channel, c)));
-            // Large diffs may compress well as a rANS-coded residual.
-            let rans_cands =
-                crate::rans::residual::RansResidualEncoder.encode(ctx.target, &base_ctx);
-            produced += rans_cands.len();
-            candidates.extend(rans_cands.into_iter().map(|c| (channel, c)));
-            // Shift-aware copy/literal deltas (insertions/deletions).
-            let delta_cands = crate::rans::delta::DeltaEncoder.encode(ctx.target, &base_ctx);
-            produced += delta_cands.len();
-            candidates.extend(delta_cands.into_iter().map(|c| (channel, c)));
+            produced = store.perf().time("search_bases", || {
+                let mut produced = 0usize;
+                let cands =
+                    crate::entropy::residual::BaseResidualEncoder.encode(ctx.target, &base_ctx);
+                produced += cands.len();
+                candidates.extend(cands.into_iter().map(|c| (channel, c)));
+                // Large diffs may compress well as a rANS-coded residual.
+                let rans_cands =
+                    crate::rans::residual::RansResidualEncoder.encode(ctx.target, &base_ctx);
+                produced += rans_cands.len();
+                candidates.extend(rans_cands.into_iter().map(|c| (channel, c)));
+                // Shift-aware copy/literal deltas (insertions/deletions).
+                let delta_cands = crate::rans::delta::DeltaEncoder.encode(ctx.target, &base_ctx);
+                produced += delta_cands.len();
+                candidates.extend(delta_cands.into_iter().map(|c| (channel, c)));
+                produced
+            });
         }
         if channel == Channel::Universe && options.allow_universe {
-            let cands = crate::entropy::universe::UniverseEncoder.encode(ctx.target, &base_ctx);
-            produced += cands.len();
-            candidates.extend(cands.into_iter().map(|c| (Channel::Universe, c)));
+            produced = store.perf().time("search_universe", || {
+                let cands = crate::entropy::universe::UniverseEncoder.encode(ctx.target, &base_ctx);
+                let produced = cands.len();
+                candidates.extend(cands.into_iter().map(|c| (Channel::Universe, c)));
+                produced
+            });
         }
         bases_tried.push((channel, produced > 0));
         if produced > 0 {
@@ -470,15 +496,19 @@ pub fn encode_guided(
     }
 
     // --- Validate (§32) and pick the cheapest valid candidate.
-    let (winner_channel, winner) = pick_best_valid(
-        store,
-        &candidates,
-        ctx.target,
-        &limits,
-        ctx.pending,
-        ctx.mode,
-    )
-    .ok_or_else(|| StoreError::Invariant("no valid candidate (RAW must always work)".into()))?;
+    let (winner_channel, winner) = store
+        .perf()
+        .time("validation", || {
+            pick_best_valid(
+                store,
+                &candidates,
+                ctx.target,
+                &limits,
+                ctx.pending,
+                ctx.mode,
+            )
+        })
+        .ok_or_else(|| StoreError::Invariant("no valid candidate (RAW must always work)".into()))?;
     let update = ExtentUpdate {
         offset: ctx.offset,
         descriptor: winner.representation.clone(),

@@ -62,6 +62,8 @@ pub struct MountParams {
     /// Run the background optimizer worker while mounted (§16; disabled
     /// with `--no-background-optimize`).
     pub background_optimize: bool,
+    /// Phase-10A: dump FUSE/phase instrumentation to this path on drop.
+    pub stats_file: Option<PathBuf>,
 }
 
 /// Preflight: validate the environment and the mount configuration (§47).
@@ -104,7 +106,7 @@ pub fn preflight(params: &MountParams) -> Result<(), MountError> {
 /// Mount the store and return a background session (drop to unmount).
 pub fn mount(params: &MountParams, store: Store) -> Result<fuser::BackgroundSession, MountError> {
     preflight(params)?;
-    let fs = EntropyFs::new(std::sync::Arc::new(store));
+    let fs = EntropyFs::with_stats(std::sync::Arc::new(store), params.stats_file.clone());
     mount_fs(fs, params)
 }
 

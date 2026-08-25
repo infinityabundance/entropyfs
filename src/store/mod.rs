@@ -250,6 +250,8 @@ pub struct Store {
     dsfb: std::sync::Mutex<crate::dsfb::observer::StorageObserver>,
     /// Per-inode mutation locks (file-data writes and truncates).
     inode_locks: std::sync::Arc<InodeLockTable>,
+    /// Phase-10A write-path phase timings (diagnostic only).
+    perf: std::sync::Arc<crate::perf::Timings>,
 }
 
 impl std::fmt::Debug for Store {
@@ -311,6 +313,7 @@ impl Store {
             model_cache: std::sync::Mutex::new(crate::cache::model::ModelCache::new(64)),
             dsfb: std::sync::Mutex::new(crate::dsfb::observer::StorageObserver::default()),
             inode_locks: std::sync::Arc::new(InodeLockTable::default()),
+            perf: std::sync::Arc::new(crate::perf::Timings::default()),
         };
         store.open_segment(0)?;
         // Create the root directory inode (ino 1) and commit the initial
@@ -383,6 +386,7 @@ impl Store {
             model_cache: std::sync::Mutex::new(crate::cache::model::ModelCache::new(64)),
             dsfb: std::sync::Mutex::new(crate::dsfb::observer::StorageObserver::default()),
             inode_locks: std::sync::Arc::new(InodeLockTable::default()),
+            perf: std::sync::Arc::new(crate::perf::Timings::default()),
         };
         store
             .stats
@@ -481,6 +485,11 @@ impl Store {
     /// The object index (derived; for GC/fsck and the read path).
     pub fn object_index(&self) -> &ObjectIndex {
         &self.object_index
+    }
+
+    /// Phase-10A write-path phase timings (diagnostic).
+    pub fn perf(&self) -> &std::sync::Arc<crate::perf::Timings> {
+        &self.perf
     }
 
     /// The committed stats (copied: `StoreStats` is `Copy`).
@@ -1434,23 +1443,32 @@ impl Store {
         new_size: Option<u64>,
         hooks: &crate::store::transaction::CrashHooks,
     ) -> Result<(), StoreError> {
-        let mut tx = self.begin_tx()?;
-        for u in updates {
-            for obj in u.objects {
-                let tag = match obj.kind {
-                    crate::core::candidate::ObjectKind::Data => RecordTag::Data,
-                    crate::core::candidate::ObjectKind::Model => RecordTag::Model,
-                };
-                let ml = if tag == RecordTag::Data {
-                    Some(u.descriptor.len())
-                } else {
-                    None
-                };
-                crate::store::transaction::put_object(&mut tx, tag, obj.payload, ml);
-            }
-            Store::put_chunk_in_tx(&mut tx, &u.content_id, &u.descriptor)?;
-            Store::put_extent_in_tx(&mut tx, ino, u.offset, &u.descriptor)?;
-        }
+        let mut tx = self.perf.time("begin_tx_wait", || self.begin_tx())?;
+        self.perf
+            .time("btree_mutation", || -> Result<(), StoreError> {
+                for u in &updates {
+                    for obj in &u.objects {
+                        let tag = match obj.kind {
+                            crate::core::candidate::ObjectKind::Data => RecordTag::Data,
+                            crate::core::candidate::ObjectKind::Model => RecordTag::Model,
+                        };
+                        let ml = if tag == RecordTag::Data {
+                            Some(u.descriptor.len())
+                        } else {
+                            None
+                        };
+                        crate::store::transaction::put_object(
+                            &mut tx,
+                            tag,
+                            obj.payload.clone(),
+                            ml,
+                        );
+                    }
+                    Store::put_chunk_in_tx(&mut tx, &u.content_id, &u.descriptor)?;
+                    Store::put_extent_in_tx(&mut tx, ino, u.offset, &u.descriptor)?;
+                }
+                Ok(())
+            })?;
         if let Some(size) = new_size {
             let inode = Store::inode_for_tx(&tx, ino)?;
             let mut inode = inode;
@@ -2362,7 +2380,9 @@ impl Store {
                     None => {
                         let read_end = (chunk_off + chunk_class).min(old_size);
                         if read_end > chunk_off {
-                            partial = self.read_file(ino, chunk_off, read_end - chunk_off)?;
+                            partial = self.perf.time("rmw_read", || {
+                                self.read_file(ino, chunk_off, read_end - chunk_off)
+                            })?;
                             let n = partial.len().min(chunk_class as usize);
                             chunk_bytes[..n].copy_from_slice(&partial[..n]);
                         }
@@ -2390,7 +2410,9 @@ impl Store {
             // canonical was validated when its first occurrence won §32;
             // the reuse is re-validated here against the batch pending
             // state (the canonical's objects are staged, not committed).
-            let cid = crate::core::extent::ChunkId::of(chunk_bytes);
+            let cid = self
+                .perf
+                .time("hash", || crate::core::extent::ChunkId::of(chunk_bytes));
             let canonical: Option<Vec<u8>> = pending
                 .as_ref()
                 .and_then(|p| p.descriptors.get(&cid))
@@ -2529,7 +2551,9 @@ impl Store {
                 pending: pending.as_deref(),
                 mode: crate::optimizer::search::SearchMode::Foreground,
             };
-            let outcome = crate::optimizer::search::encode_guided(self, &ctx, options)?;
+            let outcome = self.perf.time("search", || {
+                crate::optimizer::search::encode_guided(self, &ctx, options)
+            })?;
             // Phase-8C: register this chunk's descriptor + objects in the
             // batch pending state so later chunks in the same transaction
             // can dedup against it. First occurrence wins (the persisted

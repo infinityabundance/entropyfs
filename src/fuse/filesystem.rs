@@ -133,11 +133,47 @@ pub struct EntropyFs {
     /// (`mount_fs`). `None` before mount and in unit tests; notifications
     /// are then no-ops.
     notifier: Arc<Mutex<Option<Notifier>>>,
+    /// Phase-10A FUSE request statistics (diagnostic only).
+    stats: Arc<crate::perf::FuseStats>,
+    /// Phase-10A: dump the stats render to this file when the instance
+    /// drops (the daemon's unmount), `None` = no dump.
+    stats_file: Option<std::path::PathBuf>,
+}
+
+/// Phase-10A per-request guard: records latency + concurrency on drop.
+struct ReqGuard<'a> {
+    stats: &'a crate::perf::FuseStats,
+    op: &'static str,
+    t0: std::time::Instant,
+    _inflight: crate::perf::InFlight<'a>,
+}
+
+impl<'a> ReqGuard<'a> {
+    fn begin(stats: &'a crate::perf::FuseStats, op: &'static str) -> Self {
+        Self {
+            stats,
+            op,
+            t0: std::time::Instant::now(),
+            _inflight: crate::perf::InFlight::begin(stats),
+        }
+    }
+}
+
+impl Drop for ReqGuard<'_> {
+    fn drop(&mut self) {
+        self.stats
+            .record_op(self.op, self.t0.elapsed().as_nanos() as u64);
+    }
 }
 
 impl EntropyFs {
     /// Wrap a store into a filesystem.
     pub fn new(store: Arc<Store>) -> Self {
+        Self::with_stats(store, None)
+    }
+
+    /// Wrap a store with an optional stats dump on drop (Phase-10A).
+    pub fn with_stats(store: Arc<Store>, stats_file: Option<std::path::PathBuf>) -> Self {
         let notifier = Arc::new(Mutex::new(None));
         let notify_tx = spawn_notifier(Arc::clone(&notifier));
         Self {
@@ -149,6 +185,8 @@ impl EntropyFs {
             worker_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             notify_tx,
             notifier,
+            stats: Arc::new(crate::perf::FuseStats::default()),
+            stats_file,
         }
     }
 
@@ -265,11 +303,21 @@ impl Drop for EntropyFs {
         // advisory lock is released when the session ends.
         self.worker_stop
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        // Phase-10A: dump the request/phase instrumentation when the
+        // daemon unmounts (the court reads this file for its analysis).
+        if let Some(path) = &self.stats_file {
+            let mut out = String::new();
+            out.push_str(&self.stats.render());
+            out.push_str("\n");
+            out.push_str(&self.store.perf().render());
+            let _ = std::fs::write(path, out);
+        }
     }
 }
 
 impl Filesystem for EntropyFs {
     fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> std::io::Result<()> {
+        let _g = ReqGuard::begin(&self.stats, "init");
         // Nanosecond timestamps.
         let _ = config.set_time_granularity(Duration::from_nanos(1));
         // Phase-8 write aggregation (§2/§3 of the Phase-8 directive):
@@ -303,6 +351,7 @@ impl Filesystem for EntropyFs {
     }
 
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &std::ffi::OsStr, reply: ReplyEntry) {
+        let _g = ReqGuard::begin(&self.stats, "lookup");
         let name = name.as_bytes();
         let store = self.store();
         let entry = match store.dir_lookup(inon(parent), name) {
@@ -323,6 +372,7 @@ impl Filesystem for EntropyFs {
     }
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
+        let _g = ReqGuard::begin(&self.stats, "getattr");
         match self.get_attr(ino.0) {
             Ok(attr) => reply.attr(&ATTR_TTL, &attr),
             Err(e) => reply.error(Self::errno(&e)),
@@ -347,6 +397,7 @@ impl Filesystem for EntropyFs {
         _flags: Option<fuser::BsdFileFlags>,
         reply: ReplyAttr,
     ) {
+        let _g = ReqGuard::begin(&self.stats, "setattr");
         let atime_ts = atime.map(|t| match t {
             TimeOrNow::SpecificTime(t) => ts_from_system(t),
             TimeOrNow::Now => Timespec::now(),
@@ -375,6 +426,7 @@ impl Filesystem for EntropyFs {
     }
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
+        let _g = ReqGuard::begin(&self.stats, "readlink");
         let store = self.store();
         match store.get_inode(ino.0) {
             Ok(Some(inode)) => match inode.data {
@@ -396,6 +448,7 @@ impl Filesystem for EntropyFs {
         rdev: u32,
         reply: ReplyEntry,
     ) {
+        let _g = ReqGuard::begin(&self.stats, "mknod");
         let file_type = mode & 0o170000;
         let kind = if file_type == crate::store::inode::mode::S_IFCHR {
             EntryKind::Device(true, rdev)
@@ -434,6 +487,7 @@ impl Filesystem for EntropyFs {
         _umask: u32,
         reply: ReplyEntry,
     ) {
+        let _g = ReqGuard::begin(&self.stats, "mkdir");
         match self.create_entry(
             inon(parent),
             name.as_bytes(),
@@ -451,6 +505,7 @@ impl Filesystem for EntropyFs {
     }
 
     fn unlink(&self, _req: &Request, parent: INodeNo, name: &std::ffi::OsStr, reply: ReplyEmpty) {
+        let _g = ReqGuard::begin(&self.stats, "unlink");
         let store = self.store();
         match store.unlink(inon(parent), name.as_bytes(), false, &CrashHooks::none()) {
             Ok(child) => {
@@ -463,6 +518,7 @@ impl Filesystem for EntropyFs {
     }
 
     fn rmdir(&self, _req: &Request, parent: INodeNo, name: &std::ffi::OsStr, reply: ReplyEmpty) {
+        let _g = ReqGuard::begin(&self.stats, "rmdir");
         let store = self.store();
         match store.unlink(inon(parent), name.as_bytes(), true, &CrashHooks::none()) {
             Ok(child) => {
@@ -485,6 +541,7 @@ impl Filesystem for EntropyFs {
         link: &std::path::Path,
         reply: ReplyEntry,
     ) {
+        let _g = ReqGuard::begin(&self.stats, "symlink");
         match self.create_entry(
             inon(parent),
             name.as_bytes(),
@@ -511,6 +568,7 @@ impl Filesystem for EntropyFs {
         flags: fuser::RenameFlags,
         reply: ReplyEmpty,
     ) {
+        let _g = ReqGuard::begin(&self.stats, "rename");
         if flags.bits() != 0 {
             reply.error(Errno::EINVAL);
             return;
@@ -559,6 +617,7 @@ impl Filesystem for EntropyFs {
         newname: &std::ffi::OsStr,
         reply: ReplyEntry,
     ) {
+        let _g = ReqGuard::begin(&self.stats, "link");
         let store = self.store();
         match store.link(
             inon(newparent),
@@ -579,6 +638,7 @@ impl Filesystem for EntropyFs {
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+        let _g = ReqGuard::begin(&self.stats, "open");
         let store = self.store();
         let inode = match store.get_inode(ino.0) {
             Ok(Some(i)) => i,
@@ -613,6 +673,7 @@ impl Filesystem for EntropyFs {
         _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
+        let _g = ReqGuard::begin(&self.stats, "read");
         let store = self.store();
         match store.read_file(ino.0, offset, size as u64) {
             Ok(data) => reply.data(&data),
@@ -632,6 +693,8 @@ impl Filesystem for EntropyFs {
         _lock_owner: Option<LockOwner>,
         reply: ReplyWrite,
     ) {
+        let _g = ReqGuard::begin(&self.stats, "write");
+        self.stats.record_write_size(data.len());
         let store = self.store();
         match store.write_region(ino.0, offset, data) {
             Ok(()) => reply.written(data.len() as u32),
@@ -648,6 +711,7 @@ impl Filesystem for EntropyFs {
         lock_owner: LockOwner,
         reply: ReplyEmpty,
     ) {
+        let _g = ReqGuard::begin(&self.stats, "flush");
         if let Ok(mut locks) = self.locks.lock() {
             locks.release_owner(lock_owner.0);
         }
@@ -664,6 +728,7 @@ impl Filesystem for EntropyFs {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
+        let _g = ReqGuard::begin(&self.stats, "release");
         if let Ok(mut h) = self.handles.lock() {
             h.remove(&fh.0);
         }
@@ -683,6 +748,7 @@ impl Filesystem for EntropyFs {
         _datasync: bool,
         reply: ReplyEmpty,
     ) {
+        let _g = ReqGuard::begin(&self.stats, "fsync");
         // Durability barrier (Phase 6): deferred writes become
         // power-durable here (ADR-0008: records → fdatasync → superblock
         // flip → fsync). v1 applies the full barrier for both FSYNC and
@@ -695,6 +761,7 @@ impl Filesystem for EntropyFs {
     }
 
     fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        let _g = ReqGuard::begin(&self.stats, "opendir");
         let store = self.store();
         match store.get_inode(ino.0) {
             Ok(Some(i)) if i.is_dir() => {
@@ -727,6 +794,7 @@ impl Filesystem for EntropyFs {
         offset: u64,
         mut reply: ReplyDirectory,
     ) {
+        let _g = ReqGuard::begin(&self.stats, "readdir");
         let store = self.store();
         match directory::fill_reply(&store, ino.0, offset, &mut reply) {
             Ok(_) => reply.ok(),
@@ -742,6 +810,7 @@ impl Filesystem for EntropyFs {
         _flags: OpenFlags,
         reply: ReplyEmpty,
     ) {
+        let _g = ReqGuard::begin(&self.stats, "releasedir");
         if let Ok(mut h) = self.handles.lock() {
             h.remove(&fh.0);
         }
@@ -749,6 +818,7 @@ impl Filesystem for EntropyFs {
     }
 
     fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
+        let _g = ReqGuard::begin(&self.stats, "statfs");
         let store = self.store();
         let capacity = store.physical_capacity();
         let used = store.physical_used();
@@ -777,6 +847,7 @@ impl Filesystem for EntropyFs {
         _position: u32,
         reply: ReplyEmpty,
     ) {
+        let _g = ReqGuard::begin(&self.stats, "setxattr");
         if !super::xattr::supported_name(name.as_bytes()) {
             return reply.error(Errno::EOPNOTSUPP);
         }
@@ -796,6 +867,7 @@ impl Filesystem for EntropyFs {
         size: u32,
         reply: ReplyXattr,
     ) {
+        let _g = ReqGuard::begin(&self.stats, "getxattr");
         let store = self.store();
         match store.get_xattr(ino.0, name.as_bytes()) {
             Ok(Some(value)) => {
@@ -813,6 +885,7 @@ impl Filesystem for EntropyFs {
     }
 
     fn listxattr(&self, _req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
+        let _g = ReqGuard::begin(&self.stats, "listxattr");
         let store = self.store();
         match store.list_xattr(ino.0) {
             Ok(names) => {
@@ -834,6 +907,7 @@ impl Filesystem for EntropyFs {
     }
 
     fn removexattr(&self, _req: &Request, ino: INodeNo, name: &std::ffi::OsStr, reply: ReplyEmpty) {
+        let _g = ReqGuard::begin(&self.stats, "removexattr");
         let store = self.store();
         match store.remove_xattr(ino.0, name.as_bytes(), &CrashHooks::none()) {
             Ok(true) => reply.ok(),
@@ -843,6 +917,7 @@ impl Filesystem for EntropyFs {
     }
 
     fn access(&self, _req: &Request, ino: INodeNo, _mask: AccessFlags, reply: ReplyEmpty) {
+        let _g = ReqGuard::begin(&self.stats, "access");
         let store = self.store();
         match store.get_inode(ino.0) {
             Ok(Some(_)) => reply.ok(),
@@ -861,6 +936,7 @@ impl Filesystem for EntropyFs {
         _flags: i32,
         reply: ReplyCreate,
     ) {
+        let _g = ReqGuard::begin(&self.stats, "create");
         match self.create_entry(
             inon(parent),
             name.as_bytes(),
@@ -915,6 +991,7 @@ impl Filesystem for EntropyFs {
         pid: u32,
         reply: ReplyLock,
     ) {
+        let _g = ReqGuard::begin(&self.stats, "getlk");
         let locks = self.locks.lock().expect("locks poisoned");
         match locks.getlk(ino.0, lock_owner.0, start, end, typ) {
             Some(l) => reply.locked(l.start, l.end, l.typ, l.pid),
@@ -935,6 +1012,7 @@ impl Filesystem for EntropyFs {
         _sleep: bool,
         reply: ReplyEmpty,
     ) {
+        let _g = ReqGuard::begin(&self.stats, "setlk");
         let mut locks = self.locks.lock().expect("locks poisoned");
         match locks.setlk(ino.0, lock_owner.0, start, end, typ, pid) {
             Ok(true) => reply.ok(),
@@ -953,6 +1031,7 @@ impl Filesystem for EntropyFs {
         mode: i32,
         reply: ReplyEmpty,
     ) {
+        let _g = ReqGuard::begin(&self.stats, "fallocate");
         // FALLOC_FL_KEEP_SIZE = 0x01, PUNCH_HOLE = 0x02.
         let keep_size = mode & 0x01 != 0;
         let punch_hole = mode & 0x02 != 0;
@@ -1002,6 +1081,7 @@ impl Filesystem for EntropyFs {
         whence: i32,
         reply: fuser::ReplyLseek,
     ) {
+        let _g = ReqGuard::begin(&self.stats, "lseek");
         // SEEK_DATA = 3, SEEK_HOLE = 4.
         if offset < 0 {
             return reply.error(Errno::EINVAL);
@@ -1047,6 +1127,7 @@ impl Filesystem for EntropyFs {
         _flags: CopyFileRangeFlags,
         reply: ReplyWrite,
     ) {
+        let _g = ReqGuard::begin(&self.stats, "copy_file_range");
         let store = self.store();
         match store.copy_range(ino_in.0, offset_in, ino_out.0, offset_out, len) {
             Ok(n) => reply.written(n as u32),

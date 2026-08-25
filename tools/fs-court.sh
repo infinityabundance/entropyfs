@@ -42,6 +42,10 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENTROPYFS_BIN="${ENTROPYFS_BIN:-$REPO_ROOT/target/release/entropyfs}"
 WORKDIR="${1:-$REPO_ROOT/target/fs-court-scratch}"
 OUTROOT="${2:-$REPO_ROOT/evidence/performance}"
+# Phase-10A: the FUSE event-loop thread count (the court runs the
+# foreground section with the background optimizer disabled so an idle
+# worker can never contaminate the timing attribution).
+FUSE_THREADS="${COURT_FUSE_THREADS:-1}"
 
 if [[ ! -x "$ENTROPYFS_BIN" ]]; then
     echo "error: $ENTROPYFS_BIN not found (build with: cargo build --release)" >&2
@@ -313,23 +317,47 @@ else
 fi
 
 # --- 8. EntropyFS (FUSE, unprivileged; symmetric buffered/durable + reads) --
-log "== entropyfs (FUSE store) =="
+log "== entropyfs (FUSE store, threads=$FUSE_THREADS, no background optimizer) =="
 if [[ -e /dev/fuse ]] && command -v fusermount3 >/dev/null; then
     mkdir -p "$WORKDIR/efs-store" "$WORKDIR/mnt-efs"
     "$ENTROPYFS_BIN" mkfs "$WORKDIR/efs-store" >/dev/null
-    "$ENTROPYFS_BIN" mount "$WORKDIR/efs-store" "$WORKDIR/mnt-efs" &
+    # Foreground timing hygiene (Phase-10A): the background optimizer is
+    # disabled during the workload so an idle window cannot rewrite extents
+    # mid-measurement; the settled state later invokes it deliberately.
+    # The stats file captures the FUSE request + write-path phase
+    # instrumentation (opcode latencies, write-size histogram, per-phase
+    # timings) for the perf analysis.
+    "$ENTROPYFS_BIN" mount "$WORKDIR/efs-store" "$WORKDIR/mnt-efs" \
+        --threads "$FUSE_THREADS" --no-background-optimize \
+        --stats-file "$OUT/fuse-stats-$FUSE_THREADS.txt" &
     EFS_PID=$!
     for _ in $(seq 1 50); do
         mountpoint -q "$WORKDIR/mnt-efs" && break
         sleep 0.1
     done
     if mountpoint -q "$WORKDIR/mnt-efs"; then
-        measure_mounted entropyfs "entropyfs" "$WORKDIR/mnt-efs" "FUSE mount of $WORKDIR/efs-store"
+        # Daemon CPU sampling (Phase-10A): /proc/<pid>/stat utime+stime
+        # before and after the workload => utilization = cpu/wall.
+        cpu_ticks() { awk '{print $14+$15}' "/proc/$1/stat" 2>/dev/null || echo 0; }
+        hz="$(getconf CLK_TCK 2>/dev/null || echo 100)"
+        cpu0=$(cpu_ticks "$EFS_PID")
+        measure_mounted entropyfs "entropyfs" "$WORKDIR/mnt-efs" "FUSE mount of $WORKDIR/efs-store (threads=$FUSE_THREADS)"
+        cpu1=$(cpu_ticks "$EFS_PID")
+        wall0=$(date +%s%N)
+        sync
+        wall1=$(date +%s%N)
+        cpu_secs=$(python3 -c "print(f'{($cpu1-$cpu0)/$hz:.2f}')")
+        wall_secs=$(python3 -c "print(f'{($wall1-$wall0)/1e9:.2f}')")
+        util=$(python3 -c "print(f'{$cpu_secs/max($wall_secs,0.001):.2f}')")
+        log "  daemon CPU: ${cpu_secs}s user+sys over ${wall_secs}s wall = ${util}x utilization (threads=$FUSE_THREADS)"
+        record entropyfs "daemon_cpu_threads_$FUSE_THREADS" "{\"cpu_secs\": $cpu_secs, \"wall_secs\": $wall_secs, \"utilization\": $util}"
         # Cold read for FUSE: remount (fresh FUSE daemon page cache; the
         # backing store page cache is retained — recorded honestly).
         "$ENTROPYFS_BIN" unmount "$WORKDIR/mnt-efs" || fusermount3 -u "$WORKDIR/mnt-efs" || true
         wait "$EFS_PID" 2>/dev/null || true
-        "$ENTROPYFS_BIN" mount "$WORKDIR/efs-store" "$WORKDIR/mnt-efs" &
+        "$ENTROPYFS_BIN" mount "$WORKDIR/efs-store" "$WORKDIR/mnt-efs" \
+            --threads "$FUSE_THREADS" --no-background-optimize \
+            --stats-file "$OUT/fuse-stats-$FUSE_THREADS-cold.txt" &
         EFS_PID=$!
         for _ in $(seq 1 50); do
             mountpoint -q "$WORKDIR/mnt-efs" && break
@@ -349,6 +377,10 @@ if [[ -e /dev/fuse ]] && command -v fusermount3 >/dev/null; then
         fi
         "$ENTROPYFS_BIN" unmount "$WORKDIR/mnt-efs" || fusermount3 -u "$WORKDIR/mnt-efs" || true
         wait "$EFS_PID" 2>/dev/null || true
+        if [[ -f "$OUT/fuse-stats-$FUSE_THREADS.txt" ]]; then
+            log "fuse stats ($FUSE_THREADS threads):"
+            log "$(grep -vE '^$' "$OUT/fuse-stats-$FUSE_THREADS.txt" | sed 's/^/  /')"
+        fi
         # Post-GC backing footprint: segments + superblock, apparent AND
         # allocated blocks (the complete store, not just segment lengths).
         "$ENTROPYFS_BIN" fsck "$WORKDIR/efs-store" >/dev/null 2>&1 && log "  fsck: clean"

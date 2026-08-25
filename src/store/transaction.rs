@@ -239,19 +239,25 @@ impl<'a> Tx<'a> {
         //     compacted them (and if the segment stays live, forever —
         //     the measured ~10% incompressible backing floor). Records
         //     unreachable from the final root are pruned before append.
-        self.prune_unreachable_records(&root_id)?;
+        self.store
+            .perf()
+            .time("prune", || self.prune_unreachable_records(&root_id))?;
         // 2. ENOSPC guard on the PRUNED footprint (refuse before staging
         //    anything; the watermark keeps the GC emergency reserve).
         self.store.ensure_commit_space(&self.records)?;
         hooks.hit(CrashPoint::AfterRootWrite)?;
         // 3. append all new immutable records (including the root).
-        self.store.append_records(&mut self.records)?;
-        // 4. flush the segment to the file's page cache (process-crash
-        //    durable; the power barrier is the durability barrier).
-        self.store.flush_segment()?;
+        self.store.perf().time("append_flush", || {
+            self.store.append_records(&mut self.records)?;
+            // 4. flush the segment to the file's page cache (process-crash
+            //    durable; the power barrier is the durability barrier).
+            self.store.flush_segment()
+        })?;
         // 5. write the inactive superblock slot (page cache; fsync at the
         //    barrier). Torn slot writes are detected at recovery.
-        self.store.write_superblock(root_id, &self.root)?;
+        self.store.perf().time("superblock", || {
+            self.store.write_superblock(root_id, &self.root)
+        })?;
         // 6. publish in-memory state.
         self.store.publish_commit(&self.root, root_id)?;
         Ok(self.store)

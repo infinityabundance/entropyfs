@@ -39,6 +39,11 @@ pub struct MountArgs {
     /// the mount is idle; default on).
     #[arg(long)]
     pub no_background_optimize: bool,
+    /// Phase-10A: dump FUSE request + write-path phase instrumentation to
+    /// this file when the daemon unmounts (diagnostic; the perf court
+    /// reads it).
+    #[arg(long, value_name = "PATH")]
+    pub stats_file: Option<PathBuf>,
 }
 
 /// Run the mount daemon.
@@ -53,6 +58,7 @@ pub fn run(args: &MountArgs) -> Result<(), String> {
         threads: args.threads,
         fs_name: args.fs_name.clone(),
         background_optimize: !args.no_background_optimize,
+        stats_file: args.stats_file.clone(),
     };
     let session = do_mount(&params, store).map_err(|e| e.to_string())?;
     println!(
