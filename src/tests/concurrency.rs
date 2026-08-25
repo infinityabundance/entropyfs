@@ -203,6 +203,105 @@ fn group_commit_is_one_root() {
     }
 }
 
+/// Decode the descriptor of the extent covering `offset` of ino 3.
+fn extent_family(store: &Store, offset: u64) -> String {
+    let limits = *store.limits();
+    let inode = store.get_inode(3).unwrap().unwrap();
+    let root = match inode.data {
+        crate::store::inode::InodeData::File { extent_root } => extent_root,
+        _ => panic!("not a file"),
+    };
+    let (_, bytes) =
+        crate::store::extent_tree::covering(root, offset, 64, limits.max_fanout, store)
+            .unwrap()
+            .unwrap();
+    let d = crate::format::descriptor::decode(
+        &bytes,
+        limits.max_descriptor_bytes,
+        limits.max_inline_bytes,
+        limits.max_palette,
+        limits.max_period,
+        limits.max_chunk_size,
+    )
+    .unwrap();
+    d.family().to_string()
+}
+
+#[test]
+fn group_commit_batch_dedups_within_the_batch() {
+    // Phase-8C: the dedup lookup reads the committed chunk index, so a
+    // group-commit batch must expose its own pending entries — otherwise
+    // repeated content inside one transaction never aliases. The second
+    // and third identical chunks in a batch must become EXACT_REF against
+    // the first, and the aliases must materialize byte-exact through the
+    // committed index (owner + aliases commit in the same transaction).
+    let dir = tempfile::TempDir::new().unwrap();
+    let store = create_store(&dir);
+    let x = deterministic(1); // incompressible: RAW first occurrence (object-bearing)
+    let batch = vec![(0u64, x.clone()), (65536, x.clone()), (131072, x.clone())];
+    store
+        .write_region_batch(
+            3,
+            &batch,
+            crate::optimizer::policy::OptimizeOptions::default(),
+        )
+        .unwrap();
+    let expect: Vec<u8> = [x.clone(), x.clone(), x.clone()].concat();
+    assert_eq!(store.read_file(3, 0, 3 * 65536).unwrap(), expect);
+    // One self-contained owner + two EXACT_REF aliases.
+    assert_eq!(extent_family(&store, 0), "RAW");
+    assert_eq!(extent_family(&store, 65536), "EXACT_REF");
+    assert_eq!(extent_family(&store, 131072), "EXACT_REF");
+
+    // Cross-batch dedup still works through the committed index.
+    store
+        .write_region_batch(
+            3,
+            &[(3 * 65536, x.clone())],
+            crate::optimizer::policy::OptimizeOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(extent_family(&store, 3 * 65536), "EXACT_REF");
+    assert_eq!(
+        store.read_file(3, 0, 4 * 65536).unwrap(),
+        [x.clone(), x.clone(), x.clone(), x.clone()].concat()
+    );
+
+    // GC must keep the aliased content decodable (the reference closure
+    // pins the owner's entry + objects) and leave fsck clean.
+    crate::store::gc::collect(&store, &CrashHooks::none()).unwrap();
+    let all = [x.clone(), x.clone(), x.clone(), x.clone()].concat();
+    assert_eq!(store.read_file(3, 0, 4 * 65536).unwrap(), all);
+    let report = crate::fsck::fsck(dir.path(), &Default::default()).unwrap();
+    assert!(report.is_clean(), "{}", report.render());
+}
+
+#[test]
+fn group_commit_batch_dedup_survives_in_batch_overwrite() {
+    // An in-batch overwrite (same offset, newer content) must not poison
+    // the pending entry for the older content: a later duplicate of the
+    // older content still aliases to its (still-committed) index entry.
+    let dir = tempfile::TempDir::new().unwrap();
+    let store = create_store(&dir);
+    let x = deterministic(2);
+    let y = deterministic(3);
+    assert_ne!(x, y);
+    store
+        .write_region_batch(
+            3,
+            &[(0u64, x.clone()), (0u64, y.clone()), (65536, x.clone())],
+            crate::optimizer::policy::OptimizeOptions::default(),
+        )
+        .unwrap();
+    // Chunk 0 ends as y; chunk 1 is an EXACT_REF alias of the older x
+    // (whose entry and objects were committed in the same transaction).
+    let mut expect = Vec::new();
+    expect.extend_from_slice(&y);
+    expect.extend_from_slice(&x);
+    assert_eq!(store.read_file(3, 0, 2 * 65536).unwrap(), expect);
+    assert_eq!(extent_family(&store, 65536), "EXACT_REF");
+}
+
 #[test]
 fn concurrent_fsync_and_writes() {
     let dir = tempfile::TempDir::new().unwrap();

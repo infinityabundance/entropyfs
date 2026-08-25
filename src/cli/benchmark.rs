@@ -70,10 +70,18 @@ struct RunResult {
 }
 
 /// Write the synthetic corpus through the given options and measure.
+///
+/// The write is a single group-commit batch (Phase-8C write aggregation,
+/// the campaign's write path), an optional background optimizer pass runs
+/// for the A8 ladder step, GC reclaims the append-only garbage, and the
+/// reported physical figure is the REACHABLE footprint (methodology §2) —
+/// not `physical_used`, which includes unreclaimed COW records and made
+/// the old per-chunk-transaction ablation look like a RAW loss.
 fn run_corpus(
     store_dir: &std::path::Path,
     size_mib: u64,
     options: OptimizeOptions,
+    run_background: bool,
 ) -> Result<RunResult, String> {
     let config = StoreConfig::default();
     let store = Store::open(store_dir, &config).map_err(|e| e.to_string())?;
@@ -84,9 +92,9 @@ fn run_corpus(
         tx.commit(&CrashHooks::none()).map_err(|e| e.to_string())?;
     }
     let total = size_mib * 1024 * 1024;
-    let mut written = 0u64;
+    let mut writes: Vec<(u64, Vec<u8>)> = Vec::new();
     let mut chunk: Vec<u8> = Vec::with_capacity(64 * 1024);
-    let start = Instant::now();
+    let mut written = 0u64;
     while written < total {
         chunk.clear();
         let pattern = (written / (1024 * 1024)) % 4;
@@ -108,11 +116,13 @@ fn run_corpus(
                 }
             }
         }
-        store
-            .write_region_with(3, written, &chunk, options)
-            .map_err(|e| e.to_string())?;
+        writes.push((written, chunk.clone()));
         written += 65536;
     }
+    let start = Instant::now();
+    store
+        .write_region_batch(3, &writes, options)
+        .map_err(|e| e.to_string())?;
     let write_secs = start.elapsed().as_secs_f64();
     let write_mbps = total as f64 / write_secs / (1024.0 * 1024.0);
 
@@ -129,7 +139,22 @@ fn run_corpus(
     let read_secs = mstart.elapsed().as_secs_f64();
     let read_mbps = total as f64 / read_secs / (1024.0 * 1024.0);
 
-    let physical = store.physical_used();
+    if run_background {
+        crate::optimizer::background::optimize_pass(&store, options, None, None)
+            .map_err(|e| e.to_string())?;
+    }
+    // GC first: the append-only records superseded by the write (and the
+    // background pass) are reclaimed so the footprint is the permanent
+    // reachable state, exactly as the campaign measures it.
+    crate::store::gc::collect(&store, &CrashHooks::none()).map_err(|e| e.to_string())?;
+    let live = crate::store::gc::mark_live(&store).map_err(|e| e.to_string())?;
+    let physical: u64 = store
+        .object_index()
+        .iter()
+        .into_iter()
+        .filter(|(id, _)| live.contains(id))
+        .map(|(_, loc)| loc.total_size())
+        .sum();
     let families = representation_distribution(&store, 3).map_err(|e| e.to_string())?;
     Ok(RunResult {
         mode: "run",
@@ -219,16 +244,7 @@ pub fn run(args: &BenchmarkArgs) -> Result<(), String> {
         let dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
         Store::create(dir.path(), &StoreConfig::default(), [0x66; 16])
             .map_err(|e| e.to_string())?;
-        let mut r = run_corpus(dir.path(), args.size_mib, options)?;
-        if run_background {
-            // Reopen the store and run the background pass (the A8 step).
-            let store =
-                Store::open(dir.path(), &StoreConfig::default()).map_err(|e| e.to_string())?;
-            crate::optimizer::background::optimize_pass(&store, options, None, None)
-                .map_err(|e| e.to_string())?;
-            r.physical = store.physical_used();
-        }
-        r.mode = mode_name;
+        let r = run_corpus(dir.path(), args.size_mib, options, run_background)?;
         print_run(&r, mode_name);
         return Ok(());
     }
@@ -362,7 +378,7 @@ fn run_ablation_table(args: &BenchmarkArgs) -> Result<(), String> {
         let dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
         Store::create(dir.path(), &StoreConfig::default(), [0x66; 16])
             .map_err(|e| e.to_string())?;
-        let mut r = run_corpus(dir.path(), args.size_mib, options)?;
+        let mut r = run_corpus(dir.path(), args.size_mib, options, false)?;
         r.mode = name;
         rows.push(r);
     }
@@ -427,14 +443,7 @@ fn run_ablation_table(args: &BenchmarkArgs) -> Result<(), String> {
         let dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
         Store::create(dir.path(), &StoreConfig::default(), [0x66; 16])
             .map_err(|e| e.to_string())?;
-        let mut r = run_corpus(dir.path(), args.size_mib, options)?;
-        if run_background {
-            let store =
-                Store::open(dir.path(), &StoreConfig::default()).map_err(|e| e.to_string())?;
-            crate::optimizer::background::optimize_pass(&store, options, None, None)
-                .map_err(|e| e.to_string())?;
-            r.physical = store.physical_used();
-        }
+        let mut r = run_corpus(dir.path(), args.size_mib, options, run_background)?;
         r.mode = name;
         println!(
             "{:<18} {:>12} {:>14} {:>9.3}x {:>10.1}",

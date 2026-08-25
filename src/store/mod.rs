@@ -1308,6 +1308,7 @@ impl Store {
                 .iter()
                 .map(|o| (o.id, o.payload.clone()))
                 .collect(),
+            None,
         );
         let bytes = crate::core::materialize::materialize_to_vec(
             &u.descriptor,
@@ -2265,7 +2266,7 @@ impl Store {
         if data.is_empty() {
             return Ok(());
         }
-        let (updates, new_size) = self.prepare_write(ino, offset, data, None, options)?;
+        let (updates, new_size) = self.prepare_write(ino, offset, data, None, None, options)?;
         self.commit_file_extents_deferred(ino, updates, Some(new_size), &CrashHooks::none())?;
         Ok(())
     }
@@ -2285,6 +2286,7 @@ impl Store {
         offset: u64,
         data: &[u8],
         mut overlay: Option<&mut std::collections::BTreeMap<u64, Vec<u8>>>,
+        mut pending: Option<&mut crate::optimizer::search::PendingBatch>,
         options: crate::optimizer::policy::OptimizeOptions,
     ) -> Result<(Vec<ExtentUpdate>, u64), StoreError> {
         if data.is_empty() {
@@ -2405,9 +2407,29 @@ impl Store {
                 offset: chunk_off,
                 target: chunk_bytes,
                 prev_version,
+                pending: pending.as_deref(),
                 mode: crate::optimizer::search::SearchMode::Foreground,
             };
             let outcome = crate::optimizer::search::encode_guided(self, &ctx, options)?;
+            // Phase-8C: register this chunk's descriptor + objects in the
+            // batch pending state so later chunks in the same transaction
+            // can dedup against it. First occurrence wins (the persisted
+            // chunk-index entry is exactly the first occurrence's
+            // descriptor); EXACT_REF descriptors are skipped — an alias
+            // resolves through the committed index, and a self-
+            // referencing pending entry would loop at validation.
+            if let Some(p) = pending.as_mut() {
+                use crate::core::representation::Representation as Rep;
+                if !matches!(outcome.update.descriptor, Rep::ExactRef { .. }) {
+                    let desc_bytes = crate::format::descriptor::encode(&outcome.update.descriptor)?;
+                    p.descriptors
+                        .entry(outcome.update.content_id)
+                        .or_insert(desc_bytes);
+                }
+                for obj in &outcome.update.objects {
+                    p.objects.entry(obj.id).or_insert(obj.payload.clone());
+                }
+            }
             updates.extend(flatten_updates);
             updates.push(outcome.update);
             chunk += 1;
@@ -2434,10 +2456,19 @@ impl Store {
         sorted.sort_by_key(|(off, _)| *off);
         let mut overlay: std::collections::BTreeMap<u64, Vec<u8>> =
             std::collections::BTreeMap::new();
+        let mut pending: crate::optimizer::search::PendingBatch =
+            crate::optimizer::search::PendingBatch::default();
         let mut updates: Vec<ExtentUpdate> = Vec::new();
         let mut new_size = 0u64;
         for (offset, data) in &sorted {
-            let (u, sz) = self.prepare_write(ino, *offset, data, Some(&mut overlay), options)?;
+            let (u, sz) = self.prepare_write(
+                ino,
+                *offset,
+                data,
+                Some(&mut overlay),
+                Some(&mut pending),
+                options,
+            )?;
             updates.extend(u);
             new_size = new_size.max(sz);
         }

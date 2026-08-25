@@ -49,8 +49,32 @@ pub struct GuidedContext<'a> {
     pub target: &'a [u8],
     /// P0: the previous version of this chunk, when known (write path).
     pub prev_version: Option<crate::core::candidate::BaseChunk>,
+    /// The batch's pending state (Phase-8C): chunks already encoded in
+    /// this group-commit transaction, so exact dedup can see the batch's
+    /// own entries (they are not yet in the committed chunk index).
+    /// `None` for single-write and background paths.
+    pub pending: Option<&'a PendingBatch>,
     /// Search mode.
     pub mode: SearchMode,
+}
+
+/// The in-batch pending state (Phase-8C write aggregation). A group-commit
+/// batch stages all its records in one transaction; the dedup lookup reads
+/// the committed chunk index, so without this view the batch's own chunks
+/// would never dedup against each other.
+#[derive(Debug, Default)]
+pub struct PendingBatch {
+    /// Content id → encoded descriptor of the FIRST occurrence of that
+    /// content in the batch. First occurrence wins because the persisted
+    /// chunk-index entry is exactly that update's descriptor; EXACT_REF
+    /// descriptors are skipped (their content resolves through the
+    /// committed index, and a self-referencing pending entry would loop
+    /// at validation).
+    pub descriptors: std::collections::HashMap<ChunkId, Vec<u8>>,
+    /// Object id → payload of every object staged by the batch so far
+    /// (needed to materialize a pending descriptor during §32
+    /// validation; the objects commit in the same transaction).
+    pub objects: std::collections::HashMap<ChunkId, Vec<u8>>,
 }
 
 /// Outcome of a guided search.
@@ -118,7 +142,7 @@ pub fn encode_guided(
     // apparent savings are vacuous (cross-extent dedup already happened
     // in the foreground write path).
     if options.allow_dedup && ctx.mode == SearchMode::Foreground {
-        if let Some(c) = dedup_candidate(store, ctx.target, cid, &limits)? {
+        if let Some(c) = dedup_candidate(store, ctx.target, cid, &limits, ctx.pending)? {
             candidates.push((Channel::SharedContent, c));
         }
     }
@@ -327,10 +351,15 @@ pub fn encode_guided(
     }
 
     // --- Validate (§32) and pick the cheapest valid candidate.
-    let (winner_channel, winner) =
-        pick_best_valid(store, &candidates, ctx.target, &limits, &policy).ok_or_else(|| {
-            StoreError::Invariant("no valid candidate (RAW must always work)".into())
-        })?;
+    let (winner_channel, winner) = pick_best_valid(
+        store,
+        &candidates,
+        ctx.target,
+        &limits,
+        &policy,
+        ctx.pending,
+    )
+    .ok_or_else(|| StoreError::Invariant("no valid candidate (RAW must always work)".into()))?;
     let update = ExtentUpdate {
         offset: ctx.offset,
         descriptor: winner.representation.clone(),
@@ -393,17 +422,23 @@ pub fn encode_guided(
     })
 }
 
-/// Exact dedup: look up the content id in the chunk index, materialize the
-/// existing descriptor, and verify the bytes are identical before
-/// proposing EXACT_REF (§12 — a candidate dedup hit must verify logical
-/// length, content identity, and exact bytes).
+/// Exact dedup: look up the content id in the chunk index (or the batch's
+/// pending state, Phase-8C), materialize the existing descriptor, and
+/// verify the bytes are identical before proposing EXACT_REF (§12 — a
+/// candidate dedup hit must verify logical length, content identity, and
+/// exact bytes).
 fn dedup_candidate(
     store: &Store,
     target: &[u8],
     cid: ChunkId,
     limits: &crate::core::limits::Limits,
+    pending: Option<&PendingBatch>,
 ) -> Result<Option<Candidate>, StoreError> {
-    let Some(desc_bytes) = store.chunk_descriptor(&cid)? else {
+    let desc_bytes = match pending.and_then(|p| p.descriptors.get(&cid)) {
+        Some(b) => Some(b.clone()),
+        None => store.chunk_descriptor(&cid)?,
+    };
+    let Some(desc_bytes) = desc_bytes else {
         return Ok(None);
     };
     let desc = match crate::format::descriptor::decode(
@@ -420,10 +455,11 @@ fn dedup_candidate(
     if desc.len() != target.len() as u64 {
         return Ok(None);
     }
-    let Ok(existing) = materialize_to_vec(&desc, store, limits) else {
-        return Ok(None);
-    };
-    if existing != target {
+    // Verify exact bytes. For a committed entry the store resolves
+    // everything; for a pending entry the descriptor's objects are staged
+    // in the same batch (not yet committed), so validation must see them.
+    let resolver = CandidateResolver::new(store, std::collections::HashMap::new(), pending);
+    if materialize_to_vec(&desc, &resolver, limits).as_deref() != Ok(target) {
         return Ok(None);
     }
     Ok(crate::core::candidate::exact_ref_candidate(
@@ -438,14 +474,16 @@ fn dedup_candidate(
 /// Validate candidates (§32) and return the cheapest valid one with its
 /// channel attribution. Validation failure of an otherwise-cheap candidate
 /// is a hard error path that must fall through to RAW. Each candidate is
-/// validated against a resolver that can see both the committed store and
-/// the candidate's own new objects.
+/// validated against a resolver that can see the committed store, the
+/// candidate's own new objects, and (Phase-8C) the batch's pending
+/// descriptors/objects.
 fn pick_best_valid<'a>(
     store: &Store,
     candidates: &'a [(Channel, Candidate)],
     target: &[u8],
     limits: &crate::core::limits::Limits,
     policy: &crate::core::cost::Policy,
+    pending: Option<&'a PendingBatch>,
 ) -> Option<(Channel, &'a Candidate)> {
     let mut order: Vec<usize> = (0..candidates.len()).collect();
     order.sort_by_key(|&i| candidates[i].1.total(policy));
@@ -458,6 +496,8 @@ fn pick_best_valid<'a>(
                 .iter()
                 .map(|o| (o.id, o.payload.clone()))
                 .collect(),
+            pending_descriptors: pending.map(|p| &p.descriptors),
+            pending_objects: pending.map(|p| &p.objects),
         };
         if validate_candidate(cand, target, &resolver, limits).is_ok() {
             return Some((*channel, cand));
@@ -466,23 +506,32 @@ fn pick_best_valid<'a>(
     None
 }
 
-/// A `DecoderContext` that resolves a candidate's own new objects first
-/// and falls back to the committed store (for bases/targets/models that
+/// A `DecoderContext` that resolves a candidate's own new objects first,
+/// then (Phase-8C) the batch's pending descriptors/objects, and finally
+/// falls back to the committed store (for bases/targets/models that
 /// already exist). Used for §32 validation (also by the store's commit
 /// gate for unguided `encode_chunk` updates).
 pub(crate) struct CandidateResolver<'a> {
     store: &'a Store,
     objects: std::collections::HashMap<ChunkId, Vec<u8>>,
+    pending_descriptors: Option<&'a std::collections::HashMap<ChunkId, Vec<u8>>>,
+    pending_objects: Option<&'a std::collections::HashMap<ChunkId, Vec<u8>>>,
 }
 
 impl<'a> CandidateResolver<'a> {
     /// Build a resolver over the committed store plus the given new
-    /// objects.
+    /// objects (and optionally the batch pending state).
     pub(crate) fn new(
         store: &'a Store,
         objects: std::collections::HashMap<ChunkId, Vec<u8>>,
+        pending: Option<&'a PendingBatch>,
     ) -> Self {
-        Self { store, objects }
+        Self {
+            store,
+            objects,
+            pending_descriptors: pending.map(|p| &p.descriptors),
+            pending_objects: pending.map(|p| &p.objects),
+        }
     }
 }
 
@@ -494,6 +543,9 @@ impl DecoderContext for CandidateResolver<'_> {
         if let Some(bytes) = self.objects.get(id) {
             return Ok(bytes.clone());
         }
+        if let Some(bytes) = self.pending_objects.and_then(|p| p.get(id)) {
+            return Ok(bytes.clone());
+        }
         self.store.fetch_object_impl(id)
     }
 
@@ -501,6 +553,20 @@ impl DecoderContext for CandidateResolver<'_> {
         &self,
         id: &ChunkId,
     ) -> Result<Representation, crate::core::materialize::MaterializeError> {
+        if let Some(bytes) = self.pending_descriptors.and_then(|p| p.get(id)) {
+            let limits = *self.store.limits();
+            return crate::format::descriptor::decode(
+                bytes,
+                limits.max_descriptor_bytes,
+                limits.max_inline_bytes,
+                limits.max_palette,
+                limits.max_period,
+                limits.max_chunk_size,
+            )
+            .map_err(|e| {
+                crate::core::materialize::MaterializeError::InvalidDescriptor(e.to_string())
+            });
+        }
         self.store.fetch_descriptor(id)
     }
 
@@ -603,6 +669,7 @@ mod tests {
             offset: 0,
             target,
             prev_version: prev,
+            pending: None,
             mode: SearchMode::Foreground,
         };
         encode_guided(store, &ctx, OptimizeOptions::default()).unwrap()
@@ -740,6 +807,7 @@ mod tests {
             offset: 0,
             target: &zeros,
             prev_version: None,
+            pending: None,
             mode: SearchMode::Foreground,
         };
         let out = encode_guided(&store, &ctx, OptimizeOptions::raw_only()).unwrap();

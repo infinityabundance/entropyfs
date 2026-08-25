@@ -173,6 +173,7 @@ pub fn optimize_pass(
                 offset: start,
                 target: &bytes,
                 prev_version: None,
+                pending: None,
                 mode: SearchMode::Background,
             };
             let searched = match encode_guided(store, &ctx, options) {
