@@ -999,6 +999,95 @@ pub fn encode_streams_n(streams: &[Vec<u8>]) -> Option<EncodedStreams> {
     })
 }
 
+/// The sequence families' shared scale/codec (Phase-9G): aggregate models
+/// must be trained with exactly the per-stream constants so a shared model
+/// is byte- and decode-compatible with any slot the encoders produce.
+pub(crate) const fn sequence_scale_codec() -> (u8, RansCodec) {
+    (SCALE_BITS, CODEC)
+}
+
+/// Phase-9G: train ONE cohort model on an aggregate histogram (the
+/// amortized-model background pass). Same normalizer/scale/codec as the
+/// per-stream path.
+pub(crate) fn aggregate_model(hist: &[u32; 256]) -> Option<RansModel> {
+    normalize_histogram(hist, SCALE_BITS, CODEC)
+}
+
+/// Phase-9G: encode N raw streams where selected slots use an EXTERNAL
+/// (cohort-amortized) model instead of a per-stream trained model.
+///
+/// `models[i] == Some(m)` forces slot i to model `m`: the slot is rANS iff
+/// the encoded payload beats RAW (the model is amortized across the cohort
+/// and counted once, so its own bytes do not gate the per-stream choice).
+/// `None` keeps the per-stream train-and-compare path (the Phase-9G0
+/// gate). The slot layout and `EncodedStreams` shape are byte-identical to
+/// `encode_streams_n`, so existing descriptors and decode paths apply —
+/// no format change.
+pub(crate) fn encode_streams_n_with_models(
+    streams: &[Vec<u8>],
+    models: &[Option<&RansModel>],
+) -> Option<EncodedStreams> {
+    if streams.is_empty() || streams.len() > 4 || models.len() != streams.len() {
+        return None;
+    }
+    let mut model_obj = Vec::with_capacity(streams.len() * 3 + streams.len() * 512);
+    let mut enc_obj = Vec::new();
+    let mut lens = Vec::with_capacity(streams.len());
+    for (i, stream) in streams.iter().enumerate() {
+        let (slot, payload) = encode_one_stream_external(stream, models[i])?;
+        match &slot {
+            StreamSlot::Rans(model_bytes) => {
+                model_obj.push(SLOT_RANS);
+                model_obj.extend_from_slice(&(model_bytes.len() as u16).to_le_bytes());
+                model_obj.extend_from_slice(model_bytes);
+            }
+            StreamSlot::Raw => {
+                model_obj.push(SLOT_RAW);
+                model_obj.extend_from_slice(&0u16.to_le_bytes());
+            }
+            StreamSlot::Empty => {
+                model_obj.push(SLOT_EMPTY);
+                model_obj.extend_from_slice(&0u16.to_le_bytes());
+            }
+        }
+        lens.push(payload.len() as u32);
+        enc_obj.extend_from_slice(&payload);
+    }
+    Some(EncodedStreams {
+        model_obj,
+        enc_obj,
+        lens,
+    })
+}
+
+/// Encode one stream against an optional external model: `None` = the
+/// per-stream train-and-compare path (`encode_one_stream`); `Some` = the
+/// amortized-model path (rANS iff encoded < raw — the model is already
+/// paid by the cohort).
+fn encode_one_stream_external(
+    stream: &[u8],
+    external: Option<&RansModel>,
+) -> Option<(StreamSlot, Vec<u8>)> {
+    let mut hist = [0u32; 256];
+    for &b in stream {
+        hist[b as usize] += 1;
+    }
+    let distinct = hist.iter().filter(|&&h| h > 0).count();
+    match distinct {
+        0 => Some((StreamSlot::Empty, Vec::new())),
+        1 => Some((StreamSlot::Raw, stream.to_vec())),
+        _ => match external {
+            Some(model) => match encode_stream(stream, model) {
+                Ok(enc) if enc.len() < stream.len() => {
+                    Some((StreamSlot::Rans(metadata::encode_model(model)), enc))
+                }
+                _ => Some((StreamSlot::Raw, stream.to_vec())),
+            },
+            None => encode_one_stream(stream),
+        },
+    }
+}
+
 /// Encode one stream: histogram decides Empty / Raw / rANS (rANS only when
 /// strictly smaller than the raw stream). Returns the slot and the stored
 /// stream payload (raw bytes or the rANS encoding).

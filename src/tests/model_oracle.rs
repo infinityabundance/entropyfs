@@ -170,6 +170,10 @@ fn extract_extent(store: &Store, ino: u64, offset: u64, dir: u64) -> Option<Exte
             lit_out,
             ..
         } => {
+            // Offsets are u16 LE per copy (`off_per_copy = 2`), exactly as
+            // the materialize path decodes them — a wrong value here would
+            // decode a half-length garbage offset stream and corrupt every
+            // strategy measurement.
             let v = crate::rans::sequence::decode_streams_n(
                 store,
                 &limits,
@@ -178,7 +182,7 @@ fn extract_extent(store: &Store, ino: u64, offset: u64, dir: u64) -> Option<Exte
                 *cmds as u64,
                 *lit_out as u64,
                 None,
-                1,
+                2,
             )
             .ok()?;
             (v, vec![0, 1, 2])

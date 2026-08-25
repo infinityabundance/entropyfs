@@ -368,14 +368,27 @@ pub struct TreeCourt {
     pub shared_rewrites: u64,
     /// Shared-dict pass persisted bytes saved (extent-level, pre-GC).
     pub shared_saved_bytes: u64,
+    /// Phase-9G: EntropyFS after the amortized entropy-model pass + GC:
+    /// reachable (the model object is content-addressed and shared by the
+    /// directory cohort, so the pass needs no format change).
+    pub efs_model_reachable: u64,
+    /// Phase-9G: backing after the model pass + GC.
+    pub efs_model_backing: u64,
+    /// Phase-9G: representation families after the model pass + GC.
+    pub efs_model_families: BTreeMap<String, u64>,
+    /// Phase-9G model pass rewrites.
+    pub model_rewrites: u64,
+    /// Phase-9G model pass persisted bytes saved (cohort-accounted, pre-GC:
+    /// unique amortized model objects charged once).
+    pub model_saved_bytes: u64,
     /// Phase-9F gap decomposition: zstd -1 per file with the directory's
     /// largest file as a raw dictionary (self-matches excluded, mirroring
     /// EntropyFS's no-self-reference rule) — the anchor-policy control:
     /// what a mature coder extracts from the same shared-dictionary
     /// advantage.
     pub zstd_dir_anchor_l1: Option<CompressionBaseline>,
-    /// Per-extent persistence overhead after the shared-dict pass:
-    /// descriptor bytes (all extents).
+    /// Per-extent persistence overhead after the shared-dict + model-bundle
+    /// passes: descriptor bytes (all extents).
     pub per_extent_descriptor_bytes: u64,
     /// Per-extent persistence overhead: model-object bytes (the structural
     /// cost of per-chunk statistical models on small files).
@@ -955,11 +968,26 @@ pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
     );
     line(
         &mut log,
+        &format!(
+            "  efs + model bundles:       {:>10} B reachable ({:.3}x) / {} B backing (rewrote {} extents, saved {} B)  [Phase-9G]",
+            tree_court.efs_model_reachable,
+            tree_court.logical_bytes as f64 / tree_court.efs_model_reachable.max(1) as f64,
+            tree_court.efs_model_backing,
+            tree_court.model_rewrites,
+            tree_court.model_saved_bytes
+        ),
+    );
+    line(
+        &mut log,
         &format!("  families before: {:?}", tree_court.efs_tree_families),
     );
     line(
         &mut log,
         &format!("  families after:  {:?}", tree_court.efs_shared_families),
+    );
+    line(
+        &mut log,
+        &format!("  families +models: {:?}", tree_court.efs_model_families),
     );
     if let Some(b) = &tree_court.zstd_dir_anchor_l1 {
         line(
@@ -980,7 +1008,7 @@ pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
             tree_court.per_extent_descriptor_bytes,
             tree_court.per_extent_model_bytes,
             per_extent,
-            100.0 * per_extent as f64 / tree_court.efs_shared_reachable.max(1) as f64,
+            100.0 * per_extent as f64 / tree_court.efs_model_reachable.max(1) as f64,
             100.0 * per_extent as f64 / tree_court.logical_bytes.max(1) as f64
         ),
     );
@@ -2153,8 +2181,15 @@ fn run_tree_court(opts: &CampaignOptions) -> Result<TreeCourt, String> {
     crate::store::gc::collect(&store, &CrashHooks::none()).map_err(|e| e.to_string())?;
     let n2 = store_numbers(&store)?;
     let fam2 = tree_families(&store)?;
+    // Phase-9G amortized entropy-model pass, then GC.
+    let models =
+        crate::optimizer::background::model_bundle_pass(&store, OptimizeOptions::default(), None)
+            .map_err(|e| e.to_string())?;
+    crate::store::gc::collect(&store, &CrashHooks::none()).map_err(|e| e.to_string())?;
+    let n3 = store_numbers(&store)?;
+    let fam3 = tree_families(&store)?;
     // Phase-9F gap decomposition: per-extent persistence overhead after
-    // the pass (descriptor + model-object bytes over all extents).
+    // the passes (descriptor + model-object bytes over all extents).
     let (desc_bytes, model_bytes) = per_extent_overhead(&store)?;
 
     Ok(TreeCourt {
@@ -2175,6 +2210,11 @@ fn run_tree_court(opts: &CampaignOptions) -> Result<TreeCourt, String> {
         efs_shared_families: fam2,
         shared_rewrites: shared.rewritten,
         shared_saved_bytes: shared.saved_bytes,
+        efs_model_reachable: n3.reachable,
+        efs_model_backing: n3.total_backing,
+        efs_model_families: fam3,
+        model_rewrites: models.rewritten,
+        model_saved_bytes: models.saved_bytes,
         zstd_dir_anchor_l1: za1,
         per_extent_descriptor_bytes: desc_bytes,
         per_extent_model_bytes: model_bytes,

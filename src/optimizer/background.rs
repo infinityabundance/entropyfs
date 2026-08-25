@@ -694,8 +694,670 @@ pub fn spawn_background_worker(
                 // Phase-9C: the shared amortized dictionary pass (whole
                 // directories per cycle; bounded by the same extent slice).
                 let _ = shared_dict_pass(&store, options, Some(WORKER_CYCLE_EXTENTS));
+                // Phase-9G: the amortized entropy-model pass (directory
+                // cohort models; bounded by the same extent slice).
+                let _ = model_bundle_pass(&store, options, Some(WORKER_CYCLE_EXTENTS));
                 last_ops = ops.load(Ordering::Relaxed);
             }
         })
         .expect("spawn background worker")
+}
+
+// ---------------------------------------------------------------------------
+// Phase-9G: the amortized entropy-model background pass.
+// ---------------------------------------------------------------------------
+//
+// The 9F decomposition measured that per-extent multi-stream rANS model
+// objects were a large fraction of the sequence families' footprint, and
+// the model-sharing oracle (src/tests/model_oracle.rs) decided the design:
+//
+// - S1 (share one model across an extent's streams) is FALSIFIED: forcing
+//   a model to cover several differently-distributed streams costs more
+//   in encoded bytes than it saves in model bytes. No ModelBundle v2
+//   intra-extent partition format.
+// - S2 (one aggregate model per stream TYPE per directory cohort) is
+//   VALIDATED, and it needs NO format change: the model object is already
+//   content-addressed, a descriptor already references it by ChunkId, and
+//   the store CAS-dedups identical objects — N extents referencing the
+//   same model object persist it once.
+// - S3/S4 (bundle pools) lose to the single aggregate on the measured
+//   corpus: pool model bytes exceed the marginal enc gains.
+//
+// The pass therefore: (1) collects a directory cohort's sequence-family
+// extents and decodes their raw streams; (2) trains one aggregate model
+// per stream type on the cohort's summed histograms; (3) greedily selects
+// a small candidate pool (the aggregate + distinct member bundles) by
+// MODEL-COST-AWARE marginal savings; (4) re-encodes each member's streams
+// against its best bundle (per-stream RAW fallback; the model is
+// amortized — its bytes are counted once for the cohort, never per
+// member); (5) rewrites members only when the cohort's total persisted
+// bytes strictly fall, through the same CAS + byte-exact gate as every
+// other background pass.
+//
+// Accounting invariant (no phantom savings): a member's incumbent "pinned"
+// bytes are descriptor + enc object ONLY. Model objects are amortized and
+// never claimed as removable by one member; the new amortized model
+// objects are charged once per unique payload (marginal against the
+// committed CAS). Old exclusive models become unreachable after their last
+// referencer rewrites and are reclaimed by GC — the post-GC footprint
+// measures that, conservatively beyond the pass's claimed savings.
+
+/// Pool-size bound for the greedy model-bundle selection.
+const MAX_MODEL_POOL: usize = 4;
+
+/// One sequence-family extent member of a directory cohort.
+struct ModelMember {
+    ino: u64,
+    start: u64,
+    /// Incumbent descriptor bytes (the CAS token).
+    desc_bytes: Vec<u8>,
+    /// Incumbent descriptor (a sequence family).
+    desc: crate::core::representation::Representation,
+    /// Decoded raw streams in family order.
+    streams: Vec<Vec<u8>>,
+    /// Stream-type tags: 0 commands, 1 literals, 2 offsets, 3 dict
+    /// sources, 4 deep lengths.
+    types: Vec<u8>,
+    /// Pinned persisted bytes: descriptor + enc object (model amortized).
+    pinned: u64,
+}
+
+/// A candidate model bundle: one `RansModel` per stream type.
+type ModelBundle = std::collections::BTreeMap<u8, crate::rans::model::RansModel>;
+
+/// The re-encode trial of one member against one bundle.
+struct BundleEncode {
+    /// New descriptor.
+    descriptor: crate::core::representation::Representation,
+    /// Enc object payload.
+    enc_payload: Vec<u8>,
+    /// Model object payload.
+    model_payload: Vec<u8>,
+    /// New pinned bytes: descriptor + enc payload + integrity (the model
+    /// is amortized; counted once per cohort in the group gate).
+    pinned: u64,
+}
+
+/// The bundle's persisted model bytes (each type model once).
+fn bundle_model_bytes(b: &ModelBundle) -> u64 {
+    b.values()
+        .map(|m| crate::rans::metadata::encode_model(m).len() as u64)
+        .sum()
+}
+
+/// The bundle's dedup key (encoded model bytes in type order).
+fn bundle_key(b: &ModelBundle) -> Vec<u8> {
+    b.iter()
+        .flat_map(|(_, m)| crate::rans::metadata::encode_model(m))
+        .collect()
+}
+
+/// Collect one sequence-family member (decode descriptor + streams).
+fn collect_model_member(
+    store: &Store,
+    ino: u64,
+    start: u64,
+    desc_bytes: Vec<u8>,
+    limits: &crate::core::limits::Limits,
+) -> Result<Option<ModelMember>, StoreError> {
+    use crate::core::representation::Representation;
+    let desc = match crate::format::descriptor::decode(
+        &desc_bytes,
+        limits.max_descriptor_bytes,
+        limits.max_inline_bytes,
+        limits.max_palette,
+        limits.max_period,
+        limits.max_chunk_size,
+    ) {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    let (scale_bits, codec) = crate::rans::sequence::sequence_scale_codec();
+    let (streams, types, enc_id): (Vec<Vec<u8>>, Vec<u8>, ChunkId) = match &desc {
+        Representation::SequenceRans {
+            model,
+            enc_obj,
+            scale_bits: sb,
+            codec: c,
+            seq_len,
+            lit_len,
+            off_len,
+            cmds,
+            lit_out,
+            ..
+        } => {
+            if *sb != scale_bits || *c != codec {
+                return Ok(None);
+            }
+            let v = match crate::rans::sequence::decode_streams_n(
+                store,
+                limits,
+                crate::rans::sequence::StreamRefs {
+                    model: *model,
+                    enc_obj: *enc_obj,
+                    scale_bits: *sb,
+                    codec: *c,
+                },
+                &[*seq_len, *lit_len, *off_len],
+                *cmds as u64,
+                *lit_out as u64,
+                None,
+                2,
+            ) {
+                Ok(v) => v,
+                Err(_) => return Ok(None),
+            };
+            (v, vec![0, 1, 2], *enc_obj)
+        }
+        Representation::SequenceDeep {
+            model,
+            enc_obj,
+            scale_bits: sb,
+            codec: c,
+            seq_len,
+            lit_len,
+            off_len,
+            len_len,
+            cmds,
+            lit_out,
+            ..
+        } => {
+            if *sb != scale_bits || *c != codec {
+                return Ok(None);
+            }
+            let d = match crate::rans::sequence::decode_deep_streams(
+                store,
+                limits,
+                crate::rans::sequence::StreamRefs {
+                    model: *model,
+                    enc_obj: *enc_obj,
+                    scale_bits: *sb,
+                    codec: *c,
+                },
+                crate::rans::sequence::DeepLens {
+                    seq_len: *seq_len,
+                    lit_len: *lit_len,
+                    off_len: *off_len,
+                    len_len: *len_len,
+                    cmds: *cmds,
+                    lit_out: *lit_out,
+                },
+            ) {
+                Ok(d) => d,
+                Err(_) => return Ok(None),
+            };
+            (
+                vec![d.commands, d.literals, d.offsets, d.lengths],
+                vec![0, 1, 2, 4],
+                *enc_obj,
+            )
+        }
+        Representation::SequenceDict {
+            dictionary: _,
+            dictionary_len: _,
+            model,
+            enc_obj,
+            scale_bits: sb,
+            codec: c,
+            seq_len,
+            lit_len,
+            off_len,
+            src_len,
+            cmds,
+            lit_out,
+            ..
+        }
+        | Representation::SequenceSharedDict {
+            dictionary: _,
+            dictionary_len: _,
+            shared: _,
+            shared_len: _,
+            model,
+            enc_obj,
+            scale_bits: sb,
+            codec: c,
+            seq_len,
+            lit_len,
+            off_len,
+            src_len,
+            cmds,
+            lit_out,
+            ..
+        } => {
+            if *sb != scale_bits || *c != codec {
+                return Ok(None);
+            }
+            let d = match crate::rans::sequence::decode_four_streams(
+                store,
+                limits,
+                crate::rans::sequence::StreamRefs {
+                    model: *model,
+                    enc_obj: *enc_obj,
+                    scale_bits: *sb,
+                    codec: *c,
+                },
+                crate::rans::sequence::FourStreams {
+                    seq_len: *seq_len,
+                    lit_len: *lit_len,
+                    off_len: *off_len,
+                    src_len: *src_len,
+                    cmds: *cmds,
+                    lit_out: *lit_out,
+                },
+            ) {
+                Ok(d) => d,
+                Err(_) => return Ok(None),
+            };
+            (
+                vec![d.commands, d.literals, d.offsets, d.sources],
+                vec![0, 1, 2, 3],
+                *enc_obj,
+            )
+        }
+        _ => return Ok(None),
+    };
+    let pinned = desc.encoded_size().saturating_add(
+        store
+            .object_index()
+            .get(&enc_id)
+            .map(|l| l.stored_len)
+            .unwrap_or(0),
+    );
+    Ok(Some(ModelMember {
+        ino,
+        start,
+        desc_bytes,
+        desc,
+        streams,
+        types,
+        pinned,
+    }))
+}
+
+/// Rebuild the member's descriptor in its own family with a new model/enc
+/// pair and the re-encoded stream lengths (the parse is preserved: the
+/// decoded streams are re-encoded byte-identically, so `cmds`/`lit_out`
+/// and `len` are invariant).
+fn rebuild_descriptor(
+    incumbent: &crate::core::representation::Representation,
+    streams: &[Vec<u8>],
+    enc: &crate::rans::sequence::EncodedStreams,
+    model_id: ChunkId,
+    enc_id: ChunkId,
+) -> Option<crate::core::representation::Representation> {
+    use crate::core::representation::Representation;
+    let (scale_bits, codec) = crate::rans::sequence::sequence_scale_codec();
+    match incumbent {
+        Representation::SequenceRans { len, .. } => Some(Representation::SequenceRans {
+            model: model_id,
+            enc_obj: enc_id,
+            scale_bits,
+            codec,
+            seq_len: enc.lens[0],
+            lit_len: enc.lens[1],
+            off_len: enc.lens[2],
+            cmds: streams[0].len() as u32,
+            lit_out: streams[1].len() as u32,
+            len: *len,
+        }),
+        Representation::SequenceDeep { len, .. } => Some(Representation::SequenceDeep {
+            model: model_id,
+            enc_obj: enc_id,
+            scale_bits,
+            codec,
+            seq_len: enc.lens[0],
+            lit_len: enc.lens[1],
+            off_len: enc.lens[2],
+            len_len: enc.lens[3],
+            cmds: streams[0].len() as u32,
+            lit_out: streams[1].len() as u32,
+            len: *len,
+        }),
+        Representation::SequenceDict {
+            dictionary,
+            dictionary_len,
+            len,
+            ..
+        } => Some(Representation::SequenceDict {
+            dictionary: *dictionary,
+            dictionary_len: *dictionary_len,
+            model: model_id,
+            enc_obj: enc_id,
+            scale_bits,
+            codec,
+            seq_len: enc.lens[0],
+            lit_len: enc.lens[1],
+            off_len: enc.lens[2],
+            src_len: enc.lens[3],
+            cmds: streams[0].len() as u32,
+            lit_out: streams[1].len() as u32,
+            len: *len,
+        }),
+        Representation::SequenceSharedDict {
+            dictionary,
+            dictionary_len,
+            shared,
+            shared_len,
+            len,
+            ..
+        } => Some(Representation::SequenceSharedDict {
+            dictionary: *dictionary,
+            dictionary_len: *dictionary_len,
+            shared: *shared,
+            shared_len: *shared_len,
+            model: model_id,
+            enc_obj: enc_id,
+            scale_bits,
+            codec,
+            seq_len: enc.lens[0],
+            lit_len: enc.lens[1],
+            off_len: enc.lens[2],
+            src_len: enc.lens[3],
+            cmds: streams[0].len() as u32,
+            lit_out: streams[1].len() as u32,
+            len: *len,
+        }),
+        _ => None,
+    }
+}
+
+/// Re-encode one member against one bundle (per-stream forced models with
+/// RAW fallback; `None` on any encode failure or when the result is not
+/// strictly cheaper than the member's pinned bytes).
+fn encode_member_against(member: &ModelMember, bundle: &ModelBundle) -> Option<BundleEncode> {
+    let mut forced: Vec<Option<&crate::rans::model::RansModel>> = vec![None; member.types.len()];
+    for (si, &t) in member.types.iter().enumerate() {
+        forced[si] = bundle.get(&t);
+    }
+    let enc = crate::rans::sequence::encode_streams_n_with_models(&member.streams, &forced)?;
+    let enc_obj = crate::core::candidate::ObjectRecord::data(enc.enc_obj.clone());
+    let model_obj = crate::core::candidate::ObjectRecord::model(enc.model_obj.clone());
+    let descriptor = rebuild_descriptor(
+        &member.desc,
+        &member.streams,
+        &enc,
+        model_obj.id,
+        enc_obj.id,
+    )?;
+    let pinned = descriptor
+        .encoded_size()
+        .saturating_add(enc_obj.payload.len() as u64)
+        .saturating_add(4); // attributable integrity
+    if pinned >= member.pinned {
+        return None;
+    }
+    Some(BundleEncode {
+        descriptor,
+        enc_payload: enc_obj.payload,
+        model_payload: model_obj.payload,
+        pinned,
+    })
+}
+
+/// Phase-9G: the amortized entropy-model background pass (see the module
+/// comment above for the full design and the oracle evidence).
+///
+/// `max_extents` bounds the number of cohort members COLLECTED per call
+/// (a partial cohort is a valid cohort: its aggregate is trained on what
+/// the cycle saw and the group gate still requires strict savings; later
+/// cycles re-evaluate the same members cheaply — they are idempotent).
+pub fn model_bundle_pass(
+    store: &Store,
+    options: OptimizeOptions,
+    max_extents: Option<u64>,
+) -> Result<BackgroundStats, StoreError> {
+    let mut stats = BackgroundStats::default();
+    // The pass re-encodes sequence-family extents' statistical layer; with
+    // no sequence family enabled the cohorts are empty.
+    if !(options.allow_sequence_rans
+        || options.allow_sequence_rans_deep
+        || options.allow_sequence_dict
+        || options.allow_shared_dict)
+    {
+        return Ok(stats);
+    }
+    let dir_of = build_dir_map(store)?;
+    let limits = *store.limits();
+    // 1. Collect sequence-family members per directory (bounded).
+    let mut by_dir: std::collections::BTreeMap<u64, Vec<ModelMember>> =
+        std::collections::BTreeMap::new();
+    let mut collected = 0u64;
+    'ino: for ino in store.all_inodes()? {
+        let Some(inode) = store.get_inode(ino)? else {
+            continue;
+        };
+        let extent_root = match inode.data {
+            crate::store::inode::InodeData::File { extent_root } => extent_root,
+            _ => continue,
+        };
+        if extent_root.is_zero() {
+            continue;
+        }
+        let entries = crate::store::extent_tree::scan_all(
+            extent_root,
+            crate::store::BTREE_ORDER,
+            limits.max_fanout,
+            store,
+        )?;
+        for (start, desc_bytes) in entries {
+            if let Some(max) = max_extents {
+                if collected >= max {
+                    break 'ino;
+                }
+            }
+            let Some(dir) = dir_of.get(&ino).copied() else {
+                continue;
+            };
+            let Some(member) = collect_model_member(store, ino, start, desc_bytes, &limits)? else {
+                continue;
+            };
+            collected += 1;
+            stats.scanned = stats.scanned.saturating_add(1);
+            by_dir.entry(dir).or_default().push(member);
+        }
+    }
+    // 2-5. Per directory: aggregate models, candidates, greedy
+    //      model-cost-aware selection, group gate, rewrite.
+    for (_dir, members) in &by_dir {
+        if members.len() < 2 {
+            continue;
+        }
+        // Aggregate histograms per stream type.
+        let mut agg_hist: std::collections::BTreeMap<u8, [u32; 256]> = Default::default();
+        for m in members {
+            for (si, &t) in m.types.iter().enumerate() {
+                let h = agg_hist.entry(t).or_insert([0u32; 256]);
+                for &b in &m.streams[si] {
+                    h[b as usize] = h[b as usize].saturating_add(1);
+                }
+            }
+        }
+        let mut agg_bundle: ModelBundle = Default::default();
+        for (t, h) in &agg_hist {
+            if let Some(model) = crate::rans::sequence::aggregate_model(h) {
+                agg_bundle.insert(*t, model);
+            }
+        }
+        if agg_bundle.is_empty() {
+            continue;
+        }
+        // Candidate bundles: the aggregate + distinct member bundles.
+        let mut cands: Vec<ModelBundle> = Vec::new();
+        let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        seen.insert(bundle_key(&agg_bundle));
+        cands.push(agg_bundle);
+        for m in members {
+            let mut b: ModelBundle = Default::default();
+            for (si, &t) in m.types.iter().enumerate() {
+                if b.contains_key(&t) {
+                    continue;
+                }
+                let mut h = [0u32; 256];
+                for &x in &m.streams[si] {
+                    h[x as usize] += 1;
+                }
+                if let Some(model) = crate::rans::sequence::aggregate_model(&h) {
+                    b.insert(t, model);
+                }
+            }
+            if seen.insert(bundle_key(&b)) {
+                cands.push(b);
+            }
+        }
+        let bundle_costs: Vec<u64> = cands.iter().map(bundle_model_bytes).collect();
+        // gains[i][m]: member savings under bundle i (0 when not cheaper).
+        let mut gains: Vec<Vec<u64>> = Vec::with_capacity(cands.len());
+        let mut encodes: Vec<Vec<Option<BundleEncode>>> = Vec::with_capacity(cands.len());
+        for bundle in &cands {
+            let mut g = Vec::with_capacity(members.len());
+            let mut es = Vec::with_capacity(members.len());
+            for m in members {
+                let trial = encode_member_against(m, bundle);
+                match &trial {
+                    Some(e) => {
+                        g.push(m.pinned - e.pinned);
+                        es.push(trial);
+                    }
+                    _ => {
+                        g.push(0);
+                        es.push(None);
+                    }
+                }
+            }
+            gains.push(g);
+            encodes.push(es);
+        }
+        // Greedy pool selection: each added bundle must pay for its own
+        // persisted model bytes (marginal enc savings over the members
+        // already covered, minus the bundle's model cost).
+        let mut selected: Vec<usize> = Vec::new();
+        let mut covered: Vec<u64> = vec![0; members.len()];
+        for _ in 0..MAX_MODEL_POOL {
+            let mut best_idx: Option<usize> = None;
+            let mut best_marginal = 0u64;
+            for i in 0..cands.len() {
+                if selected.contains(&i) {
+                    continue;
+                }
+                let mut marginal = 0u64;
+                for m in 0..members.len() {
+                    marginal = marginal.saturating_add(gains[i][m].saturating_sub(covered[m]));
+                }
+                if marginal > bundle_costs[i] && marginal - bundle_costs[i] > best_marginal {
+                    best_marginal = marginal - bundle_costs[i];
+                    best_idx = Some(i);
+                }
+            }
+            let Some(idx) = best_idx else {
+                break;
+            };
+            selected.push(idx);
+            for m in 0..members.len() {
+                covered[m] = covered[m].max(gains[idx][m]);
+            }
+        }
+        if selected.is_empty() {
+            continue;
+        }
+        // Group gate: unique new model payloads are charged once (marginal
+        // against the committed CAS); the covered savings must pay them.
+        let mut rewrite: Vec<(usize, usize)> = Vec::new(); // (member, bundle)
+        let mut model_payloads: Vec<Vec<u8>> = Vec::new();
+        for m in 0..members.len() {
+            if covered[m] == 0 {
+                continue;
+            }
+            let mut best_i = selected[0];
+            let mut best_gain = gains[selected[0]][m];
+            for &i in &selected[1..] {
+                if gains[i][m] > best_gain {
+                    best_gain = gains[i][m];
+                    best_i = i;
+                }
+            }
+            let e = encodes[best_i][m]
+                .as_ref()
+                .expect("gain > 0 implies an encode");
+            let mp = e.model_payload.clone();
+            if !model_payloads.contains(&mp) {
+                model_payloads.push(mp);
+            }
+            rewrite.push((m, best_i));
+        }
+        if rewrite.is_empty() {
+            continue;
+        }
+        let mut model_cost = 0u64;
+        for p in &model_payloads {
+            if !store.object_index().contains(&ChunkId::of(p)) {
+                model_cost = model_cost.saturating_add(p.len() as u64);
+            }
+        }
+        let group_savings: u64 = covered.iter().sum();
+        if group_savings <= model_cost {
+            stats.no_gain = stats.no_gain.saturating_add(members.len() as u64);
+            continue;
+        }
+        let group_gain = group_savings - model_cost;
+        // Rewrite every selected member through the CAS + byte-exact gate.
+        for (m, i) in rewrite {
+            let member = &members[m];
+            let e = encodes[i][m]
+                .as_ref()
+                .expect("rewrite set implies an encode");
+            let bytes = match materialize_to_vec(&member.desc, store, &limits) {
+                Ok(b) => b,
+                Err(_) => {
+                    stats.errors += 1;
+                    continue;
+                }
+            };
+            let cid = ChunkId::of(&bytes);
+            let objects = vec![
+                crate::core::candidate::ObjectRecord::data(e.enc_payload.clone()),
+                crate::core::candidate::ObjectRecord::model(e.model_payload.clone()),
+            ];
+            // §32: the new descriptor must materialize byte-exactly to the
+            // incumbent bytes through a resolver that can see its own new
+            // objects (pending-aware).
+            let candidate = crate::core::candidate::Candidate {
+                representation: e.descriptor.clone(),
+                objects: objects.clone(),
+                cost: Default::default(),
+                content_id: cid,
+            };
+            let resolver = crate::optimizer::search::CandidateResolver::new(
+                store,
+                objects.iter().map(|o| (o.id, o.payload.clone())).collect(),
+                None,
+            );
+            if crate::core::candidate::validate_candidate(&candidate, &bytes, &resolver, &limits)
+                .is_err()
+            {
+                stats.errors += 1;
+                continue;
+            }
+            // CAS: the extent must still hold the descriptor we read.
+            let _lock = store.inode_lock(member.ino);
+            let current = store.extent_descriptor(member.ino, member.start)?;
+            if current.as_deref() != Some(member.desc_bytes.as_slice()) {
+                stats.stale_skips += 1;
+                continue;
+            }
+            store.commit_file_extents(
+                member.ino,
+                vec![crate::store::ExtentUpdate {
+                    offset: member.start,
+                    descriptor: e.descriptor.clone(),
+                    content_id: cid,
+                    objects,
+                }],
+                None,
+                &CrashHooks::none(),
+            )?;
+            stats.rewritten = stats.rewritten.saturating_add(1);
+        }
+        stats.saved_bytes = stats.saved_bytes.saturating_add(group_gain);
+    }
+    Ok(stats)
 }

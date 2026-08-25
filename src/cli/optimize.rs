@@ -66,5 +66,14 @@ pub fn run(args: &OptimizeArgs) -> Result<(), String> {
             shared.scanned, shared.rewritten, shared.saved_bytes, shared.no_gain, shared.errors
         );
     }
+    // Phase-9G: the amortized entropy-model pass (directory cohort models).
+    let models = crate::optimizer::background::model_bundle_pass(&store, options, None)
+        .map_err(|e| e.to_string())?;
+    if models.rewritten > 0 || models.scanned > 0 {
+        println!(
+            "optimize: model-bundle pass scanned {} extents, rewrote {}, saved ~{} persisted bytes (no-gain {}, errors {})",
+            models.scanned, models.rewritten, models.saved_bytes, models.no_gain, models.errors
+        );
+    }
     Ok(())
 }
