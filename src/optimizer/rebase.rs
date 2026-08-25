@@ -99,6 +99,107 @@ pub fn chain_depth(store: &Store, desc: &Representation) -> u8 {
     }
 }
 
+/// The full reference-chain depth of a descriptor, resolving each
+/// referenced id against the batch's in-batch depths first and the
+/// committed chunk index otherwise (Phase-10C: parallel batch encoding
+/// defers the real chain resolution to the serial assembly phase).
+///
+/// Unlike [`chain_depth`], the committed walk is NOT capped by
+/// `max_reference_depth`: the caller must be able to DETECT a chain that
+/// would exceed the decode cap so it can refuse or rebuild it. The
+/// in-batch part of the chain is acyclic by construction (in-batch
+/// dictionaries point strictly backward through the batch), the committed
+/// part is acyclic by the §32 commit gate, and the walk is bounded by a
+/// hard sanity cap; a chain deeper than any allowed cap reports a value
+/// above it.
+pub fn chain_depth_uncapped(
+    store: &Store,
+    desc: &Representation,
+    pending_depths: &std::collections::HashMap<ChunkId, u8>,
+) -> u8 {
+    /// Hard sanity bound for the depth walk (far above the real decode cap
+    /// of 4; only guards a corrupt descriptor chain from looping forever).
+    const MAX_CHAIN_WALK: u8 = 64;
+
+    /// Depth of one reference id from the committed chunk index (uncapped
+    /// walk over every branch; returns the deepest chain length).
+    fn walk(store: &Store, id: ChunkId) -> u8 {
+        let limits = *store.limits();
+        let mut max_depth = 0u8;
+        let mut stack: Vec<(ChunkId, u8)> = vec![(id, 0u8)];
+        let mut visited: std::collections::HashSet<ChunkId> = std::collections::HashSet::new();
+        while let Some((cur, d)) = stack.pop() {
+            if d >= MAX_CHAIN_WALK || !visited.insert(cur) {
+                continue;
+            }
+            let Some(desc_bytes) = store.chunk_descriptor(&cur).ok().flatten() else {
+                continue;
+            };
+            let Ok(next_desc) = crate::format::descriptor::decode(
+                &desc_bytes,
+                limits.max_descriptor_bytes,
+                limits.max_inline_bytes,
+                limits.max_palette,
+                limits.max_period,
+                limits.max_chunk_size,
+            ) else {
+                continue;
+            };
+            let mut nexts: Vec<ChunkId> = Vec::new();
+            match &next_desc {
+                Representation::ExactRef { target, .. } => nexts.push(*target),
+                Representation::BaseResidual { base, .. } => nexts.push(*base),
+                Representation::SequenceDict { dictionary, .. } => nexts.push(*dictionary),
+                Representation::SequenceSharedDict {
+                    dictionary, shared, ..
+                } => {
+                    if !dictionary.is_zero() {
+                        nexts.push(*dictionary);
+                    }
+                    nexts.push(*shared);
+                }
+                _ => {}
+            }
+            for n in nexts {
+                stack.push((n, d.saturating_add(1)));
+                max_depth = max_depth.max(d.saturating_add(1));
+            }
+        }
+        max_depth
+    }
+
+    fn resolve(store: &Store, pending: &std::collections::HashMap<ChunkId, u8>, id: ChunkId) -> u8 {
+        match pending.get(&id) {
+            Some(d) => *d,
+            None => walk(store, id),
+        }
+    }
+
+    match desc {
+        Representation::ExactRef { target, .. } => {
+            resolve(store, pending_depths, *target).saturating_add(1)
+        }
+        Representation::BaseResidual { base, .. } => {
+            resolve(store, pending_depths, *base).saturating_add(1)
+        }
+        Representation::SequenceDict { dictionary, .. } => {
+            resolve(store, pending_depths, *dictionary).saturating_add(1)
+        }
+        Representation::SequenceSharedDict {
+            dictionary, shared, ..
+        } => {
+            let d = if dictionary.is_zero() {
+                0
+            } else {
+                resolve(store, pending_depths, *dictionary)
+            };
+            let s = resolve(store, pending_depths, *shared);
+            d.max(s).saturating_add(1)
+        }
+        _ => 0,
+    }
+}
+
 /// Whether the reference chain of `base` transitively references `target`
 /// (a self-referencing chain is undecodable: materialization would loop
 /// until the depth cap). Cycle-safe: the walk is bounded by the depth cap

@@ -29,3 +29,4 @@ pub mod shared_dict;
 pub mod snapshots;
 pub mod sparse_block64;
 pub mod srctree_diag;
+pub mod write_parallel;

@@ -2283,6 +2283,105 @@ pub struct AttrUpdate {
     pub mtime: Option<crate::store::inode::Timespec>,
 }
 
+/// One composed chunk ready for the concurrent search (Phase-10C).
+struct Composed {
+    chunk_off: u64,
+    bytes: Vec<u8>,
+    cid: crate::core::extent::ChunkId,
+    prev_version: Option<crate::core::candidate::BaseChunk>,
+    dictionary: Option<crate::core::candidate::BaseChunk>,
+    /// Synthetic batch view resolving the in-batch dictionary chunk to
+    /// its composed bytes: the parallel search validates SequenceDict
+    /// candidates against this view without waiting for the previous
+    /// chunk's encode. The REAL descriptor and chain depth are applied by
+    /// the serial assembly phase. `None` when the dictionary is a
+    /// committed chunk (the committed store resolves it).
+    synthetic: Option<crate::optimizer::search::PendingBatch>,
+}
+
+/// One chunk's phase-2 outcome: the rebase-flatten updates, the validated
+/// search outcome, and the prev_version actually used for the search
+/// (post-flatten) so the serial depth/validation fallback can rebuild the
+/// identical context.
+type ChunkResult = Result<
+    (
+        Vec<ExtentUpdate>,
+        crate::optimizer::search::SearchOutcome,
+        Option<crate::core::candidate::BaseChunk>,
+    ),
+    StoreError,
+>;
+
+/// Encode one composed chunk (Phase-10C phase 2): the rebase-on-write
+/// flatten plus the guided candidate search. Each chunk's context — prev
+/// version from the RMW read, in-batch dictionary from the composed bytes
+/// — is independent, so this runs concurrently for multi-chunk writes and
+/// inline for the single-chunk FUSE request.
+///
+/// The in-batch dictionary is used with an ASSUMED depth 0: the exact
+/// depth of a chained in-batch dictionary is only known after its own
+/// encode, and resolving that serially would defeat the parallelism. The
+/// search validates SequenceDict candidates against the chunk's synthetic
+/// view; the serial assembly phase re-validates against the REAL batch
+/// state and re-encodes (without the dictionary family) any outcome whose
+/// real reference chain would exceed the decode cap — exactly what the
+/// serial search did when it refused a too-deep dictionary. A candidate
+/// whose real chain is admissible persists bytes identical to the serial
+/// path: the encoder's streams depend only on input + dict bytes (both in
+/// hand), never on the assumed depth.
+fn encode_prepared_chunk(
+    store: &Store,
+    c: &Composed,
+    ino: u64,
+    limits: crate::core::limits::Limits,
+    options: crate::optimizer::policy::OptimizeOptions,
+    fg: crate::optimizer::foreground::ForegroundPolicy,
+) -> ChunkResult {
+    // Rebase-on-write (§11): drift workloads edit the same chunk
+    // repeatedly, and each edit would otherwise nest another
+    // BaseResidual until the depth cap collapses the strategy to RAW.
+    // When the previous version is itself a deep chain, re-encode it at
+    // depth 0 in the same transaction (the flat extent update lands
+    // first; the edit's update replaces it).
+    let mut flatten_updates: Vec<ExtentUpdate> = Vec::new();
+    let mut prev_version = c.prev_version.clone();
+    if let Some(p) = &prev_version {
+        if p.depth >= crate::optimizer::rebase::REBASE_DEPTH_THRESHOLD {
+            let policy = store.config.policy;
+            let flat = Store::encode_chunk(&p.bytes, c.chunk_off, p.id, &limits, &policy)?;
+            // §32 gate: the unguided cheap path bypasses the guided
+            // search's validation; every persisted representation must
+            // materialize to its content id.
+            store.validate_update(&flat)?;
+            flatten_updates.push(flat);
+            prev_version = Some(crate::core::candidate::BaseChunk {
+                id: p.id,
+                bytes: p.bytes.clone(),
+                depth: 0,
+            });
+        }
+    }
+    let ctx = crate::optimizer::search::GuidedContext {
+        ino,
+        offset: c.chunk_off,
+        target: &c.bytes,
+        prev_version: prev_version.clone(),
+        dictionary: c.dictionary.clone(),
+        // Phase-9C: the write path has no shared dictionary in hand; the
+        // background shared-dict pass supplies it.
+        shared: None,
+        // The search validates against the chunk's own synthetic view
+        // (the in-batch dictionary's composed bytes); the real batch
+        // pending state is applied by the serial assembly phase.
+        pending: c.synthetic.as_ref(),
+        mode: crate::optimizer::search::SearchMode::Foreground,
+    };
+    let outcome = store.perf().time("search", || {
+        crate::optimizer::search::encode_guided(store, &ctx, options, fg)
+    })?;
+    Ok((flatten_updates, outcome, prev_version))
+}
+
 impl Store {
     /// Write `data` at `offset` of file `ino` (chunk-aligned
     /// read-modify-write; one transaction; extends the file size). Takes
@@ -2404,7 +2503,31 @@ impl Store {
         let old_size = inode.size;
         let new_size = old_size.max(end);
 
-        let mut updates = Vec::new();
+        // Phase-10C: parallel chunk preparation in three phases.
+        //
+        // 1. Compose every chunk's FINAL bytes serially (the batch overlay
+        //    semantics are inherently ordered: a later write sees earlier
+        //    writes to the same chunk). This phase is memory-bound and
+        //    cheap.
+        // 2. Encode all chunks CONCURRENTLY (the expensive candidate
+        //    search; each chunk's context — prev version from the RMW
+        //    read, in-batch dictionary from the composed bytes — is
+        //    independent). The in-batch dictionary is used with an
+        //    ASSUMED depth 0: the exact depth of a chained in-batch
+        //    dictionary is only known after its own encode, and resolving
+        //    that serially would defeat the parallelism. §32 byte-exact
+        //    validation is the backstop for any depth-cap mismatch (a
+        //    candidate whose real reference chain exceeds the decode cap
+        //    fails materialization and loses; a valid candidate's
+        //    persisted bytes are identical regardless of the assumed
+        //    depth).
+        // 3. Apply the batch semantics serially in offset order — the
+        //    in-batch dedup canonicalization (a chunk whose content was
+        //    already encoded earlier in the batch reuses the canonical
+        //    descriptor or EXACT_REF alias, marginally cheapest) and the
+        //    pending registration — then assemble the updates for ONE
+        //    commit.
+        let mut composed: Vec<Composed> = Vec::new();
         let mut chunk = first_chunk;
         while chunk < last_chunk {
             let chunk_off = chunk * chunk_class;
@@ -2457,20 +2580,156 @@ impl Store {
                 o.insert(chunk_off, chunk_bytes.to_vec());
             }
 
-            // Phase-8C batch canonicalization: if this exact content was
-            // already encoded earlier in the batch, reuse the canonical
-            // descriptor (or alias via EXACT_REF) instead of re-running
-            // the search — encode each unique final content once (§12,
-            // the marginally cheapest exact representation wins). The
-            // canonical was validated when its first occurrence won §32;
-            // the reuse is re-validated here against the batch pending
-            // state (the canonical's objects are staged, not committed).
             let cid = self
                 .perf
                 .time("hash", || crate::core::extent::ChunkId::of(chunk_bytes));
+
+            // P0: the previous version of this chunk (the natural edit
+            // base for versioned data, H2); usable when the old extent
+            // resolves in the chunk index. When the RMW already
+            // materialized the full pre-write chunk, reuse those bytes
+            // instead of re-reading the store (Phase 6 hot path). The
+            // batch overlay bytes are *uncommitted*, so they are never a
+            // base (the store cannot resolve them).
+            let prev_version = if !from_overlay && old_size > chunk_off {
+                if !full_chunk && old_size >= chunk_off + chunk_len as u64 {
+                    self.base_chunk_from_bytes(&partial[..chunk_len])?
+                } else if full_chunk {
+                    self.base_chunk_at(ino, chunk_off, chunk_len)?
+                } else {
+                    None // old extent shorter than the target chunk
+                }
+            } else {
+                None
+            };
+            // Phase-9B: the SequenceDict dictionary is the previous
+            // same-file chunk. Sequential writes make its bytes nearly
+            // free: the batch overlay holds the uncommitted previous chunk
+            // (its descriptor commits in this same transaction, so a
+            // reference resolves at decode); otherwise the committed
+            // store. Phase-10C: the in-batch dictionary uses the composed
+            // bytes with an ASSUMED depth 0 (see the phase comment; §32
+            // validates any depth-cap mismatch) — the overlay bytes always
+            // match the bytes the reference materializes, whether the
+            // previous chunk's descriptor is a fresh in-batch encode or a
+            // canonical reuse of a committed chunk.
+            let mut dictionary: Option<crate::core::candidate::BaseChunk> = None;
+            let mut synthetic: Option<crate::optimizer::search::PendingBatch> = None;
+            if chunk_off >= chunk_class {
+                let prev_off = chunk_off - chunk_class;
+                let overlay_hit = overlay.as_ref().and_then(|o| o.get(&prev_off).cloned());
+                match overlay_hit {
+                    Some(prev_bytes) => {
+                        let pcid = crate::core::extent::ChunkId::of(&prev_bytes);
+                        dictionary = Some(crate::core::candidate::BaseChunk {
+                            id: pcid,
+                            bytes: prev_bytes.clone(),
+                            depth: 0, // assumed; phase 3 applies the real chain
+                        });
+                        // Synthetic view: pcid -> RAW descriptor over the
+                        // composed bytes (a RAW object's id IS the payload
+                        // hash, so object id == pcid). The synthetic
+                        // descriptor is terminal (depth 0); phase 3 walks
+                        // the REAL chain and re-encodes without the
+                        // dictionary family if it would exceed the decode
+                        // cap. A candidate whose real chain is admissible
+                        // persists bytes identical to the serial path: the
+                        // encoder's streams depend only on input + dict
+                        // bytes (both in hand), never on the assumed depth.
+                        let rep = crate::core::representation::Representation::Raw {
+                            obj: pcid,
+                            len: prev_bytes.len() as u64,
+                        };
+                        let desc_bytes = crate::format::descriptor::encode(&rep)?;
+                        let mut syn = crate::optimizer::search::PendingBatch::default();
+                        syn.descriptors.insert(pcid, desc_bytes);
+                        syn.objects.insert(pcid, prev_bytes);
+                        synthetic = Some(syn);
+                    }
+                    None => {
+                        // Previous chunk not touched in this batch: the
+                        // committed store is authoritative.
+                        dictionary = self.base_chunk_at(ino, prev_off, chunk_len)?;
+                    }
+                }
+            }
+            composed.push(Composed {
+                chunk_off,
+                bytes: chunk_bytes.to_vec(),
+                cid,
+                prev_version,
+                dictionary,
+                synthetic,
+            });
+            chunk += 1;
+        }
+
+        // Phase 2: candidate search — CONCURRENTLY for multi-chunk
+        // writes (scoped threads over the composed chunks), inline for the
+        // single-chunk FUSE request (a scoped thread would cost ~50 µs of
+        // latency for no parallelism). Deterministic: the outcomes are
+        // gathered by index and phase 3 applies them in offset order.
+        let n = composed.len();
+        let mut results: Vec<Option<ChunkResult>> = (0..n).map(|_| None).collect();
+        if n == 1 {
+            results[0] = Some(encode_prepared_chunk(
+                self,
+                &composed[0],
+                ino,
+                limits,
+                options,
+                fg,
+            ));
+        } else {
+            let workers = std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(4)
+                .min(n)
+                .max(1);
+            let per = n.div_ceil(workers);
+            std::thread::scope(|s| {
+                let mut handles = Vec::with_capacity(workers);
+                for (w, slice) in results.chunks_mut(per).enumerate() {
+                    let store = &*self;
+                    let composed = &composed[..];
+                    handles.push(s.spawn(move || {
+                        for (j, slot) in slice.iter_mut().enumerate() {
+                            let c = &composed[w * per + j];
+                            let r = encode_prepared_chunk(store, c, ino, limits, options, fg);
+                            *slot = Some(r);
+                        }
+                    }));
+                }
+                for h in handles {
+                    let _ = h.join();
+                }
+            });
+        }
+
+        // Phase 3: batch semantics in offset order — the in-batch dedup
+        // canonicalization, the real chain-depth enforcement, and the
+        // pending registration — then the update assembly, exactly as the
+        // serial path produced them.
+        //
+        // `depths` mirrors `pending.depths`: the REAL reference depth of
+        // each in-batch descriptor, resolved as the batch proceeds so the
+        // depth fallback and later dictionary references see the true
+        // chain.
+        let mut depths: std::collections::HashMap<crate::core::extent::ChunkId, u8> =
+            std::collections::HashMap::new();
+        let mut updates = Vec::new();
+        for (i, c) in composed.iter().enumerate() {
+            // Phase-8C batch canonicalization: if this exact content was
+            // already encoded earlier in the batch, reuse the canonical
+            // descriptor (or alias via EXACT_REF) instead of the fresh
+            // encode — encode each unique final content once (§12, the
+            // marginally cheapest exact representation wins). The
+            // canonical was validated when its first occurrence won §32;
+            // the reuse is re-validated here against the batch pending
+            // state (the canonical's objects are staged, not committed).
             let canonical: Option<Vec<u8>> = pending
                 .as_ref()
-                .and_then(|p| p.descriptors.get(&cid))
+                .and_then(|p| p.descriptors.get(&c.cid))
                 .cloned();
             if let Some(canon_bytes) = canonical {
                 let canon = crate::format::descriptor::decode(
@@ -2484,10 +2743,10 @@ impl Store {
                 let reuse_cost = canon_bytes.len() as u64;
                 let alias = if options.allow_exact_ref {
                     crate::core::candidate::exact_ref_candidate(
-                        cid,
-                        cid,
-                        chunk_len as u64,
-                        chunk_len as u64,
+                        c.cid,
+                        c.cid,
+                        c.bytes.len() as u64,
+                        c.bytes.len() as u64,
                         &limits,
                     )
                 } else {
@@ -2498,117 +2757,94 @@ impl Store {
                     .map(|a| a.representation.encoded_size())
                     .unwrap_or(u64::MAX);
                 let update = ExtentUpdate {
-                    offset: chunk_off,
+                    offset: c.chunk_off,
                     descriptor: if alias_cost < reuse_cost {
                         alias.expect("alias present").representation
                     } else {
                         canon
                     },
-                    content_id: cid,
+                    content_id: c.cid,
                     objects: Vec::new(),
                 };
                 // §32 gate for the reuse path (pending-aware resolver).
                 self.validate_update_pending(&update, pending.as_deref())?;
                 updates.push(update);
-                chunk += 1;
                 continue;
             }
-
-            // Phase 4: the guided search (DSFB-ordered, §16). P0 is the
-            // previous version of this chunk (the natural edit base for
-            // versioned data, H2); it is only usable when the old extent
-            // resolves in the chunk index. When the RMW already
-            // materialized the full pre-write chunk, reuse those bytes
-            // instead of re-reading the store (Phase 6 hot path). The
-            // batch overlay bytes are *uncommitted*, so they are never a
-            // base (the store cannot resolve them).
-            let mut prev_version = if !from_overlay && old_size > chunk_off {
-                if !full_chunk && old_size >= chunk_off + chunk_len as u64 {
-                    self.base_chunk_from_bytes(&partial[..chunk_len])?
-                } else if full_chunk {
-                    self.base_chunk_at(ino, chunk_off, chunk_len)?
-                } else {
-                    None // old extent shorter than the target chunk
-                }
-            } else {
-                None
-            };
-            // Rebase-on-write (§11): drift workloads edit the same chunk
-            // repeatedly, and each edit would otherwise nest another
-            // BaseResidual until the depth cap collapses the strategy to
-            // RAW. When the previous version is itself a deep chain,
-            // re-encode it at depth 0 in the same transaction (the flat
-            // extent update lands first; the edit's update replaces it),
-            // so the new base+residual stays shallow and decodable.
-            let mut flatten_updates: Vec<ExtentUpdate> = Vec::new();
-            if let Some(p) = &prev_version {
-                if p.depth >= crate::optimizer::rebase::REBASE_DEPTH_THRESHOLD {
-                    let policy = self.config.policy;
-                    let flat = Store::encode_chunk(&p.bytes, chunk_off, p.id, &limits, &policy)?;
-                    // §32 gate: the unguided cheap path bypasses the
-                    // guided search's validation; every persisted
-                    // representation must materialize to its content id
-                    // (this catches any encoder defect at the commit
-                    // boundary).
-                    self.validate_update(&flat)?;
-                    flatten_updates.push(flat);
-                    prev_version = Some(crate::core::candidate::BaseChunk {
-                        id: p.id,
-                        bytes: p.bytes.clone(),
-                        depth: 0,
-                    });
-                }
-            }
-            // Phase-9B: the SequenceDict dictionary is the previous
-            // same-file chunk. Sequential writes make its bytes nearly
-            // free: the batch overlay holds the uncommitted previous chunk
-            // (its descriptor commits in this same transaction, so a
-            // reference resolves at decode); otherwise the committed
-            // store. Overlay bytes are only usable when the previous
-            // chunk was freshly encoded in this batch (its descriptor is
-            // registered in the pending state); an aliased chunk
-            // (EXACT_REF) resolves through the committed index, and its
-            // overlay bytes would not match at decode.
-            let mut dictionary: Option<crate::core::candidate::BaseChunk> = None;
-            if chunk_off >= chunk_class {
-                let prev_off = chunk_off - chunk_class;
-                let overlay_hit = overlay.as_ref().and_then(|o| o.get(&prev_off).cloned());
-                match overlay_hit {
-                    Some(prev_bytes) => {
-                        if let Some(p) = pending.as_ref() {
-                            let pcid = crate::core::extent::ChunkId::of(&prev_bytes);
-                            if p.descriptors.contains_key(&pcid) {
-                                let depth = p.depths.get(&pcid).copied().unwrap_or(0);
-                                dictionary = Some(crate::core::candidate::BaseChunk {
-                                    id: pcid,
-                                    bytes: prev_bytes,
-                                    depth,
-                                });
-                            }
-                        }
-                    }
-                    None => {
-                        // Previous chunk not touched in this batch: the
-                        // committed store is authoritative.
-                        dictionary = self.base_chunk_at(ino, prev_off, chunk_len)?;
-                    }
+            let (flatten_updates, outcome, prev_version) =
+                results[i].take().expect("phase 2 produced a result")?;
+            let mut outcome = outcome;
+            // Phase-10C backstop: the parallel search validated its winner
+            // against the chunk's own SYNTHETIC view (the in-batch
+            // dictionary's composed bytes, assumed depth 0) rather than the
+            // real batch state. Anything the synthetic view can get wrong
+            // is caught here, against the REAL pending state:
+            //
+            // - a dedup reuse whose object exists only in the synthetic
+            //   view (consecutive identical content: the synthetic RAW
+            //   descriptor ties the EXACT_REF alias on marginal bytes and
+            //   would otherwise win while referencing an object that is
+            //   never persisted);
+            // - a dictionary chain whose REAL depth exceeds the decode cap
+            //   (materialization walks the real chain and fails);
+            // - any other resolution the synthetic view shadowed.
+            //
+            // On failure the chunk is re-encoded with the REAL pending
+            // state and the REAL dictionary depth — exactly the serial
+            // search's input, so the outcome is byte-identical to it (the
+            // encoder's streams depend only on input + dict bytes; the
+            // depth gates only admissibility).
+            let mut real_depth = crate::optimizer::rebase::chain_depth_uncapped(
+                self,
+                &outcome.update.descriptor,
+                &depths,
+            );
+            if (c.synthetic.is_some() || real_depth > 0)
+                && self
+                    .validate_update_pending(&outcome.update, pending.as_deref())
+                    .is_err()
+            {
+                let dictionary = match &c.dictionary {
+                    Some(d) if c.synthetic.is_some() => Some(crate::core::candidate::BaseChunk {
+                        id: d.id,
+                        bytes: d.bytes.clone(),
+                        depth: depths.get(&d.id).copied().unwrap_or(0),
+                    }),
+                    other => other.clone(),
+                };
+                let ctx = crate::optimizer::search::GuidedContext {
+                    ino,
+                    offset: c.chunk_off,
+                    target: &c.bytes,
+                    prev_version,
+                    dictionary,
+                    shared: None,
+                    pending: pending.as_deref(),
+                    mode: crate::optimizer::search::SearchMode::Foreground,
+                };
+                let redo = self.perf.time("search", || {
+                    crate::optimizer::search::encode_guided(self, &ctx, options, fg)
+                })?;
+                // The re-encode validated internally against the real
+                // pending; confirm here so no fallback path can commit an
+                // unvalidated update.
+                self.validate_update_pending(&redo.update, pending.as_deref())
+                    .map_err(|e| {
+                        StoreError::Invariant(format!("fallback re-encode failed validation: {e}"))
+                    })?;
+                outcome = redo;
+                real_depth = crate::optimizer::rebase::chain_depth_uncapped(
+                    self,
+                    &outcome.update.descriptor,
+                    &depths,
+                );
+                if real_depth > limits.max_reference_depth {
+                    return Err(StoreError::Invariant(format!(
+                        "fallback re-encode still exceeds the decode cap ({} > {})",
+                        real_depth, limits.max_reference_depth
+                    )));
                 }
             }
-            let ctx = crate::optimizer::search::GuidedContext {
-                ino,
-                offset: chunk_off,
-                target: chunk_bytes,
-                prev_version,
-                dictionary,
-                // Phase-9C: the write path has no shared dictionary in
-                // hand; the background shared-dict pass supplies it.
-                shared: None,
-                pending: pending.as_deref(),
-                mode: crate::optimizer::search::SearchMode::Foreground,
-            };
-            let outcome = self.perf.time("search", || {
-                crate::optimizer::search::encode_guided(self, &ctx, options, fg)
-            })?;
             // Phase-8C: register this chunk's descriptor + objects in the
             // batch pending state so later chunks in the same transaction
             // can dedup against it. First occurrence wins (the persisted
@@ -2623,13 +2859,16 @@ impl Store {
                     p.descriptors
                         .entry(outcome.update.content_id)
                         .or_insert(desc_bytes);
-                    // Phase-9B: register the descriptor's reference depth
-                    // so a later chunk in this batch can use it as a
+                    // Phase-9B: register the descriptor's REAL reference
+                    // depth so a later chunk in this batch can use it as a
                     // SequenceDict dictionary without exceeding the decode
                     // cap (first occurrence wins, like the descriptor).
                     p.depths
                         .entry(outcome.update.content_id)
-                        .or_insert(outcome.depth);
+                        .or_insert(real_depth);
+                    depths
+                        .entry(outcome.update.content_id)
+                        .or_insert(real_depth);
                 }
                 for obj in &outcome.update.objects {
                     p.objects.entry(obj.id).or_insert(obj.payload.clone());
@@ -2637,7 +2876,6 @@ impl Store {
             }
             updates.extend(flatten_updates);
             updates.push(outcome.update);
-            chunk += 1;
         }
         Ok((updates, new_size))
     }
