@@ -66,6 +66,7 @@ physical storage (RAW fallback) — that is a success condition, not a failure.
 | 9 (9E) | **SequenceDeep** — deep-match family (tag 0x11, feature bit 14): repcodes (REP0/REP1 carry no offset symbol) + extended length codes (one XCOPY/XLIT + u16 extra instead of 131-byte continuation runs), fed by a deep background matcher (chain 256, lazy parse with a minimum-gain threshold, rep-distance priority). Background-only; terminal. Standalone deep floor **3.786× vs fast 3.736×** on the src pack (deep wins all chunks); ladder E4 densifies structured 50,528 → 50,238 B | ✅ implemented + evidence-sealed (`campaign-1787681660-9be6bd3/`) |
 | 9 (9F) | **Gap decomposition sealed** — the remaining gap to per-file zstd is measured, not asserted: zstd with the same per-directory anchor (`-D`, self-excluded) gains only ~8.5% (the anchor policy is NOT the cap); the residual gap is ~2/3 **per-extent persistence overhead** (multi-stream rANS models + descriptors on small files, ~26.5% of footprint) and ~1/3 coder quality. Also falsified: `scale_bits` does not shrink models (symbol-count-dominated encoding). Sets the 9G direction: amortized model sharing | ✅ sealed (`campaign-1787683904-da26c75/`) |
 | 9 (9G0) | **Model-cost-aware stream selection** — the stream-level RAW/rANS gate now includes the persisted model bytes (`enc + model < raw`), so a stream whose rANS gain is smaller than its model is stored RAW. The biggest single measured win since 9F: sequence model objects on the real tree 277.6 KB → 74.3 KB (per-extent overhead 26.5% → 11.1% of footprint); tree court 2.388× → 2.775× post shared-dict; src corpus 4.327×. Plus the model-sharing **oracle** (diagnostic): intra-extent partition sharing falsified (−125 KB), directory aggregate bundle validated (+49.6 KB), pools lose to the single aggregate | ✅ implemented + evidence-sealed (`campaign-1787684918-80e36c8/`) |
+| 9 (9G) | **Amortized entropy models** — `model_bundle_pass` (background): one aggregate model per stream type per directory cohort, trained on the cohort's summed histograms; each member's streams are re-encoded against it (per-stream RAW fallback) and rewritten only when the cohort's total persisted bytes strictly fall. **No format change**: the model object is content-addressed, the descriptor references it by ChunkId, CAS amortizes it. The oracle's S2 is implemented; S1 (intra-extent bundle format) and S3/S4 (pools) are rejected on measured evidence. Tree court: shared-dict 2.813× → **2.881×** (25.7 KiB real post-GC reachable reduction); byte-exact, idempotent, fsck-clean, noise control never rewritten | ✅ implemented + evidence-sealed (`campaign-1787685723-60ecaf2/`) |
 
 ## Measured results
 
@@ -148,6 +149,17 @@ oversized-descriptor fix (Phase 6) eliminated.
   lose to the single aggregate. 9G0's sealed campaign numbers are in
   `evidence/performance/INDEX.md`; the oracle is a diagnostic, not a
   claim.
+- **Phase-9G (sealed `60ecaf2`) implemented the oracle's S2**: the
+  background `model_bundle_pass` trains one aggregate model per stream
+  type per directory cohort and re-encodes members against it (per-stream
+  RAW fallback), rewriting only when the cohort's total strictly falls.
+  No format change and no new feature bit — model objects were already
+  content-addressed descriptors. Tree court: shared-dict 2.813× → **2.881×**
+  (1,065,145 B reachable, 65 rewrites; the real post-GC saving 25.7 KiB
+  exceeds the 7.5 KiB conservative cohort-accounted claim because GC
+  reclaims the superseded per-extent models). The win is better-trained
+  aggregate models (the enc side), not model dedup — the model-bytes
+  metric is flat, recorded as-is.
 - The campaign's H2 experiment (synthetic drift corpus) is now a sealed
   **controlled series**: `67d977a` +7.2% (RANS-era floor), `a6641d1`
   −24% (SequenceRans floor, positional residuals only), `43bf17e`
