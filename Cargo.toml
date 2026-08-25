@@ -72,6 +72,6 @@ debug = true
 lto = "thin"
 codegen-units = 1
 
-# Deny warnings in CI-style builds; the crate additionally uses
-# `#![forbid(unsafe_code)]` where the Linux boundary does not require otherwise.
-[workspace]
+# No `[workspace]` table: per ADR-0001 this package is deliberately not a
+# workspace and declares no workspace root (cargo treats a standalone package
+# as its own implicit workspace root for command resolution).
