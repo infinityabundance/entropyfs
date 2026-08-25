@@ -187,6 +187,18 @@ oversized-descriptor fix (Phase 6) eliminated.
   similarity between unrelated-history chunks — the control no longer
   isolates pure temporal causality, and that confounding is itself
   recorded as the finding.
+- The competitive filesystem court is a sealed **zero-waiver series** at
+  9H (`fs-court-1787688251-69e69d4/`, privileged docker VM, symmetric
+  buffered/durable/warm/cold rules): EntropyFS is reported in two states —
+  **foreground 1.826×** (74.58 MB post-GC) and **settled 1.995×**
+  (68.27 MB) after background optimize + full compaction (5.45 s,
+  1.047× physical write amplification) — and the settled density **beats
+  Btrfs+zstd 1.72× (79.13 MB image)** on the same corpus set (64 MiB
+  incompressible random + 64 MiB zeros + src + tgz). The throughput gaps
+  are recorded honestly: src tiny-file writes 10.2 MiB/s vs 100–457,
+  64 MiB random writes 68 vs ~5,900 MiB/s. The write path is now the
+  dominant weakness; the court points the next phase at **performance**
+  (Phase 10), not another entropy codec.
 - Random/encrypted/already-compressed data falls back toward RAW (urandom
   0.997×, zstd -19 pack 0.993×) — the honest negative control.
 
