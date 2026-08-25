@@ -1,0 +1,94 @@
+scratch: /mnt/1tb_kingston/entropyfs/target/court-threads-scratch/t16 on ext4 (/dev/nvme1n1p1)
+== corpus construction ==
+corpus apparent total: 136187137 B (src, random.bin, zeros.bin, compressed.tgz)
+== ext4 (host ext4 on /dev/nvme1n1p1) ==
+  src: apparent 1559776 allocated 1912832 buffered-write 672.4 MiB/s durable-write 40.3 MiB/s warm-read 673.5 MiB/s cold-read 673.5 MiB/s
+  random.bin: apparent 67108864 allocated 67112960 buffered-write 4520.9 MiB/s durable-write 1586.6 MiB/s warm-read 20565.7 MiB/s cold-read 20565.7 MiB/s
+  zeros.bin: apparent 67108864 allocated 67112960 buffered-write 6225.0 MiB/s durable-write 2212.6 MiB/s warm-read 19942.0 MiB/s cold-read 19942.0 MiB/s
+  compressed.tgz: apparent 409633 allocated 413696 buffered-write 533.7 MiB/s durable-write 69.8 MiB/s warm-read 475.5 MiB/s cold-read 475.5 MiB/s
+== xfs (loop image) ==
+  WAIVER: xfs requires root + loop devices; run in a root-capable VM:
+    mkfs.xfs -f <image> && mount -o loop <image> <mnt>
+== btrfs (loop image) ==
+  WAIVER: btrfs requires root + loop devices; run in a root-capable VM:
+    mkfs.btrfs -f <image> && mount -o loop <image> <mnt>
+== btrfs-zstd (loop image) ==
+  WAIVER: btrfs-zstd requires root + loop devices; run in a root-capable VM:
+    mkfs.btrfs -f <image> && mount -o loop,compress=zstd:1 <image> <mnt>
+== squashfs: WAIVER (mksquashfs not installed) ==
+== erofs: WAIVER (mkfs.erofs not installed) ==
+== zstd standalone ==
+  zstd -1 src: apparent 1559776 image 381599 ratio 4.087x 265.3 MiB/s
+  zstd -1 random.bin: apparent 67108864 image 67110414 ratio 1.000x 4827.9 MiB/s
+  zstd -1 zeros.bin: apparent 67108864 image 2288 ratio 29330.797x 10905.1 MiB/s
+  zstd -1 compressed.tgz: apparent 409633 image 409658 ratio 1.000x 265.0 MiB/s
+  zstd -1 src per-64KiB: apparent 1559776 image 433385 ratio 3.599x
+  zstd -19 src: apparent 1559776 image 257113 ratio 6.066x 5.4 MiB/s
+  zstd -19 random.bin: apparent 67108864 image 67110414 ratio 1.000x 11.3 MiB/s
+  zstd -19 zeros.bin: apparent 67108864 image 2077 ratio 32310.479x 2256.8 MiB/s
+  zstd -19 compressed.tgz: apparent 409633 image 409658 ratio 1.000x 35.0 MiB/s
+  zstd -19 src per-64KiB: apparent 1559776 image 351193 ratio 4.441x
+== entropyfs (FUSE store, threads=16, no background optimizer) ==
+== entropyfs (FUSE mount of /mnt/1tb_kingston/entropyfs/target/court-threads-scratch/t16/efs-store (threads=16)) ==
+  src: apparent 1559776 allocated 1591296 buffered-write 1.9 MiB/s durable-write 1.9 MiB/s warm-read 65.7 MiB/s cold-read 65.7 MiB/s
+  random.bin: apparent 67108864 allocated 67108864 buffered-write 65.5 MiB/s durable-write 65.1 MiB/s warm-read 3507.7 MiB/s cold-read 3507.7 MiB/s
+  zeros.bin: apparent 67108864 allocated 67108864 buffered-write 328.3 MiB/s durable-write 316.4 MiB/s warm-read 4434.9 MiB/s cold-read 4434.9 MiB/s
+  compressed.tgz: apparent 409633 allocated 410112 buffered-write 30.0 MiB/s durable-write 23.4 MiB/s warm-read 327.5 MiB/s cold-read 327.5 MiB/s
+  daemon CPU: 1.37s user+sys over 2.28s wall = 0.60x utilization (threads=16)
+  src (FUSE remount cold): read 66.5 MiB/s
+  random.bin (FUSE remount cold): read 4128.5 MiB/s
+  zeros.bin (FUSE remount cold): read 5333.4 MiB/s
+  compressed.tgz (FUSE remount cold): read 385.8 MiB/s
+fuse stats (16 threads):
+  fuse requests: max concurrency 4
+    write        n=     303 total=   2539.76 ms   p50=   2044.3 p95=  28931.5 p99=  31107.8 us
+    create       n=     135 total=    349.59 ms   p50=   2541.6 p95=   3244.0 p99=   3712.6 us
+    setattr      n=     134 total=    309.35 ms   p50=   2070.6 p95=   3150.1 p99=   3674.6 us
+    mkdir        n=      18 total=     46.60 ms   p50=   2549.2 p95=   2718.9 p99=   3780.8 us
+    read         n=     670 total=     37.15 ms   p50=     52.2 p95=    100.2 p99=    150.1 us
+    readdir      n=     609 total=     24.50 ms   p50=     39.4 p95=     50.5 p99=     57.5 us
+    getxattr     n=     646 total=     10.12 ms   p50=     13.9 p95=     26.6 p99=     31.9 us
+    getattr      n=     475 total=      3.84 ms   p50=      6.6 p95=     15.7 p99=     19.6 us
+    lookup       n=     159 total=      1.84 ms   p50=     10.1 p95=     21.4 p99=     29.9 us
+    open         n=     135 total=      0.96 ms   p50=      6.5 p95=     10.0 p99=     30.4 us
+    opendir      n=      55 total=      0.38 ms   p50=      6.4 p95=     10.4 p99=     13.2 us
+    release      n=     270 total=      0.24 ms   p50=      0.7 p95=      1.9 p99=      2.5 us
+    flush        n=     273 total=      0.22 ms   p50=      0.7 p95=      1.6 p99=      1.9 us
+    releasedir   n=      55 total=      0.04 ms   p50=      0.6 p95=      1.3 p99=      1.4 us
+    statfs       n=       2 total=      0.02 ms   p50=     10.4 p95=     10.4 p99=     10.4 us
+    init         n=       1 total=      0.00 ms   p50=      0.1 p95=      0.1 p99=      0.1 us
+  write request size histogram:
+           <4K: 53
+         4-16K: 59
+        16-64K: 17
+       64-256K: 3
+       256K-1M: 171
+           =1M: 0
+           >1M: 0
+  phase timings (cumulative ms, per-sample us p50/p95/p99):
+    search                       n=    2271 total=    864.77 ms   p50=    188.5 p95=   1610.0 p99=   1955.0 us
+    search_sequence_rans         n=    1233 total=    492.56 ms   p50=    441.7 p95=    487.0 p99=    528.8 us
+    prune                        n=     590 total=    194.28 ms   p50=    253.3 p95=    721.4 p99=    798.9 us
+    search_sequence_dict         n=     150 total=    172.03 ms   p50=   1207.2 p95=   1385.6 p99=   1449.0 us
+    search_configurational       n=    1233 total=     84.95 ms   p50=     72.7 p95=     89.2 p99=    113.2 us
+    btree_mutation               n=     303 total=     76.46 ms   p50=    322.1 p95=    595.4 p99=    724.3 us
+    append_flush                 n=     590 total=     47.15 ms   p50=     15.4 p95=    460.6 p99=    602.9 us
+    search_zero_fill             n=    2271 total=     28.51 ms   p50=      0.0 p95=     29.5 p99=     37.6 us
+    search_byte_rans             n=    1233 total=     23.17 ms   p50=     14.7 p95=     35.1 p99=    129.6 us
+    validation                   n=    2271 total=     19.86 ms   p50=      7.6 p95=     11.0 p99=     46.6 us
+    search_dedup                 n=    2271 total=     12.73 ms   p50=      5.4 p95=      7.3 p99=      8.9 us
+    hash                         n=    2271 total=     12.04 ms   p50=      5.3 p95=      6.2 p99=      8.3 us
+    rmw_read                     n=      81 total=      1.60 ms   p50=     20.1 p95=     26.1 p99=     26.5 us
+    superblock                   n=     590 total=      1.35 ms   p50=      2.2 p95=      3.8 p99=      4.7 us
+    begin_tx_wait                n=     303 total=      0.03 ms   p50=      0.1 p95=      0.2 p99=      0.3 us
+  fsck: clean
+  backing store (post-GC): apparent 76395082 allocated 76414976; total corpus apparent 136187137
+  entropyfs effective density (apparent / allocated backing): 1.782x
+  settle: foreground -> settled (optimize + compact)
+  settle: optimize 5.83s (backing 76395082 -> 79667821)
+    optimize: scanned 2190 extents, rewrote 96, saved ~10643 persisted bytes (stale 0, no-gain 2094, errors 0) optimize: shared-dict pass scanned 132 extents, rewrote 112, saved ~69661 persisted bytes (no-gain 20, errors 0) optimize: model-bundle pass scanned 131 extents, rewrote 54, saved ~8692 persisted bytes (no-gain 35, errors 0) 
+  settle: full compaction 0.17s (backing 79667821 -> 68280153)
+    unreachable before: 11381009 bytes reclaimed: 11493291 bytes unreachable after: 238 bytes physical reconciliation: 68275545 B files   live canonical          68275541 B (100.0%)   dead indexed                   0 B (  0.0%)  [reclaimable]   index-hidden                   0 B (  0.0%)  [reclaimable] 
+  settled store: apparent 68280153 allocated 68296704; density (apparent/backing) 1.995x, (apparent/allocated) 1.994x
+  settle cost: 6.00s elapsed, 1.048x physical write amplification (appended 71552892 B)
+  settled fsck: clean

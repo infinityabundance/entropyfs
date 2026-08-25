@@ -1,0 +1,183 @@
+{
+ "fs": {
+  "ext4/src": {
+   "apparent": 1559776,
+   "allocated": 1912832,
+   "buffered_write_mbps": 742.1,
+   "durable_write_mbps": 54.2,
+   "warm_read_mbps": 644.0,
+   "cold_read_mbps": 644.0,
+   "cache": "warm-retained"
+  },
+  "ext4/random.bin": {
+   "apparent": 67108864,
+   "allocated": 67112960,
+   "buffered_write_mbps": 4541.0,
+   "durable_write_mbps": 1621.7,
+   "warm_read_mbps": 17834.8,
+   "cold_read_mbps": 17834.8,
+   "cache": "warm-retained"
+  },
+  "ext4/zeros.bin": {
+   "apparent": 67108864,
+   "allocated": 67108864,
+   "buffered_write_mbps": 6713.4,
+   "durable_write_mbps": 2355.3,
+   "warm_read_mbps": 21516.2,
+   "cold_read_mbps": 21516.2,
+   "cache": "warm-retained"
+  },
+  "ext4/compressed.tgz": {
+   "apparent": 409641,
+   "allocated": 413696,
+   "buffered_write_mbps": 506.3,
+   "durable_write_mbps": 63.6,
+   "warm_read_mbps": 438.2,
+   "cold_read_mbps": 438.2,
+   "cache": "warm-retained"
+  },
+  "xfs": {
+   "waived": "requires root + loop",
+   "command": "mkfs.xfs -f <image> && mount -o loop <image> <mnt>"
+  },
+  "btrfs": {
+   "waived": "requires root + loop",
+   "command": "mkfs.btrfs -f <image> && mount -o loop <image> <mnt>"
+  },
+  "btrfs-zstd": {
+   "waived": "requires root + loop",
+   "command": "mkfs.btrfs -f <image> && mount -o loop,compress=zstd:1 <image> <mnt>"
+  },
+  "squashfs-zstd": {
+   "waived": "mksquashfs not installed"
+  },
+  "erofs-lz4hc": {
+   "waived": "mkfs.erofs not installed"
+  }
+ },
+ "zstd": {
+  "-1/src": {
+   "apparent": 1559776,
+   "image": 381666,
+   "ratio": 4.087,
+   "write_mbps": 272.6
+  },
+  "-1/random.bin": {
+   "apparent": 67108864,
+   "image": 67110414,
+   "ratio": 1.0,
+   "write_mbps": 4725.2
+  },
+  "-1/zeros.bin": {
+   "apparent": 67108864,
+   "image": 2288,
+   "ratio": 29330.797,
+   "write_mbps": 11884.2
+  },
+  "-1/compressed.tgz": {
+   "apparent": 409641,
+   "image": 409666,
+   "ratio": 1.0,
+   "write_mbps": 253.2
+  },
+  "-1/src-per-64k": {
+   "apparent": 1559776,
+   "image": 433386,
+   "ratio": 3.599
+  },
+  "-19/src": {
+   "apparent": 1559776,
+   "image": 257095,
+   "ratio": 6.067,
+   "write_mbps": 5.6
+  },
+  "-19/random.bin": {
+   "apparent": 67108864,
+   "image": 67110414,
+   "ratio": 1.0,
+   "write_mbps": 11.0
+  },
+  "-19/zeros.bin": {
+   "apparent": 67108864,
+   "image": 2077,
+   "ratio": 32310.479,
+   "write_mbps": 2173.5
+  },
+  "-19/compressed.tgz": {
+   "apparent": 409641,
+   "image": 409666,
+   "ratio": 1.0,
+   "write_mbps": 35.5
+  },
+  "-19/src-per-64k": {
+   "apparent": 1559776,
+   "image": 351190,
+   "ratio": 4.441
+  }
+ },
+ "entropyfs": {
+  "entropyfs/src": {
+   "apparent": 1559776,
+   "allocated": 1591296,
+   "buffered_write_mbps": 1.9,
+   "durable_write_mbps": 1.9,
+   "warm_read_mbps": 67.7,
+   "cold_read_mbps": 67.7,
+   "cache": "warm-retained"
+  },
+  "entropyfs/random.bin": {
+   "apparent": 67108864,
+   "allocated": 67108864,
+   "buffered_write_mbps": 64.0,
+   "durable_write_mbps": 63.6,
+   "warm_read_mbps": 3681.4,
+   "cold_read_mbps": 3681.4,
+   "cache": "warm-retained"
+  },
+  "entropyfs/zeros.bin": {
+   "apparent": 67108864,
+   "allocated": 67108864,
+   "buffered_write_mbps": 334.9,
+   "durable_write_mbps": 322.9,
+   "warm_read_mbps": 4481.5,
+   "cold_read_mbps": 4481.5,
+   "cache": "warm-retained"
+  },
+  "entropyfs/compressed.tgz": {
+   "apparent": 409641,
+   "allocated": 410112,
+   "buffered_write_mbps": 27.6,
+   "durable_write_mbps": 21.6,
+   "warm_read_mbps": 404.9,
+   "cold_read_mbps": 404.9,
+   "cache": "warm-retained"
+  },
+  "daemon_cpu_threads_4": {
+   "cpu_secs": 1.35,
+   "wall_secs": 2.31,
+   "utilization": 0.58
+  },
+  "src/cold_read_mbps": "68.8",
+  "random.bin/cold_read_mbps": "3901.9",
+  "zeros.bin/cold_read_mbps": "4761.4",
+  "compressed.tgz/cold_read_mbps": "319.4",
+  "density": {
+   "apparent": 136187145,
+   "backing_apparent": 76339730,
+   "backing_allocated": 76357632,
+   "ratio": 1.784
+  },
+  "settled": {
+   "foreground_apparent": 76339730,
+   "foreground_allocated": 76357632,
+   "settled_apparent": 68281503,
+   "settled_allocated": 68300800,
+   "settle_elapsed_s": 6.06,
+   "optimize_wall_s": 5.9,
+   "compact_wall_s": 0.16,
+   "settle_appended_bytes": 71615408,
+   "settle_write_amp": 1.049,
+   "settled_density": 1.994
+  }
+ }
+}

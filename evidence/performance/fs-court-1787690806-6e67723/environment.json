@@ -1,0 +1,10 @@
+{
+ "revision": "6e67723",
+ "created_unix": 1787690806,
+ "kernel": "7.2.0-1-cachyos",
+ "cpu": "x86_64",
+ "scratch_fstype": "ext4",
+ "scratch_source": "/dev/nvme1n1p1",
+ "uname": "vanir",
+ "root": false
+}

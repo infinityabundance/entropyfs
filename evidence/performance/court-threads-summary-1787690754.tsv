@@ -1,0 +1,31 @@
+threads	corpus	buffered_mbps	durable_mbps	warm_read_mbps	cold_read_mbps
+1	src	1.9	1.9	71.5	71.5
+1	random.bin	70.0	69.5	3346.0	3346.0
+1	zeros.bin	332.2	319.8	4526.8	4526.8
+1	compressed.tgz	30.6	23.7	353.9	353.9
+1	daemon_cpu_threads_1	utilization=0.55	cpu=1.23s
+1	settled_density	1.994	settle_elapsed=6.01s
+2	src	1.9	1.8	72.7	72.7
+2	random.bin	70.8	70.4	3727.3	3727.3
+2	zeros.bin	374.5	360.1	4638.1	4638.1
+2	compressed.tgz	30.8	24.1	362.5	362.5
+2	daemon_cpu_threads_2	utilization=0.57	cpu=1.26s
+2	settled_density	1.994	settle_elapsed=6.05s
+4	src	1.9	1.9	67.7	67.7
+4	random.bin	64.0	63.6	3681.4	3681.4
+4	zeros.bin	334.9	322.9	4481.5	4481.5
+4	compressed.tgz	27.6	21.6	404.9	404.9
+4	daemon_cpu_threads_4	utilization=0.58	cpu=1.35s
+4	settled_density	1.994	settle_elapsed=6.06s
+8	src	1.9	1.9	68.5	68.5
+8	random.bin	65.4	64.3	3410.2	3410.2
+8	zeros.bin	335.6	324.1	4507.7	4507.7
+8	compressed.tgz	30.7	23.7	378.5	378.5
+8	daemon_cpu_threads_8	utilization=0.59	cpu=1.35s
+8	settled_density	1.994	settle_elapsed=5.97s
+16	src	1.9	1.9	65.7	65.7
+16	random.bin	65.5	65.1	3507.7	3507.7
+16	zeros.bin	328.3	316.4	4434.9	4434.9
+16	compressed.tgz	30.0	23.4	327.5	327.5
+16	daemon_cpu_threads_16	utilization=0.6	cpu=1.37s
+16	settled_density	1.994	settle_elapsed=6.0s
