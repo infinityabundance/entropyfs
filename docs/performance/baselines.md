@@ -71,28 +71,33 @@ metric) is now measured per corpus: structured 1,092× allocated blocks,
 src 2.88×, urandom 0.90× (the honest cost of records + index for
 incompressible data), compressed 0.95×.
 
-## 4. Competitive filesystem court (Phase 8H)
+## 4. Competitive filesystem court (Phase 8H, v2 — root-capable)
 
-The root-capable court is `tools/fs-court.sh`; its first run is archived as
-`fs-court-1787669946-b165d60` (same machine, same corpora: source tree,
-64 MiB random, 64 MiB zeros, tar.gz control).
+The root-capable court is `tools/run-court-docker.sh` (disposable privileged
+docker VM: xfsprogs/btrfs-progs/erofs-utils/squashfs-tools/fuse3/zstd;
+`tools/docker/Dockerfile.court`); its first zero-waiver run is archived as
+`fs-court-1787674397-4f58334` (same machine/kernel via the container,
+loop-mounted XFS/Btrfs, drop_caches cold reads). Corpora: source tree,
+64 MiB random, 64 MiB zeros, tar.gz control. Symmetric rules: buffered /
+durable (cp+sync) writes, warm/cold reads, du apparent AND allocated.
 
-- **ext4 (host):** full allocation (ratio 1.000×); write 0.4–5.7 GiB/s.
-- **zstd standalone:** src 3.92× (−1) / 4.40× (−3) / 5.71× (−19);
-  random 1.000×; zeros ~29,000×; tar.gz 1.000× (already compressed).
-- **EntropyFS (FUSE, unprivileged):** effective density **1.488×**
-  (135.7 MB apparent / 91.2 MB store post-GC) including the 64 MB
-  incompressible random control; per-corpus: src write 1.7 / read 1288
-  MiB/s, random 85 / 3532 MiB/s, zeros 453 / 4374 MiB/s, tar.gz 33 /
-  342 MiB/s; fsck clean after copy + GC.
-- **Waivers (need a root-capable VM — exact commands recorded in the
-  archive):** XFS, Btrfs (plain and zstd:1), EROFS, SquashFS. The
-  waivers are legitimate per methodology §3/§8; clearing them is the
-  Phase-8H VM task.
+**Storage — EntropyFS's post-GC backing (73.9 MB allocated for 135.7 MB
+apparent, 1.836×) is DENSER than the Btrfs+zstd image (78.7 MB, 1.65×)
+on the same corpus set** (zeros → ~0 and random → ~1:1 dominate both;
+EntropyFS's zeros cost ~0 while Btrfs's per-file overhead and image
+metadata remain). XFS image 203.5 MB (no compression); SquashFS-zstd src
+4.587× (258 KB) and EROFS-lz4hc src 1.762× (672 KB) for the source
+corpus; zstd -1 whole src 3.959×, per-64KiB 3.518×.
 
-The court measures allocation and throughput on the same corpora;
-EntropyFS's authoritative exact byte accounting remains the campaign
-artifacts.
+**Throughput — the honest gaps.** On the source tree (2,600+ tiny files)
+EntropyFS writes 8.5 buffered / 7.7 durable MiB/s and reads 54.9 warm /
+48.2 cold, vs ext4 376/49/446/347, XFS 254/78/453/316, Btrfs 97/57/
+441/276, Btrfs+zstd 87/42/454/233. On 64 MiB buffered random writes
+EntropyFS does 79.6 MiB/s vs 3,752–6,015 for the native filesystems
+(~47× gap; per-request FUSE transactions dominate); random warm reads
+2,708 vs 10,210–17,125 MiB/s (~4–6×). Density targets are met; the
+FUSE write path (request aggregation, per-file commit batching) is the
+measured bottleneck to attack after SequenceDict.
 
 ## 3. Expected behavior by data class (updated with SequenceRans)
 
