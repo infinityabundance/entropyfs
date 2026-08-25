@@ -1,0 +1,114 @@
+scratch: /scratch on overlay (overlay)
+== corpus construction ==
+corpus apparent total: 136213583 B (src, random.bin, zeros.bin, compressed.tgz)
+== ext4 (host overlay on overlay) ==
+  src: apparent 1580925 allocated 1855488 buffered-write 476.4 MiB/s durable-write 2.4 MiB/s warm-read 522.6 MiB/s cold-read 446.7 MiB/s
+  random.bin: apparent 67108864 allocated 67108864 buffered-write 3860.0 MiB/s durable-write 639.4 MiB/s warm-read 9258.5 MiB/s cold-read 8699.7 MiB/s
+  zeros.bin: apparent 67108864 allocated 67108864 buffered-write 3650.7 MiB/s durable-write 553.2 MiB/s warm-read 9251.5 MiB/s cold-read 9243.9 MiB/s
+  compressed.tgz: apparent 414930 allocated 417792 buffered-write 200.9 MiB/s durable-write 4.7 MiB/s warm-read 187.4 MiB/s cold-read 177.9 MiB/s
+== xfs (loop image) ==
+== xfs (loop image (no compression)) ==
+  src: apparent 1580925 allocated 1875968 buffered-write 331.9 MiB/s durable-write 19.1 MiB/s warm-read 467.6 MiB/s cold-read 360.7 MiB/s
+  random.bin: apparent 67108864 allocated 67108864 buffered-write 5529.0 MiB/s durable-write 848.9 MiB/s warm-read 16799.0 MiB/s cold-read 6096.0 MiB/s
+  zeros.bin: apparent 67108864 allocated 67108864 buffered-write 5798.9 MiB/s durable-write 702.5 MiB/s warm-read 15422.5 MiB/s cold-read 6395.2 MiB/s
+  compressed.tgz: apparent 414930 allocated 417792 buffered-write 194.9 MiB/s durable-write 5.1 MiB/s warm-read 201.0 MiB/s cold-read 155.1 MiB/s
+  image: logical 1073741824 allocated 204021760; corpus apparent 136213583; density 0.668x
+== btrfs (loop image) ==
+== btrfs (loop image (no compression)) ==
+  src: apparent 1580925 allocated 1855488 buffered-write 130.3 MiB/s durable-write 15.5 MiB/s warm-read 539.6 MiB/s cold-read 364.0 MiB/s
+  random.bin: apparent 67108864 allocated 67108864 buffered-write 5695.9 MiB/s durable-write 833.2 MiB/s warm-read 16091.9 MiB/s cold-read 5376.4 MiB/s
+  zeros.bin: apparent 67108864 allocated 67108864 buffered-write 5846.0 MiB/s durable-write 635.8 MiB/s warm-read 15970.4 MiB/s cold-read 5609.6 MiB/s
+  compressed.tgz: apparent 414930 allocated 417792 buffered-write 193.3 MiB/s durable-write 5.6 MiB/s warm-read 206.5 MiB/s cold-read 179.3 MiB/s
+  image: logical 1073741824 allocated 144875520; corpus apparent 136213583; density 0.940x
+== btrfs-zstd (loop image) ==
+== btrfs-zstd (loop image (compress=zstd:1)) ==
+  src: apparent 1580925 allocated 1855488 buffered-write 116.0 MiB/s durable-write 16.0 MiB/s warm-read 517.8 MiB/s cold-read 291.1 MiB/s
+  random.bin: apparent 67108864 allocated 67108864 buffered-write 5982.2 MiB/s durable-write 620.7 MiB/s warm-read 15323.2 MiB/s cold-read 5588.5 MiB/s
+  zeros.bin: apparent 67108864 allocated 67108864 buffered-write 6388.4 MiB/s durable-write 705.6 MiB/s warm-read 14936.4 MiB/s cold-read 7755.5 MiB/s
+  compressed.tgz: apparent 414930 allocated 417792 buffered-write 198.2 MiB/s durable-write 5.3 MiB/s warm-read 190.7 MiB/s cold-read 172.0 MiB/s
+  image: logical 1073741824 allocated 79032320; corpus apparent 136213583; density 1.724x
+== squashfs (zstd image) ==
+  src: apparent 1580925 image 327680 allocated 327680 ratio 4.825x
+  random.bin: apparent 67108864 image 67112960 allocated 67112960 ratio 1.000x
+  zeros.bin: apparent 67108864 image 4096 allocated 4096 ratio 16384.000x
+  compressed.tgz: apparent 414930 image 417792 allocated 417792 ratio 0.993x
+== erofs (lz4hc image) ==
+  src: apparent 1580925 image 847872 allocated 847872 ratio 1.865x
+  random.bin: apparent 67108864 image 67112960 allocated 67112960 ratio 1.000x
+  zeros.bin: apparent 67108864 image 319488 allocated 319488 ratio 210.051x
+  compressed.tgz: apparent 414930 image 417792 allocated 417792 ratio 0.993x
+== zstd standalone ==
+  zstd -1 src: apparent 1580925 image 384368 ratio 4.113x 240.6 MiB/s
+  zstd -1 random.bin: apparent 67108864 image 67110414 ratio 1.000x 4313.8 MiB/s
+  zstd -1 zeros.bin: apparent 67108864 image 2288 ratio 29330.797x 6793.2 MiB/s
+  zstd -1 compressed.tgz: apparent 414930 image 414955 ratio 1.000x 205.4 MiB/s
+  zstd -1 src per-64KiB: apparent 1580925 image 437526 ratio 3.613x
+  zstd -19 src: apparent 1580925 image 261440 ratio 6.047x 5.8 MiB/s
+  zstd -19 random.bin: apparent 67108864 image 67110414 ratio 1.000x 11.1 MiB/s
+  zstd -19 zeros.bin: apparent 67108864 image 2077 ratio 32310.479x 1697.3 MiB/s
+  zstd -19 compressed.tgz: apparent 414930 image 414955 ratio 1.000x 32.4 MiB/s
+  zstd -19 src per-64KiB: apparent 1580925 image 354077 ratio 4.465x
+== entropyfs (FUSE store, threads=1, foreground=full, no background optimizer) ==
+== entropyfs (FUSE mount of /scratch/efs-store (threads=1)) ==
+  src: apparent 1580925 allocated 1611776 buffered-write 10.1 MiB/s durable-write 5.5 MiB/s warm-read 65.2 MiB/s cold-read 59.3 MiB/s
+  random.bin: apparent 67108864 allocated 67108864 buffered-write 66.5 MiB/s durable-write 61.9 MiB/s warm-read 2570.4 MiB/s cold-read 2665.1 MiB/s
+  zeros.bin: apparent 67108864 allocated 67108864 buffered-write 239.6 MiB/s durable-write 198.0 MiB/s warm-read 3771.0 MiB/s cold-read 4251.1 MiB/s
+  compressed.tgz: apparent 414930 allocated 415232 buffered-write 42.0 MiB/s durable-write 4.7 MiB/s warm-read 180.9 MiB/s cold-read 155.5 MiB/s
+  daemon CPU: 1.45s user+sys over 3.56s wall = 0.41x utilization (threads=1)
+  src (FUSE remount cold): read 67.9 MiB/s
+  random.bin (FUSE remount cold): read 2844.5 MiB/s
+  zeros.bin (FUSE remount cold): read 4459.8 MiB/s
+  compressed.tgz (FUSE remount cold): read 174.4 MiB/s
+fuse stats (1 threads, full):
+  fuse requests: max concurrency 1
+    write        n=     305 total=   1135.44 ms   p50=   1995.8 p95=  10794.8 p99=  11980.5 us
+    setattr      n=     305 total=    148.39 ms   p50=    505.7 p95=    793.4 p99=    851.4 us
+    read         n=    1334 total=     78.51 ms   p50=     47.4 p95=     99.2 p99=    147.6 us
+    create       n=     135 total=     37.25 ms   p50=    267.1 p95=    457.5 p99=    997.2 us
+    readdir      n=     812 total=     34.21 ms   p50=     41.0 p95=     50.9 p99=     61.3 us
+    getxattr     n=     646 total=      5.09 ms   p50=      6.8 p95=     15.6 p99=     20.4 us
+    getattr      n=     626 total=      4.51 ms   p50=      6.2 p95=     10.4 p99=     21.0 us
+    mkdir        n=      18 total=      4.48 ms   p50=    262.6 p95=    469.3 p99=    471.2 us
+    lookup       n=     310 total=      3.33 ms   p50=     11.4 p95=     16.5 p99=     27.2 us
+    open         n=     270 total=      1.96 ms   p50=      6.1 p95=     10.7 p99=     34.7 us
+    opendir      n=      74 total=      0.55 ms   p50=      6.3 p95=     10.4 p99=     17.7 us
+    flush        n=     411 total=      0.23 ms   p50=      0.5 p95=      0.9 p99=      1.3 us
+    release      n=     405 total=      0.18 ms   p50=      0.4 p95=      0.9 p99=      1.4 us
+    releasedir   n=      74 total=      0.04 ms   p50=      0.4 p95=      0.9 p99=      1.1 us
+    statfs       n=       2 total=      0.02 ms   p50=     11.6 p95=     11.6 p99=     11.6 us
+    init         n=       1 total=      0.00 ms   p50=      0.1 p95=      0.1 p99=      0.1 us
+  write request size histogram:
+           <4K: 52
+         4-16K: 60
+        16-64K: 17
+       64-256K: 3
+       256K-1M: 173
+           =1M: 0
+           >1M: 0
+  phase timings (cumulative ms, per-sample us p50/p95/p99):
+    search                       n=    2211 total=    798.11 ms   p50=    149.2 p95=    780.7 p99=   1834.6 us
+    search_sequence_rans         n=    1182 total=    486.71 ms   p50=    446.8 p95=    497.2 p99=    593.0 us
+    prune                        n=     763 total=    327.05 ms   p50=    377.2 p95=    798.5 p99=    836.8 us
+    search_sequence_dict         n=     101 total=    118.34 ms   p50=   1225.6 p95=   1300.9 p99=   1368.5 us
+    search_configurational       n=    1182 total=     79.86 ms   p50=     71.7 p95=     82.2 p99=    115.8 us
+    btree_mutation               n=     305 total=     67.95 ms   p50=    316.7 p95=    455.4 p99=    492.6 us
+    append_flush                 n=     763 total=     43.34 ms   p50=      8.3 p95=    412.0 p99=    485.4 us
+    search_zero_fill             n=    2211 total=     28.89 ms   p50=      0.0 p95=     32.3 p99=     39.3 us
+    search_byte_rans             n=    1182 total=     22.26 ms   p50=     14.6 p95=     35.6 p99=    124.4 us
+    validation                   n=    2211 total=     19.30 ms   p50=      7.6 p95=     10.7 p99=     43.5 us
+    search_dedup                 n=    2211 total=     13.61 ms   p50=      6.2 p95=      8.1 p99=     10.3 us
+    hash                         n=    2211 total=     11.60 ms   p50=      5.3 p95=      5.9 p99=      7.1 us
+    superblock                   n=     763 total=      1.23 ms   p50=      1.3 p95=      3.2 p99=      4.3 us
+    rmw_read                     n=      21 total=      0.36 ms   p50=     17.5 p95=     19.5 p99=     21.2 us
+    begin_tx_wait                n=     305 total=      0.02 ms   p50=      0.1 p95=      0.1 p99=      0.2 us
+  fsck: clean
+  backing store (post-GC): apparent 75122080 allocated 75128832; total corpus apparent 136213583
+  entropyfs effective density (apparent / allocated backing): 1.813x
+  settle: foreground -> settled (optimize + compact)
+  settle: optimize 5.30s (backing 75122080 -> 78396671)
+    optimize: scanned 2190 extents, rewrote 97, saved ~10636 persisted bytes (stale 0, no-gain 2093, errors 0) optimize: shared-dict pass scanned 132 extents, rewrote 112, saved ~70314 persisted bytes (no-gain 20, errors 0) optimize: model-bundle pass scanned 131 extents, rewrote 54, saved ~8636 persisted bytes (no-gain 35, errors 0) 
+  settle: full compaction 0.16s (backing 78396671 -> 68291744)
+    unreachable before: 10102265 bytes reclaimed: 10210550 bytes unreachable after: 238 bytes physical reconciliation: 68287136 B files   live canonical          68287132 B (100.0%)   dead indexed                   0 B (  0.0%)  [reclaimable]   index-hidden                   0 B (  0.0%)  [reclaimable] 
+  settled store: apparent 68291744 allocated 68296704; density (apparent/backing) 1.995x, (apparent/allocated) 1.994x
+  settle cost: 5.46s elapsed, 1.048x physical write amplification (appended 71566335 B)
+  settled fsck: clean

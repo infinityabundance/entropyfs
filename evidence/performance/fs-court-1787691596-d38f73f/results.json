@@ -1,0 +1,339 @@
+{
+ "fs": {
+  "ext4/src": {
+   "apparent": 1580925,
+   "allocated": 1855488,
+   "buffered_write_mbps": 476.4,
+   "durable_write_mbps": 2.4,
+   "warm_read_mbps": 522.6,
+   "cold_read_mbps": 446.7,
+   "cache": "warm-retained"
+  },
+  "ext4/random.bin": {
+   "apparent": 67108864,
+   "allocated": 67108864,
+   "buffered_write_mbps": 3860.0,
+   "durable_write_mbps": 639.4,
+   "warm_read_mbps": 9258.5,
+   "cold_read_mbps": 8699.7,
+   "cache": "warm-retained"
+  },
+  "ext4/zeros.bin": {
+   "apparent": 67108864,
+   "allocated": 67108864,
+   "buffered_write_mbps": 3650.7,
+   "durable_write_mbps": 553.2,
+   "warm_read_mbps": 9251.5,
+   "cold_read_mbps": 9243.9,
+   "cache": "warm-retained"
+  },
+  "ext4/compressed.tgz": {
+   "apparent": 414930,
+   "allocated": 417792,
+   "buffered_write_mbps": 200.9,
+   "durable_write_mbps": 4.7,
+   "warm_read_mbps": 187.4,
+   "cold_read_mbps": 177.9,
+   "cache": "warm-retained"
+  },
+  "xfs/src": {
+   "apparent": 1580925,
+   "allocated": 1875968,
+   "buffered_write_mbps": 331.9,
+   "durable_write_mbps": 19.1,
+   "warm_read_mbps": 467.6,
+   "cold_read_mbps": 360.7,
+   "cache": "warm-retained"
+  },
+  "xfs/random.bin": {
+   "apparent": 67108864,
+   "allocated": 67108864,
+   "buffered_write_mbps": 5529.0,
+   "durable_write_mbps": 848.9,
+   "warm_read_mbps": 16799.0,
+   "cold_read_mbps": 6096.0,
+   "cache": "warm-retained"
+  },
+  "xfs/zeros.bin": {
+   "apparent": 67108864,
+   "allocated": 67108864,
+   "buffered_write_mbps": 5798.9,
+   "durable_write_mbps": 702.5,
+   "warm_read_mbps": 15422.5,
+   "cold_read_mbps": 6395.2,
+   "cache": "warm-retained"
+  },
+  "xfs/compressed.tgz": {
+   "apparent": 414930,
+   "allocated": 417792,
+   "buffered_write_mbps": 194.9,
+   "durable_write_mbps": 5.1,
+   "warm_read_mbps": 201.0,
+   "cold_read_mbps": 155.1,
+   "cache": "warm-retained"
+  },
+  "xfs": {
+   "image_logical_bytes": 1073741824,
+   "image_allocated_bytes": 204021760,
+   "corpus_apparent_bytes": 136213583,
+   "density": 0.668
+  },
+  "btrfs/src": {
+   "apparent": 1580925,
+   "allocated": 1855488,
+   "buffered_write_mbps": 130.3,
+   "durable_write_mbps": 15.5,
+   "warm_read_mbps": 539.6,
+   "cold_read_mbps": 364.0,
+   "cache": "warm-retained"
+  },
+  "btrfs/random.bin": {
+   "apparent": 67108864,
+   "allocated": 67108864,
+   "buffered_write_mbps": 5695.9,
+   "durable_write_mbps": 833.2,
+   "warm_read_mbps": 16091.9,
+   "cold_read_mbps": 5376.4,
+   "cache": "warm-retained"
+  },
+  "btrfs/zeros.bin": {
+   "apparent": 67108864,
+   "allocated": 67108864,
+   "buffered_write_mbps": 5846.0,
+   "durable_write_mbps": 635.8,
+   "warm_read_mbps": 15970.4,
+   "cold_read_mbps": 5609.6,
+   "cache": "warm-retained"
+  },
+  "btrfs/compressed.tgz": {
+   "apparent": 414930,
+   "allocated": 417792,
+   "buffered_write_mbps": 193.3,
+   "durable_write_mbps": 5.6,
+   "warm_read_mbps": 206.5,
+   "cold_read_mbps": 179.3,
+   "cache": "warm-retained"
+  },
+  "btrfs": {
+   "image_logical_bytes": 1073741824,
+   "image_allocated_bytes": 144875520,
+   "corpus_apparent_bytes": 136213583,
+   "density": 0.94
+  },
+  "btrfs-zstd/src": {
+   "apparent": 1580925,
+   "allocated": 1855488,
+   "buffered_write_mbps": 116.0,
+   "durable_write_mbps": 16.0,
+   "warm_read_mbps": 517.8,
+   "cold_read_mbps": 291.1,
+   "cache": "warm-retained"
+  },
+  "btrfs-zstd/random.bin": {
+   "apparent": 67108864,
+   "allocated": 67108864,
+   "buffered_write_mbps": 5982.2,
+   "durable_write_mbps": 620.7,
+   "warm_read_mbps": 15323.2,
+   "cold_read_mbps": 5588.5,
+   "cache": "warm-retained"
+  },
+  "btrfs-zstd/zeros.bin": {
+   "apparent": 67108864,
+   "allocated": 67108864,
+   "buffered_write_mbps": 6388.4,
+   "durable_write_mbps": 705.6,
+   "warm_read_mbps": 14936.4,
+   "cold_read_mbps": 7755.5,
+   "cache": "warm-retained"
+  },
+  "btrfs-zstd/compressed.tgz": {
+   "apparent": 414930,
+   "allocated": 417792,
+   "buffered_write_mbps": 198.2,
+   "durable_write_mbps": 5.3,
+   "warm_read_mbps": 190.7,
+   "cold_read_mbps": 172.0,
+   "cache": "warm-retained"
+  },
+  "btrfs-zstd": {
+   "image_logical_bytes": 1073741824,
+   "image_allocated_bytes": 79032320,
+   "corpus_apparent_bytes": 136213583,
+   "density": 1.724
+  },
+  "squashfs-zstd/src": {
+   "apparent": 1580925,
+   "image": 327680,
+   "allocated": 327680,
+   "ratio": 4.825
+  },
+  "squashfs-zstd/random.bin": {
+   "apparent": 67108864,
+   "image": 67112960,
+   "allocated": 67112960,
+   "ratio": 1.0
+  },
+  "squashfs-zstd/zeros.bin": {
+   "apparent": 67108864,
+   "image": 4096,
+   "allocated": 4096,
+   "ratio": 16384.0
+  },
+  "squashfs-zstd/compressed.tgz": {
+   "apparent": 414930,
+   "image": 417792,
+   "allocated": 417792,
+   "ratio": 0.993
+  },
+  "erofs-lz4hc/src": {
+   "apparent": 1580925,
+   "image": 847872,
+   "allocated": 847872,
+   "ratio": 1.865
+  },
+  "erofs-lz4hc/random.bin": {
+   "apparent": 67108864,
+   "image": 67112960,
+   "allocated": 67112960,
+   "ratio": 1.0
+  },
+  "erofs-lz4hc/zeros.bin": {
+   "apparent": 67108864,
+   "image": 319488,
+   "allocated": 319488,
+   "ratio": 210.051
+  },
+  "erofs-lz4hc/compressed.tgz": {
+   "apparent": 414930,
+   "image": 417792,
+   "allocated": 417792,
+   "ratio": 0.993
+  }
+ },
+ "zstd": {
+  "-1/src": {
+   "apparent": 1580925,
+   "image": 384368,
+   "ratio": 4.113,
+   "write_mbps": 240.6
+  },
+  "-1/random.bin": {
+   "apparent": 67108864,
+   "image": 67110414,
+   "ratio": 1.0,
+   "write_mbps": 4313.8
+  },
+  "-1/zeros.bin": {
+   "apparent": 67108864,
+   "image": 2288,
+   "ratio": 29330.797,
+   "write_mbps": 6793.2
+  },
+  "-1/compressed.tgz": {
+   "apparent": 414930,
+   "image": 414955,
+   "ratio": 1.0,
+   "write_mbps": 205.4
+  },
+  "-1/src-per-64k": {
+   "apparent": 1580925,
+   "image": 437526,
+   "ratio": 3.613
+  },
+  "-19/src": {
+   "apparent": 1580925,
+   "image": 261440,
+   "ratio": 6.047,
+   "write_mbps": 5.8
+  },
+  "-19/random.bin": {
+   "apparent": 67108864,
+   "image": 67110414,
+   "ratio": 1.0,
+   "write_mbps": 11.1
+  },
+  "-19/zeros.bin": {
+   "apparent": 67108864,
+   "image": 2077,
+   "ratio": 32310.479,
+   "write_mbps": 1697.3
+  },
+  "-19/compressed.tgz": {
+   "apparent": 414930,
+   "image": 414955,
+   "ratio": 1.0,
+   "write_mbps": 32.4
+  },
+  "-19/src-per-64k": {
+   "apparent": 1580925,
+   "image": 354077,
+   "ratio": 4.465
+  }
+ },
+ "entropyfs": {
+  "entropyfs/src": {
+   "apparent": 1580925,
+   "allocated": 1611776,
+   "buffered_write_mbps": 10.1,
+   "durable_write_mbps": 5.5,
+   "warm_read_mbps": 65.2,
+   "cold_read_mbps": 59.3,
+   "cache": "warm-retained"
+  },
+  "entropyfs/random.bin": {
+   "apparent": 67108864,
+   "allocated": 67108864,
+   "buffered_write_mbps": 66.5,
+   "durable_write_mbps": 61.9,
+   "warm_read_mbps": 2570.4,
+   "cold_read_mbps": 2665.1,
+   "cache": "warm-retained"
+  },
+  "entropyfs/zeros.bin": {
+   "apparent": 67108864,
+   "allocated": 67108864,
+   "buffered_write_mbps": 239.6,
+   "durable_write_mbps": 198.0,
+   "warm_read_mbps": 3771.0,
+   "cold_read_mbps": 4251.1,
+   "cache": "warm-retained"
+  },
+  "entropyfs/compressed.tgz": {
+   "apparent": 414930,
+   "allocated": 415232,
+   "buffered_write_mbps": 42.0,
+   "durable_write_mbps": 4.7,
+   "warm_read_mbps": 180.9,
+   "cold_read_mbps": 155.5,
+   "cache": "warm-retained"
+  },
+  "daemon_cpu_threads_1": {
+   "cpu_secs": 1.45,
+   "wall_secs": 3.56,
+   "utilization": 0.41
+  },
+  "src/cold_read_mbps": "67.9",
+  "random.bin/cold_read_mbps": "2844.5",
+  "zeros.bin/cold_read_mbps": "4459.8",
+  "compressed.tgz/cold_read_mbps": "174.4",
+  "density": {
+   "apparent": 136213583,
+   "backing_apparent": 75122080,
+   "backing_allocated": 75128832,
+   "ratio": 1.813
+  },
+  "settled": {
+   "foreground_apparent": 75122080,
+   "foreground_allocated": 75128832,
+   "settled_apparent": 68291744,
+   "settled_allocated": 68296704,
+   "settle_elapsed_s": 5.46,
+   "optimize_wall_s": 5.3,
+   "compact_wall_s": 0.16,
+   "settle_appended_bytes": 71566335,
+   "settle_write_amp": 1.048,
+   "settled_density": 1.994
+  }
+ }
+}
