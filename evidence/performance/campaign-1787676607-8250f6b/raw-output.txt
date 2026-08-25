@@ -1,0 +1,79 @@
+entropyfs evidence campaign — 1787676607
+revision: 8250f6b
+  structured [full] 5 runs: write 1282.2 MiB/s (p50 45433µs, p95 62402µs, p99 62402µs) read 2949.0 MiB/s fsync p50 1665µs p95 3282µs p99 3868µs physical median 50528 ratio 1328.152x
+  src [full] 3 runs: write 32.4 MiB/s (p50 68271µs, p95 68294µs, p99 68294µs) read 155.6 MiB/s fsync p50 1646µs p95 2627µs p99 2627µs physical median 570940 ratio 4.070x
+  urandom [full] 3 runs: write 36.6 MiB/s (p50 872632µs, p95 874500µs, p99 874500µs) read 4030.2 MiB/s fsync p50 1652µs p95 17149µs p99 17149µs physical median 33652515 ratio 0.997x
+  compressed-z19 [full] 3 runs: write 40.8 MiB/s (p50 7978µs, p95 8120µs, p99 8120µs) read 3749.1 MiB/s fsync p50 1646µs p95 2491µs p99 2491µs physical median 344409 ratio 0.994x
+
+== leave-one-out ablation (structured) ==
+  full       physical        50528 ratio 1328.152x write   1275.7 MiB/s cpu 0.040+0.000s (p95 write 45327µs)
+  raw        physical       319070 ratio 210.326x write   1480.5 MiB/s cpu 0.050+0.000s (p95 write 38389µs)
+  raw-byte-rans physical       267181 ratio 251.174x write    653.9 MiB/s cpu 0.090+0.000s (p95 write 92923µs)
+  no-exact-ref physical        67868 ratio 988.815x write   1214.7 MiB/s cpu 0.050+0.000s (p95 write 47712µs)
+  no-base    physical        50528 ratio 1328.152x write   1243.3 MiB/s cpu 0.050+0.000s (p95 write 46272µs)
+  no-temporal physical        50528 ratio 1328.152x write   1267.0 MiB/s cpu 0.050+0.000s (p95 write 45593µs)
+  no-config  physical        64976 ratio 1032.825x write    801.4 MiB/s cpu 0.080+0.000s (p95 write 74960µs)
+  no-rans    physical       112301 ratio 597.580x write   1377.2 MiB/s cpu 0.050+0.000s (p95 write 41428µs)
+  no-byte-rans physical        50528 ratio 1328.152x write   1260.2 MiB/s cpu 0.050+0.000s (p95 write 46007µs)
+  no-sequence-rans physical       112301 ratio 597.580x write   1334.8 MiB/s cpu 0.040+0.010s (p95 write 42801µs)
+  no-sequence-dict physical        50528 ratio 1328.152x write   1256.2 MiB/s cpu 0.050+0.000s (p95 write 46023µs)
+  no-universe physical        50528 ratio 1328.152x write   1295.9 MiB/s cpu 0.050+0.000s (p95 write 44853µs)
+  no-dsfb    physical        50528 ratio 1328.152x write   1278.2 MiB/s cpu 0.050+0.000s (p95 write 45250µs)
+
+== cumulative ladder A0-A8 (structured) ==
+  A0-raw             physical       319070 ratio 210.326x write   1508.9 MiB/s cpu 0.040+0.000s (p95 write 37803µs)
+  A1-byte-rans       physical       267181 ratio 251.174x write    645.6 MiB/s cpu 0.090+0.010s (p95 write 94547µs)
+  A2-exact-ref       physical       251881 ratio 266.431x write    645.8 MiB/s cpu 0.100+0.000s (p95 write 94102µs)
+  A3-base-residual   physical       251881 ratio 266.431x write    642.4 MiB/s cpu 0.090+0.000s (p95 write 94708µs)
+  A4-config          physical       112301 ratio 597.580x write   1350.7 MiB/s cpu 0.050+0.000s (p95 write 42676µs)
+  A5-temporal-bases  physical       112301 ratio 597.580x write   1345.3 MiB/s cpu 0.040+0.010s (p95 write 42426µs)
+  A6-universe        physical       112301 ratio 597.580x write   1345.4 MiB/s cpu 0.050+0.000s (p95 write 42485µs)
+  A7-dsfb            physical       112301 ratio 597.580x write   1344.0 MiB/s cpu 0.040+0.000s (p95 write 42570µs)
+  A8-background      physical       112301 ratio 597.580x write   1353.9 MiB/s cpu 0.050+0.000s (p95 write 42177µs)
+  E1-sequence-rans   physical        50528 ratio 1328.152x write   1262.3 MiB/s cpu 0.050+0.000s (p95 write 45903µs)
+  E2-sequence-dict   physical        50528 ratio 1328.152x write   1246.8 MiB/s cpu 0.050+0.010s (p95 write 45492µs)
+
+== DSFB search-budget investigation (structured) ==
+  full      write median  1266.6 MiB/s (min 1235.6, max 1281.4) cpu median 0.050s physical [50528, 50528, 50528, 50528, 50528]
+  no-dsfb   write median  1256.7 MiB/s (min 1252.8, max 1306.2) cpu median 0.050s physical [50528, 50528, 50528, 50528, 50528]
+  physical identical across modes: true
+
+== versioned experiment (H2) ==
+  versioned [full] 3 runs: write 81.7 MiB/s (p50 34925µs, p95 93538µs, p99 95675µs) read 544.1 MiB/s fsync p50 1652µs p95 5137µs p99 5137µs physical median 1392236 ratio 3.013x
+  versioned [no-base] 3 runs: write 78.7 MiB/s (p50 54201µs, p95 57397µs, p99 58149µs) read 1558.3 MiB/s fsync p50 1656µs p95 6468µs p99 6468µs physical median 1214754 ratio 3.453x
+  shuffled [full] 3 runs: write 66.1 MiB/s (p50 62164µs, p95 78755µs, p99 80360µs) read 855.7 MiB/s fsync p50 1642µs p95 5524µs p99 5524µs physical median 2345529 ratio 1.788x
+  sequential median reachable: 1392236 bytes (3.013x)
+  shuffled    median reachable: 2345529 bytes (1.788x)
+  base+residual savings vs shuffled: 953293 bytes (40.6% of shuffled reachable)
+  post-GC reachable: sequential full 1265786 (3.314x) / no-base 1165681 (3.598x) / shuffled 2287928 (1.833x)
+
+== GC and optimizer traffic ==
+  unreachable before 5537444 → reclaimed 5537444 → after 2274864; physical 39350926 → 35927915; gc 0.014s; optimizer scanned 512 rewrote 0 saved 0
+  unreachable by record tag (post-GC): {"BtreeNode": 2274626, "Root": 238}
+
+== post-GC physical footprint ==
+  src: logical 2323661 → reachable 570940 (4.07x) / total backing 576495 (4.03x) / allocated 581632 (4.00x)
+  structured: logical 67108864 → reachable 50528 (1328.15x) / total backing 56083 (1196.60x) / allocated 61440 (1092.27x)
+  urandom: logical 33554432 → reachable 33652515 (1.00x) / total backing 33658070 (1.00x) / allocated 33665024 (1.00x)
+  compressed-z19: logical 342380 → reachable 344409 (0.99x) / total backing 349964 (0.98x) / allocated 356352 (0.96x)
+
+== baselines ==
+  waived: btrfs with compression: waived — writable compressed-FS baseline requires root for loop-mounting a test image
+  waived: EROFS/SquashFS: waived — read-only compressed-image baseline deferred (requires root and/or mkfs.erofs)
+  raw file (ext4): 3461.4 MiB/s write, ratio 1.000x
+  zstd -1: 2323661 → 501182 bytes (4.636x), 0.005s
+  zstd -19: 2323661 → 342380 bytes (6.787x), 0.318s
+  zstd -1 per 64KiB: 2323661 → 603879 bytes (3.848x), 0.023s
+  zstd -19 per 64KiB: 2323661 → 501238 bytes (4.636x), 0.444s
+  direct byte rANS (same backend, src corpus): 2323661 → 1423258 bytes (1.633x)
+  standalone SequenceRans (src corpus): 2323661 → 640644 bytes (3.627x)
+device nvme1n1p1: 478296 sectors written (244887552 bytes), 56 sectors read (28672 bytes)
+
+== admission checklist (methodology §8) ==
+  [OK ] benchmark context complete (revision, Cargo.lock, kernel, CPU, governor, device, cache state, command) — environment.json (revision, cargo_lock_hash, kernel_*, cpu_*, governor, store_device, cache_state, command) + corpus-manifest.json archived in this directory
+  [OK ] every required byte is counted (payload/models/residuals/descriptors/metadata/integrity/allocator/unreclaimed) — per-run Accounting tables pass the reachable-bytes cross-check
+  [OK ] all listed baselines run or explicitly waived — raw file present; zstd present; direct rANS present; waivers: 2
+  [OK ] ablations identify which mechanism caused the gain (cumulative ladder A0-A8 + leave-one-out) — leave-one-out table 13 rows; cumulative ladder 11 rows (A0-A8)
+  [OK ] negative controls included (random → RAW, compressed → no gain, shuffled history → temporal gains disappear) — urandom ratio 0.997x (expected ≤1.5x); compressed present true; shuffled present true
+  [OK ] materialized output hashes match the input corpus hashes — result-hashes.json: all runs match corpus content hashes
+  [OK ] raw result artifacts are archived — raw-output.txt, results.json, results.csv, environment.json, corpus-manifest.json, result-hashes.json, report.md

@@ -15,6 +15,8 @@ they document are admitted — nothing more.
 | `campaign-1787668526-d04227f/` | `d04227f` | **Phase 8A + 8B sealed**: cumulative ladder A0–A8 + leave-one-out tables; the derived chunk-index rebuild in GC (8B) evidenced by the post-GC permanent footprint in the H2 experiment. All §8 admission rules OK. |
 | `campaign-1787669923-b165d60/` | `b165d60` | **Phase 8C sealed**: in-batch dedup visibility (group-commit batches now dedup against their own pending entries). The ladder's A2-dedup step drops from 115,976 B to 64,976 B on the structured corpus; A8 (background pass) densifies 54,353 → 50,528 B; full = 54,353 B (1,234.7×). The `d04227f` “dedup measures 0” finding was the pre-fix measurement and is superseded by this campaign (the controlled before/after of the fix). All §8 admission rules OK. NOTE (amended by `923df7b`): this campaign's dedup rows measure the EXACT_REF *representation* only; content-addressed object sharing is a store invariant separately accounted from `923df7b`, and its A1-rans / “direct rANS” rows included SequenceRans (the gates were not yet split). |
 | `campaign-1787671040-923df7b/` | `923df7b` | **Attribution correction + transaction-local CAS canonicalization** (Phase-8C v2). Split gates: A1 is pure byte rANS; SequenceRans is the post-registration E1 step; `allow_exact_ref` gates only the alias representation (CAS sharing is an invariant). Physical fix: duplicate payload/B-tree/model records are never re-appended (one record per content id per transaction). Structured: E1 = 50,528 B (1,328×); **post-GC total backing 55,921 B (1,200×), allocated blocks 61,440 B (1,092×)** vs the 5.1 MB pre-GC backing of earlier campaigns. zstd-per-64KiB diagnostic: SequenceRans 3.556× within 5% of zstd-per-64K 3.739× (whole-file zstd -1 4.420×) ⇒ the gap is cross-chunk context → SequenceDict direction. All §8 admission rules OK. |
+| `campaign-1787674068-4892644/` | `4892644` | **Phase 9A sealed**: transaction-local COW-intermediate pruning. The incompressible physical floor collapses to ~1.00× (urandom reachable 33,652,515 B / total backing 33,658,070 B / allocated 33,665,024 B); `unreachable_bytes_by_record_tag` evidence proves the post-GC gap was B-tree intermediates. All §8 admission rules OK. |
+| `campaign-1787676607-8250f6b/` | `8250f6b` | **Phase 9B sealed (SequenceDict)**: cross-chunk dictionary match coding (tag 0x0F, feature bit 12). src corpus 4.070× (up from 3.51×) — EntropyFS full now beats standalone SequenceRans (3.627×) and zstd-per-64KiB -1 (3.848×); the whole-file zstd gap (-1 4.636× / -19 6.787×) is now genuinely cross-64K-window context. E2 ladder step present; leave-one-out 13 rows; ladder 11 rows. urandom 0.997× reachable / 1.00× backing (negative control holds). H2 temporal signal preserved (sequential 3.013× vs shuffled 1.788×, +40.6%); post-GC the base chain still costs more than no-base (1,265,786 vs 1,165,681 B) — recorded as-is per the “accept whatever number comes out” rule. GC traffic: optimizer scanned 512, rewrote 0 — the foreground SequenceDict write path already densifies sequential edits (regression test updated accordingly). All §8 admission rules OK. |
 | `fuse-court-1787659785-027c959-head/` | `027c959` | FUSE-frontend perf court, **after** Phase 6 (current main). |
 | `fuse-court-1787659914-709a710-before/` | `709a710` | FUSE-frontend perf court, **before** Phase 6 (same workloads, same workload hash `82442892…`). |
 | `fuse-court-1787664579-d90772c/` | `d90772c` | FUSE-frontend perf court, **Phase 8** (concurrency refactor + writeback negotiation + batch group commit + SequenceRans floor; same deterministic shake_128 payload, same bindgen workload `82442892…`). |
@@ -364,6 +366,79 @@ vs 334.7 = 2.29× → SequenceRans-era 773.9 vs 717.1 = ~8% → CAS-era
 1,120.8 vs 1,106.1 = ~1.3%), all with byte-identical physical
 representations, is the controlled record of a search-budget lever whose
 marginal benefit shrank as the floor improved.
+
+## Campaign highlights (`campaign-1787676607-8250f6b` — Phase 9B SequenceDict)
+
+Same methodology, same machine, same corpora (the src pack grew to
+2,323,661 B with the new code). This campaign seals the cross-chunk
+dictionary family:
+
+**The cross-chunk context gap is now attributable, not speculative.** On
+the src pack:
+
+```text
+direct byte rANS           1.633×
+SequenceRans standalone    3.627×
+EntropyFS full             4.070×   ← > standalone SequenceRans: the
+                                      dictionary adds cross-chunk context
+zstd -1 per 64 KiB         3.848×   ← EntropyFS full now beats per-64K
+zstd -1 whole file         4.636×
+zstd -19 whole file        6.787×
+```
+
+The 923df7b diagnostic predicted exactly this: SequenceRans was within 5%
+of zstd-per-64K, and the remaining gap was cross-chunk context. With
+SequenceDict (previous same-file chunk), EntropyFS full (4.070×) beats
+both standalone SequenceRans (3.627×) and zstd-per-64K -1 (3.848×). The
+remaining ~12% to whole-file zstd -1 is the packed-stream caveat the
+reviewer flagged: `source_tree_pack` concatenates files, so whole-file
+zstd benefits from matches crossing *original file* boundaries, which a
+previous-chunk-of-same-real-file dictionary cannot reach; the fs-court
+mount-level corpus is the place to test whether that gap persists on a
+real tree.
+
+**E2 ladder step and leave-one-out row added** (13 leave-one-out rows,
+11 ladder rows): on the structured corpus both measure 0 (the corpus is
+one single-version batch of deduped/configurational chunks — there is no
+cross-chunk dictionary leverage to find). The `no-sequence-dict` row and
+E2 step exist so the mechanism's contribution is always visible.
+
+**H2 temporal signal preserved; the base-chain cost is recorded as-is.**
+Sequential 3.013× vs shuffled 1.788× (+40.6% temporal savings); post-GC
+sequential full 1,265,786 B vs no-base 1,165,681 B — base coding still
+costs more than re-encoding on the versioned corpus. This is the
+“accept whatever number comes out” outcome: the index artifact was
+removed in 8B, and the base-chain cost is real. SequenceDict does not
+change it (the versioned corpus chunks are dict-correlated too, but the
+final version's chunks are already deduped against each other).
+
+**Background optimizer: scanned 512, rewrote 0.** The foreground
+SequenceDict write path now densifies sequential edits at write time, so
+the pass has nothing left to do on this corpus (the regression test
+`background_pass_densifies_sequential_edits` was updated to assert the
+foreground densification + pass byte-exactness instead of demanding a
+pass rewrite). The pass still rebases RAW→SequenceDict where the
+foreground was gated off (tested in `tests/seqdict.rs`).
+
+**Three latent defects surfaced by SequenceDict chains, fixed and
+sealed in this revision:**
+
+1. `flatten_if_deep` validated flattened updates through the bare store,
+   which failed with `MissingObject` for object-backed families (the
+   update's own staged objects were invisible). It now resolves them.
+2. `current_persisted_bytes` counted only RAW/RANS object ids, so an
+   object-backed incumbent (SEQUENCE_RANS/SEQUENCE_DICT/SPARSE_BLOCK64)
+   looked nearly free and every densification was refused. It now
+   accounts every referenced object.
+3. Background candidate ordering used marginal bytes, making an
+   incumbent whose objects already exist immune to replacement. The
+   background search now orders by full persisted bytes (the foreground
+   keeps marginal bytes so reuse wins).
+
+**Everything else stable:** urandom 0.997× reachable / 1.00× backing;
+compressed-z19 0.99×; structured 1,328×; GC traffic 5,537,444 B
+unreachable → reclaimed, physical 39.4 → 35.9 MB, 0.014 s; DSFB physical
+identical (50,528 B), write median 1,266.6 vs 1,256.7 MiB/s (~0.8%).
 
 ## Admission status
 

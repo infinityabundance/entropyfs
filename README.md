@@ -59,6 +59,8 @@ physical storage (RAW fallback) — that is a success condition, not a failure.
 | 8 (8B) | Derived chunk-index rebuild: GC rebuilds the chunk index to exactly the reachable set (live extents + transitive reference closure), so overwritten unsnapshotted content cannot grow it permanently. H2 post-GC permanent footprint: sequential full 1,528,175 → **1,366,816 B** (10.6% pruned); regression-tested invariant `chunk_index_entries ≤ reachable + closure`, repeated GC never regrows the index, remount + fsck clean | ✅ implemented + evidence-sealed (`campaign-1787668526-d04227f/`) |
 | 8 (8C) | Attribution correction + transaction-local CAS canonicalization: `allow_exact_ref` gates only the EXACT_REF alias representation (content-addressed object sharing is a store invariant, separately accounted: `cas_shared_bytes_saved` vs `exact_ref_bytes_saved`); `allow_rans` split into byte rANS (A1, pure again) + SequenceRans (E1, post-registration); duplicate records are never re-appended (one record per content id per transaction); duplicate chunks short-circuit to the canonical descriptor or alias, marginally cheapest (existing objects cost zero); post-GC footprint evidence (reachable/total backing/allocated blocks). Structured: E1 50,528 B (1,328×), post-GC allocated 61,440 B = **1,092×** (was 5.1 MB pre-GC backing); zstd-per-64K diagnostic: SequenceRans within 5% of zstd-per-64K ⇒ cross-chunk context is the next lever (SequenceDict) | ✅ implemented + evidence-sealed (`campaign-1787671040-923df7b/`) |
 | 8 (8H) | Competitive filesystem court: `tools/fs-court.sh` measures the same corpora across ext4, zstd -1/-3/-19, and mounted EntropyFS; XFS/Btrfs±zstd/EROFS/SquashFS recorded as explicit waivers with the exact root-capable-VM commands. First run `fs-court-1787669946-b165d60`: EntropyFS effective density 1.488× incl. a 64 MiB incompressible control; zeros 453/4374 MiB/s write/read, random 85/3532 MiB/s, fsck clean | ✅ tooling + first run sealed (VM run clears the loop-mount waivers) |
+| 9 (9A) | Physical floor: transaction-local COW-intermediate pruning — the incompressible backing floor collapses to ~1.00× (urandom reachable 33,652,515 / total backing 33,658,070 / allocated 33,665,024 B); `unreachable_bytes_by_record_tag` evidence identifies the pruned record class; ENOSPC guard on the pruned footprint | ✅ implemented + evidence-sealed (`campaign-1787674068-4892644/`) |
+| 9 (9B) | **SequenceDict** — cross-chunk dictionary match coding (tag 0x0F, feature bit 12): the previous same-file chunk as an external ≤64 KiB dictionary beside local history, with a fourth copy-source stream (LOCAL backward distance vs DICT absolute offset; DICT continuation advances the offset). Reference depth accounted like a base chain (`dictionary chain + 1 ≤ max_reference_depth`), so cross-chunk references can never defeat bounded random access; terminal anchors emerge automatically at the depth cap. src corpus **4.070×** — beats standalone SequenceRans (3.627×) and zstd-per-64KiB -1 (3.848×). Also fixed three latent defects it surfaced: `flatten_if_deep` staged-object resolution (`MissingObject`), `current_persisted_bytes` object accounting (object-backed incumbents looked free), background full-byte candidate ordering | ✅ implemented + evidence-sealed (`campaign-1787676607-8250f6b/`) |
 
 ## Measured results
 
@@ -108,6 +110,16 @@ oversized-descriptor fix (Phase 6) eliminated.
   its marginal value now is small on this tiny synthetic corpus and its
   proper counters are deferred. Historical numbers are preserved in
   `evidence/performance/INDEX.md`; the 2.29× is not a current claim.
+- The source-corpus progression is now sealed across three eras:
+  `923df7b` pure byte rANS 1.633× / standalone SequenceRans 3.556× (with
+  zstd-per-64KiB -1 at 3.739× — the per-extent floor was within 5%, and
+  the gap to whole-file zstd was cross-chunk context), and `8250f6b`
+  **EntropyFS full 4.070× with SequenceDict** — beating standalone
+  SequenceRans (3.627×) and zstd-per-64KiB -1 (3.848×). The remaining
+  ~12% to whole-file zstd -1 (4.636×) is the packed-stream caveat
+  (`source_tree_pack` concatenates files, so whole-file zstd crosses
+  original file boundaries); whether it persists on a real mounted tree
+  is an open mount-level question (`fs-court.sh` corpus).
 - The campaign's H2 experiment (synthetic drift corpus) is now a sealed
   **controlled series**: `67d977a` +7.2% (RANS-era floor), `a6641d1`
   −24% (SequenceRans floor, positional residuals only), `43bf17e`
