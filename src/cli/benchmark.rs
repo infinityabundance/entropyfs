@@ -1,16 +1,24 @@
-//! `entropyfs benchmark <store>`: a reproducible write/read benchmark over
+//! `entropyfs benchmark [<store>]`: a reproducible write/read benchmark over
 //! a synthetic corpus (§41–45), emitting ablation evidence (spec §43).
 //!
 //! Every claimed benefit must be attributable: `--ablation-all` runs the
-//! same corpus through each candidate configuration and prints a
-//! comparison table so savings can be assigned to exact dedup, rANS,
-//! base+residual channels, configurational coding, and DSFB ranking.
+//! same corpus through each candidate configuration and prints a comparison
+//! table so savings can be assigned to exact dedup, rANS, base+residual
+//! channels, configurational coding, and DSFB ranking.
+//!
+//! `--campaign <out-root>` runs the full evidence-sealing campaign
+//! (`src/evidence/campaign.rs`, methodology §1–§9): repeated runs, exact
+//! revision and Cargo.lock, device/kernel/governor context, corpus hashes,
+//! representation distributions, physical allocation, result hashes,
+//! p50/p95/p99, fsync latency, device writes, GC traffic, baselines and raw
+//! outputs, archived under `<out-root>/campaign-<ts>-<rev>/`.
 
 #![forbid(unsafe_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use crate::evidence::campaign::CampaignOptions;
 use crate::optimizer::policy::OptimizeOptions;
 use crate::store::transaction::CrashHooks;
 use crate::store::{Store, StoreConfig};
@@ -18,77 +26,34 @@ use crate::store::{Store, StoreConfig};
 /// Options for benchmark.
 #[derive(Debug, Clone, clap::Args)]
 pub struct BenchmarkArgs {
-    /// Store directory.
+    /// Store directory (not required with --campaign).
     #[arg(value_name = "STORE")]
-    pub store: PathBuf,
+    pub store: Option<PathBuf>,
     /// Total logical bytes to write (MiB).
     #[arg(long, default_value_t = 64)]
     pub size_mib: u64,
     /// Run a single ablation mode (full | raw | raw-rans | no-dedup |
-    /// no-base | no-config | no-rans | no-dsfb).
+    /// no-base | no-config | no-rans | no-universe | no-dsfb).
     #[arg(long)]
     pub ablation: Option<String>,
     /// Run all ablation modes on fresh stores and print the comparison.
     #[arg(long)]
     pub ablation_all: bool,
-}
-
-/// One ablation configuration: name + option set.
-struct AblationMode {
-    name: &'static str,
-    options: OptimizeOptions,
-}
-
-fn modes() -> Vec<AblationMode> {
-    vec![
-        AblationMode {
-            name: "full",
-            options: OptimizeOptions::default(),
-        },
-        AblationMode {
-            name: "raw",
-            options: OptimizeOptions::raw_only(),
-        },
-        AblationMode {
-            name: "raw-rans",
-            options: OptimizeOptions::raw_rans(),
-        },
-        AblationMode {
-            name: "no-dedup",
-            options: OptimizeOptions {
-                allow_dedup: false,
-                ..Default::default()
-            },
-        },
-        AblationMode {
-            name: "no-base",
-            options: OptimizeOptions {
-                allow_bases: false,
-                ..Default::default()
-            },
-        },
-        AblationMode {
-            name: "no-config",
-            options: OptimizeOptions {
-                allow_configurational: false,
-                ..Default::default()
-            },
-        },
-        AblationMode {
-            name: "no-rans",
-            options: OptimizeOptions {
-                allow_rans: false,
-                ..Default::default()
-            },
-        },
-        AblationMode {
-            name: "no-dsfb",
-            options: OptimizeOptions {
-                allow_dsfb_ranking: false,
-                ..Default::default()
-            },
-        },
-    ]
+    /// Run the full evidence-sealing campaign, archiving under this
+    /// directory (e.g. `evidence/performance`).
+    #[arg(long, value_name = "DIR")]
+    pub campaign: Option<PathBuf>,
+    /// Campaign repetition count for throughput corpora.
+    #[arg(long, default_value_t = 5)]
+    pub runs: usize,
+    /// Repository root for revision/Cargo.lock/source-tree corpus
+    /// (defaults to the directory this binary was built from).
+    #[arg(long, value_name = "DIR")]
+    pub repo_root: Option<PathBuf>,
+    /// Campaign scratch directory — must live on the backing storage
+    /// device, not tmpfs (default `<repo>/target/campaign-scratch`).
+    #[arg(long, value_name = "DIR")]
+    pub scratch: Option<PathBuf>,
 }
 
 /// Results of one benchmark run.
@@ -212,28 +177,44 @@ fn representation_distribution(
 
 /// Run benchmark.
 pub fn run(args: &BenchmarkArgs) -> Result<(), String> {
-    crate::fsck::ensure_unmounted(&args.store)?;
+    if let Some(campaign_dir) = &args.campaign {
+        return run_campaign(args, campaign_dir);
+    }
+    let store_path = args
+        .store
+        .clone()
+        .ok_or("a STORE argument is required (or pass --campaign <dir>)")?;
+    crate::fsck::ensure_unmounted(&store_path)?;
 
     if args.ablation_all {
         return run_ablation_table(args);
     }
     if let Some(name) = &args.ablation {
-        let mode = modes()
+        let mode = OptimizeOptions::ablation_modes()
             .into_iter()
-            .find(|m| m.name == name)
-            .ok_or_else(|| format!("unknown ablation mode '{name}' (full|raw|raw-rans|no-dedup|no-base|no-config|no-rans|no-dsfb)"))?;
+            .find(|(n, _)| n == name)
+            .ok_or_else(|| {
+                format!(
+                    "unknown ablation mode '{name}' ({})",
+                    OptimizeOptions::ablation_modes()
+                        .iter()
+                        .map(|(n, _)| *n)
+                        .collect::<Vec<_>>()
+                        .join("|")
+                )
+            })?;
         let dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
         Store::create(dir.path(), &StoreConfig::default(), [0x66; 16])
             .map_err(|e| e.to_string())?;
-        let r = run_corpus(dir.path(), args.size_mib, mode.options)?;
-        print_run(&r, mode.name);
+        let r = run_corpus(dir.path(), args.size_mib, mode.1)?;
+        print_run(&r, mode.0);
         return Ok(());
     }
 
     // Default: full optimization written to the given store (original
     // semantics: reproducible write/read benchmark over the store).
     let config = StoreConfig::default();
-    let mut store = Store::open(&args.store, &config).map_err(|e| e.to_string())?;
+    let mut store = Store::open(&store_path, &config).map_err(|e| e.to_string())?;
     let inode = crate::store::inode::Inode::new_file(1000, 1000, 0o644);
     {
         let mut tx = store.begin_tx().map_err(|e| e.to_string())?;
@@ -306,6 +287,30 @@ pub fn run(args: &BenchmarkArgs) -> Result<(), String> {
     Ok(())
 }
 
+/// The evidence-sealing campaign (methodology §1–§9).
+fn run_campaign(args: &BenchmarkArgs, out_root: &Path) -> Result<(), String> {
+    let repo_root = args
+        .repo_root
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    let scratch = args
+        .scratch
+        .clone()
+        .unwrap_or_else(|| repo_root.join("target").join("campaign-scratch"));
+    let opts = CampaignOptions {
+        out_root: out_root.to_path_buf(),
+        repo_root,
+        scratch_dir: scratch,
+        runs: args.runs,
+        size_mib: args.size_mib,
+        cache_state: "warm (page cache retained; every run uses a fresh store)".into(),
+        policy_mode: "balanced".into(),
+    };
+    let dir = crate::evidence::campaign::run(&opts)?;
+    println!("campaign complete: {}", dir.display());
+    Ok(())
+}
+
 fn print_run(r: &RunResult, name: &str) {
     println!(
         "benchmark: {name}: {logical} logical bytes",
@@ -329,12 +334,12 @@ fn print_run(r: &RunResult, name: &str) {
 /// Run every ablation mode on a fresh store and print the attribution.
 fn run_ablation_table(args: &BenchmarkArgs) -> Result<(), String> {
     let mut rows: Vec<RunResult> = Vec::new();
-    for mode in modes() {
+    for (name, options) in OptimizeOptions::ablation_modes() {
         let dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
         Store::create(dir.path(), &StoreConfig::default(), [0x66; 16])
             .map_err(|e| e.to_string())?;
-        let mut r = run_corpus(dir.path(), args.size_mib, mode.options)?;
-        r.mode = mode.name;
+        let mut r = run_corpus(dir.path(), args.size_mib, options)?;
+        r.mode = name;
         rows.push(r);
     }
     println!(
@@ -374,6 +379,7 @@ fn run_ablation_table(args: &BenchmarkArgs) -> Result<(), String> {
             "no-base" => "base+residual channels",
             "no-config" => "configurational coding",
             "no-rans" => "rANS",
+            "no-universe" => "entropy universes",
             "no-dsfb" => "DSFB ranking",
             _ => r.mode,
         };

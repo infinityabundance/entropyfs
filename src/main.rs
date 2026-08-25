@@ -12,7 +12,10 @@ mod cli;
 // The binary re-exports the library modules the CLI addresses as
 // `crate::…` (bin + lib share the crate name `entropyfs`).
 #[allow(unused_imports)]
-use entropyfs::{core, dsfb, entropy, format, fsck, fuse, optimizer, platform, rans, store, ublk};
+use entropyfs::{
+    cache, core, dsfb, entropy, evidence, format, fsck, fuse, integrity, optimizer, platform, rans,
+    store, ublk,
+};
 
 /// The entropy-native Linux filesystem.
 #[derive(Parser)]

@@ -8,6 +8,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod campaign;
 pub mod casefile;
+pub mod corpus;
+pub mod environment;
 pub mod manifest;
 pub mod receipt;

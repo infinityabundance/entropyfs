@@ -79,4 +79,57 @@ impl OptimizeOptions {
             Channel::Raw => true,
         }
     }
+
+    /// Every ablation configuration (spec §43, methodology §4 ladder
+    /// A0–A8): the single source of truth for the CLI and the evidence
+    /// campaign.
+    pub fn ablation_modes() -> Vec<(&'static str, OptimizeOptions)> {
+        vec![
+            ("full", OptimizeOptions::default()),
+            ("raw", OptimizeOptions::raw_only()),
+            ("raw-rans", OptimizeOptions::raw_rans()),
+            (
+                "no-dedup",
+                OptimizeOptions {
+                    allow_dedup: false,
+                    ..Default::default()
+                },
+            ),
+            (
+                "no-base",
+                OptimizeOptions {
+                    allow_bases: false,
+                    ..Default::default()
+                },
+            ),
+            (
+                "no-config",
+                OptimizeOptions {
+                    allow_configurational: false,
+                    ..Default::default()
+                },
+            ),
+            (
+                "no-rans",
+                OptimizeOptions {
+                    allow_rans: false,
+                    ..Default::default()
+                },
+            ),
+            (
+                "no-universe",
+                OptimizeOptions {
+                    allow_universe: false,
+                    ..Default::default()
+                },
+            ),
+            (
+                "no-dsfb",
+                OptimizeOptions {
+                    allow_dsfb_ranking: false,
+                    ..Default::default()
+                },
+            ),
+        ]
+    }
 }
