@@ -54,14 +54,14 @@ the campaigns:
 | Criterion | Target | Measured | Verdict |
 |-----------|--------|----------|---------|
 | materially lower physical storage | clear double-digit % over best conventional baseline | structured corpus 845× (dedup-dominated: 4 unique chunks — not a general claim); duplicated trees dedup via EXACT_REF at ~40 B/extent | ✅ demonstrated for content-addressed dedup only |
-| versioned/base+residual advantage | temporal savings | H2 sign flip −24%: base chains now cost more than fresh re-encoding | ❌ negative on the drift corpus (controlled pair in the campaigns) |
+| versioned/base+residual advantage | temporal savings | H2 series: +7.2% (RANS-era) → −24% (SequenceRans floor, positional residuals only) → **+35.2%** with BASE_SEQUENCE deltas (sequential 2.752× vs shuffled 1.784×) | ✅ met with the delta family (the −24% intermediate campaign isolates the positional-residual cost) |
 
 **Honest summary:** the FLOOR is substantially met (reads, RAW overhead,
 negative controls); the BASELINE density gate is not yet met (zstd is
 ahead; the deeper matcher is the next engineering step); the ADVANTAGE
-gate is met only for dedup/configurational content, and the temporal
-(base+residual) hypothesis is currently negative. These are the current
-measured states — the campaign pair is the controlled record.
+gate is met for dedup/configurational content and — with the BASE_SEQUENCE
+delta family — for versioned content (the H2 series is the controlled
+record). These are the current measured states.
 
 ## 3. Expected behavior by data class (updated with SequenceRans)
 
@@ -72,7 +72,7 @@ measured states — the campaign pair is the controlled record.
 | low-cardinality text-ish | PALETTE / RANS / PERIODIC | low–moderate |
 | natural text / source | SEQUENCE_RANS / RANS | src pack 3.344× (with current matcher) |
 | binaries with repetition | SEQUENCE_RANS + dedup | high dedup |
-| versioned files (write-in-place) | BASE_RESIDUAL vs fresh encode | fresh encode currently wins (H2 negative) |
+| versioned files (write-in-place) | BASE_RESIDUAL (delta) vs fresh encode | H2 +35.2% with BASE_SEQUENCE deltas (controlled three-campaign series) |
 | duplicated trees (build dirs) | EXACT_REF (dedup) | ~40 B/extent |
 | already-compressed / encrypted / random | RAW | urandom 0.997×, zstd pack 0.993× |
 

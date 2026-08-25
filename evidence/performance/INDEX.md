@@ -9,6 +9,7 @@ they document are admitted — nothing more.
 | --- | --- | --- |
 | `campaign-1787658658-67d977a/` | `67d977a` | Store-level evidence campaign (methodology §1–§9): repeated runs, exact byte accounting, p50/p95/p99, fsync latency, CPU, device writes, GC traffic, ablation ladder, DSFB investigation, negative controls, baselines. All §8 admission rules OK. |
 | `campaign-1787665094-a6641d1/` | `a6641d1` | Same campaign with the **SequenceRans floor** (Phase 8 §4), the write-batch group-commit path, and a corrected GC reachability walk for SequenceRans objects (an earlier run under-counted reachable bytes and was withdrawn; the admission rule is that withdrawn artifacts are replaced, never kept as claims). All §8 admission rules OK. |
+| `campaign-1787666036-43bf17e/` | `43bf17e` | Same campaign with the **BASE_SEQUENCE shift-aware delta** residuals (Phase 8 §5) active on base channels. H2 flips back to positive: sequential 2.752× vs shuffled 1.784× (+35.2% base savings). The shuffled control grows (1.23 MB → 2.35 MB) because copy/literal deltas exploit structural similarity between unrelated-history chunks (class-2 chunks share a period-7 skeleton), not just temporal adjacency — that confounding is the finding. All §8 admission rules OK. |
 | `fuse-court-1787659785-027c959-head/` | `027c959` | FUSE-frontend perf court, **after** Phase 6 (current main). |
 | `fuse-court-1787659914-709a710-before/` | `709a710` | FUSE-frontend perf court, **before** Phase 6 (same workloads, same workload hash `82442892…`). |
 | `fuse-court-1787664579-d90772c/` | `d90772c` | FUSE-frontend perf court, **Phase 8** (concurrency refactor + writeback negotiation + batch group commit + SequenceRans floor; same deterministic shake_128 payload, same bindgen workload `82442892…`). |
@@ -48,6 +49,29 @@ Notes:
   Ryzen 7 9800X3D (16 threads), governor `performance`, 131 GB RAM, backing
   device `/dev/nvme1n1p1` (ext4).
 
+## Campaign highlights (`campaign-1787666036-43bf17e` — + BASE_SEQUENCE deltas)
+
+Same methodology, same machine, same corpora; the shift-aware copy/literal
+delta residual (Phase-8 §5, residual kind 0x04) is active on every base
+channel.
+
+- **H2 flips back to positive:** sequential full 2.752× vs shuffled full
+  1.784× — base+residual savings +35.2% (827,375 B). The sequential
+  physical state is byte-identical to the pre-delta campaign (1,524,135 B:
+  aligned XOR mutations were already cheap); what changed is the shuffled
+  control, which grew from 1,229,568 B to 2,351,510 B because 34 of 64
+  shuffled chunks now keep base chains. The delta family finds matches
+  between unrelated-history chunks that share structure (all class-2
+  chunks are period-7 skeletons with different mutations), so the
+  shuffled control no longer isolates *temporal* causality — copy/literal
+  deltas capture *structural* similarity too. That confounding is the
+  finding: BASE_SEQUENCE gains are not purely temporal.
+- **Everything else is stable:** src 3.346×, structured 845× (dedup-
+  dominated, labeled), urandom 0.997×, compressed 0.993×; DSFB gap and
+  ablation ladder unchanged in shape.
+- **Baselines:** raw ext4 1.000×; zstd -1 3.832×; zstd -19 5.502×;
+  direct rANS 3.344×; btrfs/EROFS waived (root loop mounts).
+
 ## Campaign highlights (`campaign-1787665094-a6641d1` — SequenceRans floor)
 
 Same methodology, same machine, same corpora as `67d977a`, with the
@@ -77,7 +101,11 @@ corrected run.
   chain accumulation now costs more than re-encoding. The `67d977a`
   campaign's +7.2% H2 result was conditional on the weaker RANS-era
   floor; the two campaigns together are a controlled comparison of the
-  mechanism's value vs. the compression floor.
+  mechanism's value vs. the compression floor. **Superseded for the full
+  pipeline by `campaign-1787666036-43bf17e`**: with the BASE_SEQUENCE
+  shift-aware delta, H2 is positive again (+35.2%). The −24% here
+  measures the *positional-residual-only* base machinery against the
+  SequenceRans floor — the controlled value of the delta upgrade.
 - **DSFB investigation (repeated 5+5, structured):** physical byte-
   identical across modes (19,844 B); write median 387.9 vs 379.6 MiB/s
   (DSFB on vs off) — a smaller gap than the RANS-era 765 vs 335,
