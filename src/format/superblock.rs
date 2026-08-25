@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn corrupt_slot_rejected() {
         let sb = Superblock::default();
-        let mut slot = sb.encode();
+        let slot = sb.encode();
         // flip bytes in the body
         for pos in [0usize, 10, 100, 300] {
             let mut bad = slot.clone();

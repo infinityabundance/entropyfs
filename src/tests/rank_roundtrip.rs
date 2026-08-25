@@ -46,7 +46,7 @@ proptest! {
         let mut counts = vec![0u32; m];
         let mut rem = n;
         for c in counts.iter_mut().take(m - 1) {
-            let take = (seed_rank as u64 % (rem + 1)) as u32;
+            let take = (seed_rank % (rem + 1)) as u32;
             *c = take;
             rem -= take as u64;
         }

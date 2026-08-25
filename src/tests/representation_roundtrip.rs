@@ -7,7 +7,7 @@
 use crate::core::candidate::{CandidateContext, Encoder};
 use crate::core::cost::Policy;
 use crate::core::limits::Limits;
-use crate::core::materialize::{DecoderContext, materialize_to_vec};
+use crate::core::materialize::materialize_to_vec;
 use crate::core::representation::{Representation, Residual};
 use crate::entropy::palette::PaletteEncoder;
 use crate::entropy::periodic::PeriodicEncoder;
@@ -73,10 +73,12 @@ fn assert_all_candidates_roundtrip(input: &[u8], bases: &[crate::core::candidate
                 out.len(),
                 input.len()
             );
-            // cost accounting: persisted == encoded + model + integrity
+            // cost accounting: persisted == encoded + model + objects +
+            // integrity (every persistent bit, §15)
             let persisted = cand.cost.persisted_bytes();
             let expected = cand.representation.encoded_size()
                 + cand.cost.model_bytes
+                + cand.cost.object_payload_bytes
                 + cand.cost.integrity_bytes;
             assert_eq!(
                 persisted,
@@ -148,8 +150,8 @@ fn fill_roundtrip() {
 fn base_residual_roundtrip() {
     let base = vec![0x10u8; 4096];
     let mut target = base.clone();
-    for i in 100..200 {
-        target[i] = 0xFF;
+    for slot in target.iter_mut().take(200).skip(100) {
+        *slot = 0xFF;
     }
     target[4000] = 0x01;
     let base_id = crate::core::extent::ChunkId::of(&base);

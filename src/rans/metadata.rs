@@ -162,7 +162,12 @@ pub fn model_id(model: &RansModel) -> ChunkId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelDecodeError {
     /// Model object exceeds the format limit.
-    TooLarge { len: u64, max: u64 },
+    TooLarge {
+        /// Declared length.
+        len: u64,
+        /// Format limit.
+        max: u64,
+    },
     /// Truncated byte stream.
     Truncated,
     /// CRC32C mismatch.
@@ -250,8 +255,8 @@ mod tests {
     #[test]
     fn roundtrip_skewed() {
         let mut data = vec![0u8; 65536];
-        for i in 0..65536 {
-            data[i] = if i % 10 == 0 { 1 } else { 0 };
+        for (i, slot) in data.iter_mut().enumerate() {
+            *slot = if i % 10 == 0 { 1 } else { 0 };
         }
         let m = normalize_histogram(&hist_of(&data), 15, RansCodec::Single).unwrap();
         let bytes = encode_model(&m);

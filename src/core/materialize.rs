@@ -708,8 +708,10 @@ mod tests {
             off: 0,
             len: 16,
         };
-        let mut limits = Limits::default();
-        limits.max_reference_depth = 4;
+        let limits = Limits {
+            max_reference_depth: 4,
+            ..Default::default()
+        };
         let res = materialize_to_vec(&top, &ctx, &limits);
         assert!(matches!(res, Err(MaterializeError::DepthExceeded { .. })));
     }

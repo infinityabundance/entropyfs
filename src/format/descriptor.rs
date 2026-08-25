@@ -13,21 +13,34 @@ use crate::format::codec::{CodecError, Reader, Writer};
 
 /// Representation tags (must match `Representation::tag`).
 pub const TAG_ZERO: u8 = 0x01;
+/// Tag: fill (single repeated byte).
 pub const TAG_FILL: u8 = 0x02;
+/// Tag: raw literal object.
 pub const TAG_RAW: u8 = 0x03;
+/// Tag: rANS-encoded stream.
 pub const TAG_RANS: u8 = 0x04;
+/// Tag: exact sub-range reference.
 pub const TAG_EXACT_REF: u8 = 0x05;
+/// Tag: base + exact residual.
 pub const TAG_BASE_RESIDUAL: u8 = 0x06;
+/// Tag: combinatorial sparse configuration.
 pub const TAG_SPARSE: u8 = 0x07;
+/// Tag: low-cardinality palette configuration.
 pub const TAG_PALETTE: u8 = 0x08;
+/// Tag: periodic structure.
 pub const TAG_PERIODIC: u8 = 0x09;
+/// Tag: entropy universe reference.
 pub const TAG_ENTROPY_REF: u8 = 0x0A;
+/// Tag: inline literal bytes.
 pub const TAG_INLINE: u8 = 0x0B;
+/// Tag: permutation (factoradic rank).
 pub const TAG_PERMUTATION: u8 = 0x0C;
 
 /// Residual kinds.
 pub const RESIDUAL_XOR_SPARSE: u8 = 0x01;
+/// Residual kind: sparse range replacement.
 pub const RESIDUAL_RANGE_REPLACE: u8 = 0x02;
+/// Residual kind: rANS-coded stream.
 pub const RESIDUAL_RANS_CODED: u8 = 0x03;
 
 /// Encode a representation descriptor.
@@ -550,15 +563,12 @@ mod tests {
                 // Some flips produce a *valid different* descriptor (e.g. a
                 // different fill value); the contract is: never panic, and
                 // either a typed error or a structurally valid descriptor.
-                match decode(&bad, 8192, 4096, 16, 1024, 262144) {
-                    Ok(rep2) => {
-                        // A flipped byte may produce a valid descriptor (e.g.
-                        // a different fill value); the contract is: never
-                        // panic, and the result must pass structural
-                        // validation (or be rejected — either is fine here).
-                        let _ = rep2.validate(&crate::core::limits::Limits::default());
-                    }
-                    Err(_) => {}
+                if let Ok(rep2) = decode(&bad, 8192, 4096, 16, 1024, 262144) {
+                    // A flipped byte may produce a valid descriptor (e.g.
+                    // a different fill value); the contract is: never
+                    // panic, and the result must pass structural
+                    // validation (or be rejected — either is fine here).
+                    let _ = rep2.validate(&crate::core::limits::Limits::default());
                 }
             }
         }

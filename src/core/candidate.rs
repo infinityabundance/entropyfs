@@ -188,7 +188,10 @@ pub fn raw_candidate(input: &[u8], content_id: ChunkId, limits: &Limits) -> Opti
         reference: 32,
         ..Default::default()
     };
-    let cost = crate::core::cost::estimate(&rep, &split, 0);
+    let cost = account_objects(
+        crate::core::cost::estimate(&rep, &split, 0),
+        std::slice::from_ref(&obj),
+    );
     Some(Candidate {
         representation: rep,
         objects: vec![obj],
@@ -280,6 +283,21 @@ pub fn exact_ref_candidate(
         cost,
         content_id,
     })
+}
+
+/// Include the persisted payload bytes of a candidate's new objects in its
+/// cost (§15: every persistent bit necessary to decode the extent is
+/// accounted). Data payloads count as [`CostBreakdown::object_payload_bytes`];
+/// model payloads are accounted separately by the encoders.
+pub fn account_objects(mut cost: CostBreakdown, objects: &[ObjectRecord]) -> CostBreakdown {
+    for o in objects {
+        if o.kind == ObjectKind::Data {
+            cost.object_payload_bytes = cost
+                .object_payload_bytes
+                .saturating_add(o.payload.len() as u64);
+        }
+    }
+    cost
 }
 
 #[cfg(test)]

@@ -23,7 +23,12 @@ pub enum RansStreamError {
     /// Decode failed (truncated/corrupt stream or model).
     Decode(String),
     /// Decoded length mismatch.
-    LengthMismatch { expected: u64, actual: u64 },
+    LengthMismatch {
+        /// Expected decoded length.
+        expected: u64,
+        /// Actual decoded length.
+        actual: u64,
+    },
 }
 
 impl std::fmt::Display for RansStreamError {
@@ -68,18 +73,18 @@ pub fn encode_stream(input: &[u8], model: &RansModel) -> Result<Vec<u8>, RansStr
             let dense: Vec<ryg_rans_rs::byte::RansByteEncSymbol> = esyms
                 .iter()
                 .map(|s| {
-                    s.as_ref().copied().unwrap_or_else(|| {
-                        // Unreachable in practice: input bytes have nonzero
-                        // frequency. Use a zero-cost placeholder that would
-                        // fail loudly if ever encoded.
-                        ryg_rans_rs::byte::RansByteEncSymbol {
+                    s.as_ref()
+                        .copied()
+                        .unwrap_or(ryg_rans_rs::byte::RansByteEncSymbol {
+                            // Unreachable in practice: input bytes have nonzero
+                            // frequency. Zero-cost placeholder that would fail
+                            // loudly if ever encoded.
                             x_max: 0,
                             rcp_freq: 0,
                             bias: 0,
                             cmpl_freq: 0,
                             rcp_shift: 0,
-                        }
-                    })
+                        })
                 })
                 .collect();
             enc.encode_reverse(input, &dense)
@@ -109,13 +114,13 @@ pub fn decode_stream(
         RansCodec::Single => {
             let mut state = ryg_rans_rs::byte::rans_byte_dec_init(&mut reader)
                 .map_err(|e| RansStreamError::Decode(format!("{e:?}")))?;
-            for i in 0..out.len() {
+            for slot in out.iter_mut() {
                 let cf = ryg_rans_rs::byte::rans_byte_dec_get(&state, model.scale_bits as u32);
                 let s = cum2sym[cf as usize] as usize;
                 let sym = dsyms[s].as_ref().ok_or_else(|| {
                     RansStreamError::Decode(format!("decoder symbol {s} missing"))
                 })?;
-                out[i] = s as u8;
+                *slot = s as u8;
                 ryg_rans_rs::byte::rans_byte_dec_advance_symbol(
                     &mut state,
                     &mut reader,
@@ -154,9 +159,8 @@ fn build_cum2sym(model: &RansModel) -> Vec<u8> {
         if f == 0 {
             continue;
         }
-        for cf in start..start + f as usize {
-            table[cf] = s as u8;
-        }
+        let range = start..start + f as usize;
+        table[range].fill(s as u8);
         start += f as usize;
     }
     table
@@ -210,7 +214,10 @@ impl Encoder for RansEncoder {
             reference: 64,
             ..Default::default()
         };
-        let cost = crate::core::cost::estimate(&rep, &split, model_obj.payload.len() as u64);
+        let cost = crate::core::candidate::account_objects(
+            crate::core::cost::estimate(&rep, &split, model_obj.payload.len() as u64),
+            &[enc_obj.clone(), model_obj.clone()],
+        );
         vec![Candidate {
             representation: rep,
             objects: vec![enc_obj, model_obj],
@@ -243,7 +250,7 @@ impl Encoder for RansResidualEncoder {
             let (diffs, _) = diff_summary(input, &base.bytes);
             // Residual rANS only makes sense when there is real difference
             // structure; skip near-identical and near-random.
-            if diffs == 0 || diffs as usize == input.len() {
+            if diffs == 0 || diffs == input.len() {
                 continue;
             }
             let diff: Vec<u8> = input
@@ -295,7 +302,10 @@ impl Encoder for RansResidualEncoder {
                 reference: 32 + 64,
                 ..Default::default()
             };
-            let cost = crate::core::cost::estimate(&rep, &split, model_obj.payload.len() as u64);
+            let cost = crate::core::candidate::account_objects(
+                crate::core::cost::estimate(&rep, &split, model_obj.payload.len() as u64),
+                &[enc_obj.clone(), model_obj.clone()],
+            );
             out.push(Candidate {
                 representation: rep,
                 objects: vec![enc_obj, model_obj],
@@ -429,8 +439,8 @@ mod tests {
         // base = zeros; target = structured XOR diff
         let base = vec![0u8; 8192];
         let mut target = vec![0u8; 8192];
-        for i in 0..8192 {
-            target[i] = (i % 9) as u8;
+        for (i, slot) in target.iter_mut().enumerate() {
+            *slot = (i % 9) as u8;
         }
         let base_id = ChunkId::of(&base);
         let base_chunk = BaseChunk {

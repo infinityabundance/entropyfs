@@ -269,7 +269,7 @@ mod tests {
             ));
         }
         let mut offset = 0u64;
-        for (i, p) in payloads.iter().enumerate() {
+        for p in payloads.iter() {
             let rec = decode(&bytes, offset).unwrap().expect("record");
             assert_eq!(rec.payload, p);
             assert_eq!(rec.offset, offset);

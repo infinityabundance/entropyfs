@@ -123,7 +123,7 @@ pub fn unrank_comb_subset(rank: u128, n: u64, k: u64) -> Result<Vec<u32>, RankEr
         let mut lo = i - 1;
         let mut hi = c;
         while lo < hi {
-            let mid = lo + (hi - lo + 1) / 2;
+            let mid = lo + (hi - lo + 1).div_ceil(2);
             let cm = comb(mid, i).ok_or(RankError::SpaceOverflow)?;
             if cm <= x {
                 lo = mid;
@@ -261,14 +261,9 @@ pub fn rank_permutation(seq: &[u8]) -> Result<u128, RankError> {
     // Lehmer code: for each position, count unused elements smaller than it.
     let mut unused = vec![true; m];
     let mut rank: u128 = 0;
-    for i in 0..m {
-        let s = seq[i] as usize;
-        let mut smaller = 0usize;
-        for t in 0..s {
-            if unused[t] {
-                smaller += 1;
-            }
-        }
+    for (i, &s) in seq.iter().enumerate() {
+        let s = s as usize;
+        let smaller = unused[..s].iter().filter(|&&u| u).count();
         let f = factorial((m - i - 1) as u128).ok_or(RankError::SpaceOverflow)?;
         rank = rank
             .checked_add(
@@ -296,7 +291,8 @@ pub fn unrank_permutation(rank: u128, m: usize) -> Result<Vec<u8>, RankError> {
     let mut out = Vec::with_capacity(m);
     for i in 0..m {
         let f = factorial((m - i - 1) as u128).ok_or(RankError::SpaceOverflow)?;
-        let idx = if f == 0 { 0 } else { (rem / f) as usize };
+        // f is the factorial of a non-negative number, so f >= 1 always.
+        let idx = (rem / f) as usize;
         rem %= f;
         if idx >= available.len() {
             return Err(RankError::RankOutOfRange);

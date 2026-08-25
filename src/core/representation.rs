@@ -160,13 +160,29 @@ pub enum Residual {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Representation {
     /// All-zero extent.
-    Zero { len: u64 },
+    Zero {
+        /// Materialized length in bytes.
+        len: u64,
+    },
     /// Single repeated byte.
-    Fill { value: u8, len: u64 },
+    Fill {
+        /// The repeated byte value.
+        value: u8,
+        /// Materialized length in bytes.
+        len: u64,
+    },
     /// Short literal bytes stored inside the descriptor.
-    Inline { data: Vec<u8> },
+    Inline {
+        /// The literal bytes.
+        data: Vec<u8>,
+    },
     /// Literal bytes stored as an object.
-    Raw { obj: ChunkId, len: u64 },
+    Raw {
+        /// Content id of the literal-bytes object.
+        obj: ChunkId,
+        /// Materialized length in bytes.
+        len: u64,
+    },
     /// rANS-encoded stream with a persisted model.
     Rans {
         /// Content id of the model object.
@@ -460,7 +476,7 @@ impl Representation {
                     return Err(ReprError::PaletteCountsMismatch);
                 }
                 // Every symbol must have a nonzero count (canonical form).
-                if counts.iter().any(|&c| c == 0) {
+                if counts.contains(&0) {
                     return Err(ReprError::BadPalette);
                 }
                 match crate::entropy::rank::multinomial(*len, counts) {
@@ -560,6 +576,11 @@ impl Residual {
             | Residual::RangeReplace { len, .. }
             | Residual::RansCoded { len, .. } => *len,
         }
+    }
+
+    /// Whether the residual covers zero bytes.
+    pub const fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Encoded size in bytes, mirroring `format::descriptor` sizing.

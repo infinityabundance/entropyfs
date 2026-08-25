@@ -12,6 +12,7 @@ use crate::core::representation::RansCodec;
 /// v1 supported scale bits: 8..=15 (frequencies must fit `u16`; at
 /// `scale_bits == 16` a dominant symbol can reach 65536 which does not fit).
 pub const MIN_SCALE_BITS: u8 = 8;
+/// Maximum scale bits.
 pub const MAX_SCALE_BITS: u8 = 15;
 /// Default scale bits (16384 total frequency).
 pub const DEFAULT_SCALE_BITS: u8 = 14;
@@ -140,7 +141,12 @@ pub enum ModelValidationError {
     /// Model with no symbols.
     EmptyModel,
     /// Frequencies do not sum to 1 << scale_bits.
-    TotalMismatch { sum: u64, total: u64 },
+    TotalMismatch {
+        /// Actual frequency sum.
+        sum: u64,
+        /// Expected total (1 << scale_bits).
+        total: u64,
+    },
 }
 
 impl std::fmt::Display for ModelValidationError {
@@ -202,11 +208,7 @@ pub fn normalize_histogram(
             } else {
                 let target = (0..256)
                     .filter(|&j| f[j] > 1)
-                    .max_by_key(|&j| (f[j], std::cmp::Reverse(j)));
-                let target = match target {
-                    Some(t) => t,
-                    None => return None, // cannot happen: scale >= distinct
-                };
+                    .max_by_key(|&j| (f[j], std::cmp::Reverse(j)))?;
                 f[target] -= 1;
                 f[i] = 1;
             }
@@ -276,7 +278,7 @@ mod tests {
         let mut present = [false; 256];
         for i in 0..65536 {
             data[i] = if i % 1000 == 0 {
-                present[(i / 1000) as usize] = true;
+                present[i / 1000] = true;
                 (i / 1000) as u8
             } else {
                 present[7] = true;
@@ -284,8 +286,8 @@ mod tests {
             };
         }
         let m = normalize_histogram(&hist_of(&data), 8, RansCodec::Single).unwrap();
-        for i in 0..256 {
-            if present[i] {
+        for (i, &p) in present.iter().enumerate() {
+            if p {
                 assert!(m.freqs[i] > 0, "symbol {i} present but zero frequency");
             }
         }
@@ -310,8 +312,8 @@ mod tests {
     #[test]
     fn expected_len_low_for_skewed() {
         let mut data = vec![0u8; 65536];
-        for i in 0..65536 {
-            data[i] = if i % 10 == 0 { 1 } else { 0 };
+        for (i, slot) in data.iter_mut().enumerate() {
+            *slot = if i % 10 == 0 { 1 } else { 0 };
         }
         let m = normalize_histogram(&hist_of(&data), 14, RansCodec::Single).unwrap();
         let expected = m.expected_encoded_len(65536).unwrap();

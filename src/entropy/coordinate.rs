@@ -14,11 +14,24 @@ use crate::entropy::rank::{comb, factorial, multinomial};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Coordinate {
     /// Subset of `k` positions among `n`: `C(n, k)` states.
-    Combination { n: u64, k: u64 },
+    Combination {
+        /// Universe size.
+        n: u64,
+        /// Selected positions count.
+        k: u64,
+    },
     /// Multiset of `m` symbols summing to `n`: `n!/(∏c_i!)` states.
-    Multinomial { n: u64, m: usize },
+    Multinomial {
+        /// Total symbol count.
+        n: u64,
+        /// Number of distinct symbols.
+        m: usize,
+    },
     /// Permutation of `m` distinct elements: `m!` states.
-    Factoradic { m: u32 },
+    Factoradic {
+        /// Number of distinct elements.
+        m: u32,
+    },
 }
 
 impl Coordinate {

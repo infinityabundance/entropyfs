@@ -219,8 +219,8 @@ mod tests {
     fn dense_run_uses_range() {
         let base = vec![0u8; 64];
         let mut target = base.clone();
-        for i in 16..48 {
-            target[i] = 0xFF;
+        for slot in target.iter_mut().take(48).skip(16) {
+            *slot = 0xFF;
         }
         let r = derive_residuals(&target, &base, 4096);
         // XorSparse would cost 5 + 5*32 = 165; RangeReplace 5 + 8 + 32 = 45.

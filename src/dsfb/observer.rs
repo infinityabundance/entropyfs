@@ -172,10 +172,9 @@ impl StorageObserver {
         entry.samples += 1;
         entry.winner = winner;
         // Re-baseline on slew: when the previous observation classified a
-        // slew, the new chunk establishes a new baseline.
-        if entry.regime == Regime::Slew {
-            entry.baseline = Some(key.content_id);
-        } else if entry.baseline.is_none() {
+        // slew, the new chunk establishes a new baseline. First-ever
+        // observations baseline too.
+        if entry.regime == Regime::Slew || entry.baseline.is_none() {
             entry.baseline = Some(key.content_id);
         }
         // Track the last known measurement per channel and update the

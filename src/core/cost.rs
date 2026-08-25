@@ -29,6 +29,10 @@ pub struct CostBreakdown {
     pub descriptor_bytes: u64,
     /// rANS model bytes attributable to this extent.
     pub model_bytes: u64,
+    /// Payload bytes of the Data objects this extent needs (raw payload,
+    /// rANS stream, residual stream). The single largest persisted term
+    /// for object-backed families; must never be zero for RAW/RANS.
+    pub object_payload_bytes: u64,
     /// Residual payload bytes.
     pub residual_bytes: u64,
     /// Seed/state bytes (ENTROPY_REF).
@@ -56,6 +60,7 @@ impl CostBreakdown {
     pub const fn persisted_bytes(&self) -> u64 {
         self.descriptor_bytes
             .saturating_add(self.model_bytes)
+            .saturating_add(self.object_payload_bytes)
             .saturating_add(self.residual_bytes)
             .saturating_add(self.seed_state_bytes)
             .saturating_add(self.reference_bytes)
@@ -271,6 +276,7 @@ pub fn estimate(rep: &Representation, split: &ByteSplit, model_bytes: u64) -> Co
         logical_bytes: rep.len(),
         descriptor_bytes: descriptor,
         model_bytes,
+        object_payload_bytes: 0,
         residual_bytes: split.residual,
         seed_state_bytes: split.seed_state,
         reference_bytes: split.reference,
@@ -337,23 +343,27 @@ mod tests {
 
     #[test]
     fn raw_dominates_random_under_capacity() {
+        // RAW: the 64 KiB payload is a Data object.
         let raw = CostBreakdown {
             logical_bytes: 65536,
-            descriptor_bytes: 40,
-            residual_bytes: 0,
-            model_bytes: 0,
+            descriptor_bytes: 9,
+            object_payload_bytes: 65536,
             ..Default::default()
         };
         // A hypothetical "generated" representation that still needs a
-        // full-size residual must never win: seed+coordinate+residual >= raw.
+        // full-size residual must never win: the full residual (== data
+        // size) plus seed/coordinate state is strictly more persisted
+        // state than storing the bytes directly. (Id-vs-seed pointer size
+        // differences are a separate, bounded accounting question.)
         let generated = CostBreakdown {
             logical_bytes: 65536,
-            descriptor_bytes: 40,
+            descriptor_bytes: 9,
             seed_state_bytes: 24,
             residual_bytes: 65536,
             ..Default::default()
         };
         let p = Policy::mode(PolicyMode::Capacity);
+        assert!(generated.persisted_bytes() > raw.persisted_bytes());
         assert!(generated.total(&p) > raw.total(&p));
     }
 

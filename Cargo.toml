@@ -9,7 +9,7 @@
 name = "entropyfs"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.87"
 description = "Entropy-native Linux filesystem: persist irreducible state, materialize structure, preserve exact bytes."
 license = "MIT OR Apache-2.0"
 keywords = ["filesystem", "fuse", "entropy", "storage", "rans"]
@@ -39,7 +39,7 @@ crc32c = "=0.6.8"   # physical record integrity (SSE4.2 crc32c w/ software fallb
 
 # --- Linux / FUSE frontend ---
 fuser = "=0.18.0"   # stable synchronous FUSE binding (pure Rust; no libfuse required)
-rustix = "1"        # safe syscall wrappers where std does not provide what we need
+rustix = { version = "1", features = ["fs", "std"] } # safe syscall wrappers (fs: flock/statvfs)
 
 # --- CLI / diagnostics ---
 clap = { version = "4", features = ["derive"] }
