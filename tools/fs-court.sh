@@ -88,6 +88,12 @@ dd if=/dev/zero of="$WORKDIR/corpora/zeros.bin" bs=1M count=64 status=none
 # Directory corpora are traversed deterministically (tar stream to /dev/null).
 CORPORA=(src random.bin zeros.bin compressed.tgz)
 
+# The corpus apparent-byte sum — the SAME numerator for every density line
+# (loop-FS densities and the EntropyFS density; the FUSE copies carry the
+# same st_size as these sources). Single source of truth, computed once.
+CORPUS_APPARENT=$(du -sb "$WORKDIR/corpora"/src "$WORKDIR/corpora"/random.bin "$WORKDIR/corpora"/zeros.bin "$WORKDIR/corpora"/compressed.tgz 2>/dev/null | awk '{s+=$1} END {print s+0}')
+log "corpus apparent total: $CORPUS_APPARENT B (src, random.bin, zeros.bin, compressed.tgz)"
+
 results="$OUT/results.json"
 python3 - "$results" <<'EOF'
 import json, sys
@@ -190,11 +196,22 @@ run_loop_fs() {  # run_loop_fs <name> "<mkfs args>" "<mount opts>"
     # (the true on-disk cost of the filesystem incl. its metadata).
     sync
     umount "$mnt"
-    local img_alloc img_size
+    local img_alloc img_size density
     img_alloc=$(du_alloc "$img")
     img_size=$(du_bytes "$img")
-    log "  image: logical $img_size allocated $img_alloc"
-    record fs "$name" "{\"image_logical_bytes\": $img_size, \"image_allocated_bytes\": $img_alloc}"
+    # Phase-9H: the loop-FS equivalent of the EntropyFS density line — the
+    # SAME numerator ($CORPUS_APPARENT, the four measured corpora) over the
+    # COMPLETE filesystem state (the whole loop image's allocated blocks,
+    # which include the FS's own metadata — the same treatment as the
+    # EntropyFS store backing). Computed and sealed by the tooling, never
+    # derived by hand.
+    if [[ "$CORPUS_APPARENT" -gt 0 && "$img_alloc" -gt 0 ]]; then
+        density=$(python3 -c "print(f'{$CORPUS_APPARENT/$img_alloc:.3f}')")
+    else
+        density="0"
+    fi
+    log "  image: logical $img_size allocated $img_alloc; corpus apparent $CORPUS_APPARENT; density ${density}x"
+    record fs "$name" "{\"image_logical_bytes\": $img_size, \"image_allocated_bytes\": $img_alloc, \"corpus_apparent_bytes\": $CORPUS_APPARENT, \"density\": $density}"
 }
 
 if command -v mkfs.xfs >/dev/null; then
@@ -427,6 +444,22 @@ with open(f"{out}/report.md", "w") as f:
     f.write(f"Archive: {out}\n\n")
     f.write("Corpus artifact: the structured corpus contains only 4 unique\n")
     f.write("64 KiB chunks — a corpus property, not a claim (methodology §8).\n\n")
+    f.write("## Density (computed and sealed by the tooling)\n\n")
+    f.write("Numerator: the same corpus apparent-byte sum (du -sb of src,\n")
+    f.write("random.bin, zeros.bin, compressed.tgz) for every row. Denominators:\n")
+    f.write("the COMPLETE filesystem state — the whole loop image's allocated\n")
+    f.write("blocks for XFS/Btrfs (including their own metadata), the complete\n")
+    f.write("EntropyFS store backing (segments + superblock). Both denominators\n")
+    f.write("therefore include filesystem overhead beyond the corpus files.\n\n")
+    dens = {}
+    for name, v in r.get("fs", {}).items():
+        if isinstance(v, dict) and "density" in v:
+            dens[name] = (v["density"], v["image_allocated_bytes"])
+    if "settled" in r.get("entropyfs", {}):
+        dens["entropyfs-settled"] = (r["entropyfs"]["settled"]["settled_density"], r["entropyfs"]["settled"]["settled_allocated"])
+    for name, (d, alloc) in sorted(dens.items()):
+        f.write(f"- {name}: {d}x (allocated {alloc} B)\n")
+    f.write("\n")
     if "settled" in r.get("entropyfs", {}):
         s = r["entropyfs"]["settled"]
         f.write("## EntropyFS storage states (Phase-9H)\n\n")

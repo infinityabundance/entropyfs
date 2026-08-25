@@ -188,17 +188,24 @@ oversized-descriptor fix (Phase 6) eliminated.
   isolates pure temporal causality, and that confounding is itself
   recorded as the finding.
 - The competitive filesystem court is a sealed **zero-waiver series** at
-  9H (`fs-court-1787688251-69e69d4/`, privileged docker VM, symmetric
-  buffered/durable/warm/cold rules): EntropyFS is reported in two states —
-  **foreground 1.826×** (74.58 MB post-GC) and **settled 1.995×**
-  (68.27 MB) after background optimize + full compaction (5.45 s,
-  1.047× physical write amplification) — and the settled density **beats
-  Btrfs+zstd 1.72× (79.13 MB image)** on the same corpus set (64 MiB
-  incompressible random + 64 MiB zeros + src + tgz). The throughput gaps
-  are recorded honestly: src tiny-file writes 10.2 MiB/s vs 100–457,
-  64 MiB random writes 68 vs ~5,900 MiB/s. The write path is now the
-  dominant weakness; the court points the next phase at **performance**
-  (Phase 10), not another entropy codec.
+  9H: the density comparison is now computed and sealed by the tooling
+  itself (`fs-court-1787688843-b4abc71/`, privileged docker VM,
+  symmetric buffered/durable/warm/cold rules) — the same corpus apparent
+  sum (136,162,907 B) over each filesystem's complete state (whole loop
+  image allocated for XFS/Btrfs, complete store backing for EntropyFS;
+  both include filesystem metadata; derivation footnoted in report.md).
+  EntropyFS is reported in two states — **foreground 1.825×** (74.6 MB
+  post-GC) and **settled 1.994×** (68.27 MB) after background optimize +
+  full compaction (5.42 s, 1.047× physical write amplification) — and the
+  settled density **beats Btrfs+zstd 1.724× (79.00 MB image)** on the
+  same corpus set (64 MiB incompressible random + 64 MiB zeros + src +
+  tgz); Btrfs raw 0.941×, XFS 0.668× (metadata exceeds the corpus). The
+  throughput gaps are recorded honestly: src tiny-file writes 10.2 MiB/s
+  vs 100–457, 64 MiB random writes 68 vs ~5,900 MiB/s. The write path is
+  now the dominant weakness; the court points the next phase at
+  **performance** (Phase 10), not another entropy codec. (The earlier
+  courts' hand-derived `1.65×`/`1.72×` Btrfs figures are amended in
+  `evidence/performance/INDEX.md`, never rewritten.)
 - Random/encrypted/already-compressed data falls back toward RAW (urandom
   0.997×, zstd -19 pack 0.993×) — the honest negative control.
 

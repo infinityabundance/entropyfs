@@ -1,0 +1,88 @@
+# Filesystem court v2 (Phase 8H + 9A + 9H)
+
+Archive: /repo/evidence/performance/fs-court-1787688843-b4abc71
+
+Corpus artifact: the structured corpus contains only 4 unique
+64 KiB chunks — a corpus property, not a claim (methodology §8).
+
+## Density (computed and sealed by the tooling)
+
+Numerator: the same corpus apparent-byte sum (du -sb of src,
+random.bin, zeros.bin, compressed.tgz) for every row. Denominators:
+the COMPLETE filesystem state — the whole loop image's allocated
+blocks for XFS/Btrfs (including their own metadata), the complete
+EntropyFS store backing (segments + superblock). Both denominators
+therefore include filesystem overhead beyond the corpus files.
+
+- btrfs: 0.941x (allocated 144683008 B)
+- btrfs-zstd: 1.724x (allocated 79003648 B)
+- entropyfs-settled: 1.994x (allocated 68272128 B)
+- xfs: 0.668x (allocated 203964416 B)
+
+## EntropyFS storage states (Phase-9H)
+
+- foreground (post-GC): apparent 74620086 B, allocated 74625024 B
+- settled (+optimize +full compaction): apparent 68266787 B, allocated 68272128 B (density 1.994x)
+- settle cost: 5.42 s elapsed (optimize 5.26 s + compact 0.16 s), 1.047x physical write amplification (71501162 B appended)
+
+## fs
+
+- btrfs: {"image_logical_bytes": 1073741824, "image_allocated_bytes": 144683008, "corpus_apparent_bytes": 136162907, "density": 0.941}
+- btrfs-zstd: {"image_logical_bytes": 1073741824, "image_allocated_bytes": 79003648, "corpus_apparent_bytes": 136162907, "density": 1.724}
+- btrfs-zstd/compressed.tgz: {"apparent": 404616, "allocated": 405504, "buffered_write_mbps": 188.6, "durable_write_mbps": 33.3, "warm_read_mbps": 195.2, "cold_read_mbps": 172.7, "cache": "warm-retained"}
+- btrfs-zstd/random.bin: {"apparent": 67108864, "allocated": 67108864, "buffered_write_mbps": 5913.1, "durable_write_mbps": 2102.6, "warm_read_mbps": 16036.7, "cold_read_mbps": 4894.1, "cache": "warm-retained"}
+- btrfs-zstd/src: {"apparent": 1540563, "allocated": 1810432, "buffered_write_mbps": 118.0, "durable_write_mbps": 70.6, "warm_read_mbps": 526.5, "cold_read_mbps": 280.1, "cache": "warm-retained"}
+- btrfs-zstd/zeros.bin: {"apparent": 67108864, "allocated": 67108864, "buffered_write_mbps": 5918.8, "durable_write_mbps": 2895.6, "warm_read_mbps": 17347.4, "cold_read_mbps": 7868.6, "cache": "warm-retained"}
+- btrfs/compressed.tgz: {"apparent": 404616, "allocated": 405504, "buffered_write_mbps": 176.0, "durable_write_mbps": 35.8, "warm_read_mbps": 202.3, "cold_read_mbps": 163.9, "cache": "warm-retained"}
+- btrfs/random.bin: {"apparent": 67108864, "allocated": 67108864, "buffered_write_mbps": 5616.1, "durable_write_mbps": 2011.2, "warm_read_mbps": 16086.9, "cold_read_mbps": 5107.8, "cache": "warm-retained"}
+- btrfs/src: {"apparent": 1540563, "allocated": 1810432, "buffered_write_mbps": 120.3, "durable_write_mbps": 74.4, "warm_read_mbps": 527.2, "cold_read_mbps": 299.9, "cache": "warm-retained"}
+- btrfs/zeros.bin: {"apparent": 67108864, "allocated": 67108864, "buffered_write_mbps": 6034.7, "durable_write_mbps": 2080.2, "warm_read_mbps": 15864.5, "cold_read_mbps": 5526.7, "cache": "warm-retained"}
+- erofs-lz4hc/compressed.tgz: {"apparent": 404616, "image": 409600, "allocated": 409600, "ratio": 0.988}
+- erofs-lz4hc/random.bin: {"apparent": 67108864, "image": 67112960, "allocated": 67112960, "ratio": 1.0}
+- erofs-lz4hc/src: {"apparent": 1540563, "image": 819200, "allocated": 819200, "ratio": 1.881}
+- erofs-lz4hc/zeros.bin: {"apparent": 67108864, "image": 319488, "allocated": 319488, "ratio": 210.051}
+- ext4/compressed.tgz: {"apparent": 404616, "allocated": 405504, "buffered_write_mbps": 199.9, "durable_write_mbps": 36.3, "warm_read_mbps": 198.3, "cold_read_mbps": 185.5, "cache": "warm-retained"}
+- ext4/random.bin: {"apparent": 67108864, "allocated": 67108864, "buffered_write_mbps": 3496.9, "durable_write_mbps": 2389.4, "warm_read_mbps": 9918.9, "cold_read_mbps": 7179.7, "cache": "warm-retained"}
+- ext4/src: {"apparent": 1540563, "allocated": 1810432, "buffered_write_mbps": 451.2, "durable_write_mbps": 71.6, "warm_read_mbps": 523.9, "cold_read_mbps": 449.3, "cache": "warm-retained"}
+- ext4/zeros.bin: {"apparent": 67108864, "allocated": 67108864, "buffered_write_mbps": 3661.6, "durable_write_mbps": 2431.1, "warm_read_mbps": 9490.0, "cold_read_mbps": 8952.7, "cache": "warm-retained"}
+- squashfs-zstd/compressed.tgz: {"apparent": 404616, "image": 405504, "allocated": 405504, "ratio": 0.998}
+- squashfs-zstd/random.bin: {"apparent": 67108864, "image": 67112960, "allocated": 67112960, "ratio": 1.0}
+- squashfs-zstd/src: {"apparent": 1540563, "image": 319488, "allocated": 319488, "ratio": 4.822}
+- squashfs-zstd/zeros.bin: {"apparent": 67108864, "image": 4096, "allocated": 4096, "ratio": 16384.0}
+- xfs: {"image_logical_bytes": 1073741824, "image_allocated_bytes": 203964416, "corpus_apparent_bytes": 136162907, "density": 0.668}
+- xfs/compressed.tgz: {"apparent": 404616, "allocated": 405504, "buffered_write_mbps": 196.7, "durable_write_mbps": 38.0, "warm_read_mbps": 198.8, "cold_read_mbps": 167.7, "cache": "warm-retained"}
+- xfs/random.bin: {"apparent": 67108864, "allocated": 67108864, "buffered_write_mbps": 5686.8, "durable_write_mbps": 1946.4, "warm_read_mbps": 15999.6, "cold_read_mbps": 6177.5, "cache": "warm-retained"}
+- xfs/src: {"apparent": 1540563, "allocated": 1830912, "buffered_write_mbps": 306.1, "durable_write_mbps": 97.9, "warm_read_mbps": 508.3, "cold_read_mbps": 376.6, "cache": "warm-retained"}
+- xfs/zeros.bin: {"apparent": 67108864, "allocated": 67108864, "buffered_write_mbps": 5659.0, "durable_write_mbps": 2043.8, "warm_read_mbps": 16332.5, "cold_read_mbps": 6381.1, "cache": "warm-retained"}
+
+## zstd
+
+- -1/compressed.tgz: {"apparent": 404616, "image": 404641, "ratio": 1.0, "write_mbps": 194.5}
+- -1/random.bin: {"apparent": 67108864, "image": 67110414, "ratio": 1.0, "write_mbps": 4293.5}
+- -1/src: {"apparent": 1540563, "image": 372694, "ratio": 4.134, "write_mbps": 241.3}
+- -1/src-per-64k: {"apparent": 1540563, "image": 423174, "ratio": 3.64}
+- -1/zeros.bin: {"apparent": 67108864, "image": 2288, "ratio": 29330.797, "write_mbps": 7184.7}
+- -19/compressed.tgz: {"apparent": 404616, "image": 404641, "ratio": 1.0, "write_mbps": 31.1}
+- -19/random.bin: {"apparent": 67108864, "image": 67110414, "ratio": 1.0, "write_mbps": 10.9}
+- -19/src: {"apparent": 1540563, "image": 253914, "ratio": 6.067, "write_mbps": 5.6}
+- -19/src-per-64k: {"apparent": 1540563, "image": 342207, "ratio": 4.502}
+- -19/zeros.bin: {"apparent": 67108864, "image": 2077, "ratio": 32310.479, "write_mbps": 1717.8}
+
+## entropyfs
+
+- compressed.tgz/cold_read_mbps: "172.0"
+- density: {"apparent": 136162907, "backing_apparent": 74620086, "backing_allocated": 74625024, "ratio": 1.825}
+- entropyfs/compressed.tgz: {"apparent": 404616, "allocated": 404992, "buffered_write_mbps": 41.5, "durable_write_mbps": 23.2, "warm_read_mbps": 184.9, "cold_read_mbps": 161.5, "cache": "warm-retained"}
+- entropyfs/random.bin: {"apparent": 67108864, "allocated": 67108864, "buffered_write_mbps": 68.9, "durable_write_mbps": 68.2, "warm_read_mbps": 2518.3, "cold_read_mbps": 2662.7, "cache": "warm-retained"}
+- entropyfs/src: {"apparent": 1540563, "allocated": 1571840, "buffered_write_mbps": 9.9, "durable_write_mbps": 9.2, "warm_read_mbps": 64.4, "cold_read_mbps": 60.2, "cache": "warm-retained"}
+- entropyfs/zeros.bin: {"apparent": 67108864, "allocated": 67108864, "buffered_write_mbps": 244.3, "durable_write_mbps": 237.1, "warm_read_mbps": 3968.3, "cold_read_mbps": 4303.0, "cache": "warm-retained"}
+- random.bin/cold_read_mbps: "2942.1"
+- settled: {"foreground_apparent": 74620086, "foreground_allocated": 74625024, "settled_apparent": 68266787, "settled_allocated": 68272128, "settle_elapsed_s": 5.42, "optimize_wall_s": 5.26, "compact_wall_s": 0.16, "settle_appended_bytes": 71501162, "settle_write_amp": 1.047, "settled_density": 1.994}
+- src/cold_read_mbps: "68.3"
+- zeros.bin/cold_read_mbps: "4660.5"
+
+## Waivers
+
+
+Run this court in a root-capable VM to clear the loop-mount
+waivers and enable drop_caches cold reads.
