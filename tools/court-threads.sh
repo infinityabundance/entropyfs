@@ -29,6 +29,7 @@ echo -e "threads\tcorpus\tbuffered_mbps\tdurable_mbps\twarm_read_mbps\tcold_read
 for t in $THREADS; do
     echo "== court at threads=$t =="
     SCRATCH="$WORKDIR/t$t"
+    rm -rf "$SCRATCH"   # fresh scratch per run (no stale corpus artifacts)
     mkdir -p "$SCRATCH"
     COURT_FUSE_THREADS="$t" "$SCRIPT_DIR/fs-court.sh" "$SCRATCH" "$OUTROOT" | tee "$WORKDIR/run-t$t.log" | tail -1
     # Extract the newest fs-court archive's EntropyFS rows.
@@ -40,7 +41,7 @@ r = json.load(open(f"{out}/results.json"))
 efs = r.get("entropyfs", {})
 with open(summary, "a") as f:
     for c in ("src", "random.bin", "zeros.bin", "compressed.tgz"):
-        row = efs.get(c, {})
+        row = efs.get("entropyfs/" + c, {})
         if not isinstance(row, dict):
             continue
         f.write(f"{t}\t{c}\t{row.get('buffered_write_mbps','')}\t{row.get('durable_write_mbps','')}\t{row.get('warm_read_mbps','')}\t{row.get('cold_read_mbps','')}\n")
