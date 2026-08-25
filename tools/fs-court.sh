@@ -41,7 +41,7 @@ if [[ ! -x "$ENTROPYFS_BIN" ]]; then
     exit 1
 fi
 
-REV="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || true)"
+REV="${COURT_REV:-$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || true)}"
 [[ -n "$REV" ]] || REV="norev"
 TS="$(date +%s)"
 OUT="$OUTROOT/fs-court-$TS-$REV"
@@ -228,7 +228,10 @@ if command -v mkfs.erofs >/dev/null; then
     log "== erofs (lz4hc image) =="
     for c in "${CORPORA[@]}"; do
         img="$WORKDIR/img-erofs-$c.erofs"
-        mkfs.erofs -zlz4hc "$img" "$WORKDIR/corpora/$c" >/dev/null 2>&1
+        staging="$WORKDIR/erofs-stage-$c"
+        mkdir -p "$staging"
+        cp -r "$WORKDIR/corpora/$c" "$staging/"
+        mkfs.erofs -zlz4hc "$img" "$staging" >/dev/null 2>&1 || { log "  WAIVER: mkfs.erofs failed for $c"; record fs "erofs-lz4hc/$c" "{\"waived\": \"mkfs.erofs failed\"}"; continue; }
         size=$(du_bytes "$img")
         alloc=$(du_alloc "$img")
         apparent=$(du_bytes "$WORKDIR/corpora/$c")

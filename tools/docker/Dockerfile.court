@@ -1,0 +1,19 @@
+# EntropyFS competitive filesystem court image (Phase 8H/9A evidence).
+#
+# Disposable root-capable VM for tools/fs-court.sh: loop-mounted XFS,
+# Btrfs (±zstd), EROFS, SquashFS, FUSE, and drop_caches cold reads.
+# Build:   docker build -t entropyfs-court -f tools/docker/Dockerfile.court .
+# Run:     tools/run-court-docker.sh [WORKDIR] [OUTDIR]
+FROM archlinux:latest
+
+RUN pacman -Syu --noconfirm \
+    && pacman -S --noconfirm \
+        xfsprogs btrfs-progs erofs-utils squashfs-tools \
+        fuse3 zstd coreutils util-linux git python \
+    && rm -rf /var/cache/pacman/pkg
+
+# The repo is mounted read-only at /repo; evidence goes to the rw bind
+# mount at /repo/evidence/performance. WORKDIR is /scratch (container fs).
+ENV ENTROPYFS_BIN=/repo/target/release/entropyfs
+WORKDIR /repo
+ENTRYPOINT ["bash", "tools/fs-court.sh"]
