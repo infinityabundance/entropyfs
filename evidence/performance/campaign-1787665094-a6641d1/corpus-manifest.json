@@ -1,15 +1,15 @@
 [
   {
-    "content_hash": "cc616dde6dff95f4e781ccff89167da981d6a9ac73c93a1db5354c2179d54ac2",
+    "content_hash": "4c51a1de54330f45aac02b9a3bcdc0e551f95ce5a4f06d191415ca92b46d4070",
     "description": "docs + src + evidence + manifests, length-prefixed; deterministic per revision",
-    "logical_bytes": 1383420,
+    "logical_bytes": 1471135,
     "name": "src",
     "source": "EntropyFS source tree pack (revision /mnt/1tb_kingston/entropyfs)",
     "version_count": 1,
     "version_hashes": [
-      "cc616dde6dff95f4e781ccff89167da981d6a9ac73c93a1db5354c2179d54ac2"
+      "4c51a1de54330f45aac02b9a3bcdc0e551f95ce5a4f06d191415ca92b46d4070"
     ],
-    "written_bytes": 1383420
+    "written_bytes": 1471135
   },
   {
     "content_hash": "497f9bbeba753d09b02280c5704355ba5158568364e638904a3cb471fb20c9cc",
@@ -74,15 +74,15 @@
     "written_bytes": 8388608
   },
   {
-    "content_hash": "27a2ea01938611f1de72624781e841c92b5902c383673f012900f2782f3c146d",
+    "content_hash": "63055624cb686fbbfdc50ac881702a1a2534ccca405bfda60c4b4bc77184b1fc",
     "description": "methodology §5 negative control: already-compressed data must show little or no additional gain",
-    "logical_bytes": 259520,
+    "logical_bytes": 267366,
     "name": "compressed-z19",
     "source": "zstd -19 of the source pack (already-compressed control)",
     "version_count": 1,
     "version_hashes": [
-      "27a2ea01938611f1de72624781e841c92b5902c383673f012900f2782f3c146d"
+      "63055624cb686fbbfdc50ac881702a1a2534ccca405bfda60c4b4bc77184b1fc"
     ],
-    "written_bytes": 259520
+    "written_bytes": 267366
   }
 ]

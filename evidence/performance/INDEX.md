@@ -8,7 +8,7 @@ they document are admitted — nothing more.
 | Artifact | Revision | What it seals |
 | --- | --- | --- |
 | `campaign-1787658658-67d977a/` | `67d977a` | Store-level evidence campaign (methodology §1–§9): repeated runs, exact byte accounting, p50/p95/p99, fsync latency, CPU, device writes, GC traffic, ablation ladder, DSFB investigation, negative controls, baselines. All §8 admission rules OK. |
-| `campaign-1787664479-d90772c/` | `d90772c` | Same campaign with the **SequenceRans floor** (Phase 8 §4) and the write-batch group-commit path: src corpus 1.636× → **124.824×**; H2 sign flip (base+residual now loses to fresh re-encoding — the compression floor changed the economics); all §8 admission rules OK. |
+| `campaign-1787665094-a6641d1/` | `a6641d1` | Same campaign with the **SequenceRans floor** (Phase 8 §4), the write-batch group-commit path, and a corrected GC reachability walk for SequenceRans objects (an earlier run under-counted reachable bytes and was withdrawn; the admission rule is that withdrawn artifacts are replaced, never kept as claims). All §8 admission rules OK. |
 | `fuse-court-1787659785-027c959-head/` | `027c959` | FUSE-frontend perf court, **after** Phase 6 (current main). |
 | `fuse-court-1787659914-709a710-before/` | `709a710` | FUSE-frontend perf court, **before** Phase 6 (same workloads, same workload hash `82442892…`). |
 | `fuse-court-1787664579-d90772c/` | `d90772c` | FUSE-frontend perf court, **Phase 8** (concurrency refactor + writeback negotiation + batch group commit + SequenceRans floor; same deterministic shake_128 payload, same bindgen workload `82442892…`). |
@@ -48,38 +48,49 @@ Notes:
   Ryzen 7 9800X3D (16 threads), governor `performance`, 131 GB RAM, backing
   device `/dev/nvme1n1p1` (ext4).
 
-## Campaign highlights (`campaign-1787664479-d90772c` — SequenceRans floor)
+## Campaign highlights (`campaign-1787665094-a6641d1` — SequenceRans floor)
 
 Same methodology, same machine, same corpora as `67d977a`, with the
 SequenceRans general compression floor (Phase-8 §4) active in the write
-path and the versioned experiment now completing (the pre-fix encoder bug
-that aborted H2 is fixed and regression-tested).
+path and the versioned experiment now completing.
 
-- **src corpus (source-tree pack): 1.636× → 124.824×** physical density.
-  The pack is a length-prefixed concatenation of source files — rANS-only
-  could not exploit its long-distance repeats; the LZ matcher can. This is
-  the floor doing its job: `docs/adr/0005-representation-set.md` 0x0D.
+**Withdrawal note:** an earlier run of this campaign (withdrawn) measured
+`src` at 124.8× — the store GC reachability walk did not yet mark
+SEQUENCE_RANS model/enc objects, so reachable bytes were under-counted
+and every SequenceRans extent inflated the ratio. The walk is fixed
+(regression-tested in `tests/enospc.rs`); the numbers below are the
+corrected run.
+
+- **src corpus (source-tree pack): 1.636× → 3.344×** physical density
+  (439,989 B for 1,471,135 logical). SequenceRans wins all 23 chunks and
+  lands exactly on the direct-rANS baseline — the current foreground
+  matcher (greedy, chain-depth 16, 131-byte copy cap) adds little over
+  per-chunk entropy coding on this pack, and zstd -1 (3.832×) / -19
+  (5.502×) still beat it. This is the measured state of the floor, not a
+  claim: a deeper matcher is the obvious next step (Phase-8 §4
+  background search).
 - **H2 sign flip (honest negative finding):** with the cheaper floor,
   fresh re-encoding of a mutated chunk now beats keeping a base+residual
-  chain on the drift corpus — sequential full 2.894× vs no-base 3.716× vs
-  shuffled 3.645× (−26% base savings). Each chain layer's descriptor and
-  the retained per-content-id chunk-index entries stay reachable, so chain
-  accumulation now costs more than re-encoding. The `67d977a` campaign's
-  +7.2% H2 result was conditional on the weaker RANS-era floor; the two
-  campaigns together are a controlled comparison of the mechanism's value
-  vs. the compression floor.
-- **DSFB investigation (repeated 5+5, structured):** physical byte-identical
-  across modes (17,151 B); write median 380.6 vs 370.1 MiB/s (DSFB on vs
-  off) — a smaller gap than the RANS-era 765 vs 335, consistent with DSFB
-  ordering cheaper candidates now that the floor handles the heavy lifting.
-- **Negative controls hold:** urandom 0.997×, compressed pack 0.994×;
+  chain on the drift corpus — sequential full 2.752× vs no-base 3.471×
+  vs shuffled 3.411× (−24% base savings). Each chain layer's descriptor
+  and the retained per-content-id chunk-index entries stay reachable, so
+  chain accumulation now costs more than re-encoding. The `67d977a`
+  campaign's +7.2% H2 result was conditional on the weaker RANS-era
+  floor; the two campaigns together are a controlled comparison of the
+  mechanism's value vs. the compression floor.
+- **DSFB investigation (repeated 5+5, structured):** physical byte-
+  identical across modes (19,844 B); write median 387.9 vs 379.6 MiB/s
+  (DSFB on vs off) — a smaller gap than the RANS-era 765 vs 335,
+  consistent with DSFB ordering cheaper candidates now that the floor
+  handles the heavy lifting. Single synthetic corpus; under further
+  study.
+- **Negative controls hold:** urandom 0.997×, compressed pack 0.993×;
   shuffled history still removes temporal gains.
 - **GC traffic:** 50.9 MB unreachable → 47.9 MB reclaimed, physical
-  59.7 MB → 11.7 MB, 0.010 s.
-- **Baselines:** raw file (ext4) 1.000×; zstd -1 3.704×; zstd -19 5.331×;
-  direct rANS on the source pack 124.824× (== EntropyFS src ratio, as
-  expected when SequenceRans is the floor and the pack is match-dense);
-  btrfs/EROFS/SquashFS explicitly waived (root loop mounts).
+  59.7 MB → 11.7 MB, 0.009 s.
+- **Baselines:** raw file (ext4) 1.000×; zstd -1 3.832×; zstd -19 5.502×;
+  direct rANS on the source pack 3.344× (== EntropyFS src ratio, as
+  measured); btrfs/EROFS/SquashFS explicitly waived (root loop mounts).
 
 ## Campaign highlights (`campaign-1787658658-67d977a`)
 

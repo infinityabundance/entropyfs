@@ -43,6 +43,15 @@ fn incompressible(seed: u8, len: usize) -> Vec<u8> {
         .collect()
 }
 
+/// The extent-tree root of a file inode.
+fn file_root(store: &Store, ino: u64) -> crate::core::extent::ChunkId {
+    let inode = store.get_inode(ino).unwrap().unwrap();
+    match inode.data {
+        crate::store::inode::InodeData::File { extent_root } => extent_root,
+        _ => panic!("not a file"),
+    }
+}
+
 fn encode_chunks(content: &[u8], store: &Store) -> Vec<ExtentUpdate> {
     let limits = store.limits();
     let policy = store.policy();
@@ -188,6 +197,116 @@ fn delete_then_write_works_under_pressure() {
     store.truncate_file(3, 0).unwrap();
     let read = store.read_file(3, 0, 1024).unwrap();
     assert!(read.is_empty() || read.iter().all(|&b| b == 0));
+}
+
+#[test]
+fn gc_preserves_live_sequence_rans_objects() {
+    // Regression: the store GC reachability walk must mark the model and
+    // enc objects of SEQUENCE_RANS extents live; otherwise GC reclaims
+    // them and reads break. (The campaign's reachable-byte accounting
+    // also under-counted every SequenceRans extent because of this.)
+    let dir = TempDir::new().unwrap();
+    let store = small_store(&dir);
+    let inode = crate::store::inode::Inode::new_file(1000, 1000, 0o644);
+    let mut tx = store.begin_tx().unwrap();
+    Store::put_inode_in_tx(&mut tx, 3, &inode).unwrap();
+    tx.commit(&CrashHooks::none()).unwrap();
+    // Text with long-distance repeats: SequenceRans must win.
+    let sentence =
+        b"the quick brown fox jumps over the lazy dog and then walks back to the riverbed ";
+    let mut content = Vec::new();
+    for i in 0..600 {
+        content.extend_from_slice(sentence);
+        content.extend_from_slice(format!("sentence number {i} has a unique tail ").as_bytes());
+    }
+    store.write_region(3, 0, &content).unwrap();
+    // The winning representation is SequenceRans.
+    let limits = store.limits();
+    let (_, desc_bytes) = crate::store::extent_tree::covering(
+        file_root(&store, 3),
+        0,
+        crate::store::BTREE_ORDER,
+        limits.max_fanout,
+        &store,
+    )
+    .unwrap()
+    .unwrap();
+    let desc = crate::format::descriptor::decode(
+        &desc_bytes,
+        limits.max_descriptor_bytes,
+        limits.max_inline_bytes,
+        limits.max_palette,
+        limits.max_period,
+        limits.max_chunk_size,
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            desc,
+            crate::core::representation::Representation::SequenceRans { .. }
+        ),
+        "expected SEQUENCE_RANS, got {:?}",
+        desc.family()
+    );
+    // GC must reclaim only unreachable records and leave reads intact.
+    crate::store::gc::collect(&store, &CrashHooks::none()).unwrap();
+    let back = store.read_file(3, 0, content.len() as u64).unwrap();
+    assert_eq!(back, content, "read-back after GC must be byte-exact");
+}
+
+#[test]
+fn gc_unreachable_bytes_counts_sequence_rans() {
+    // The reachable/unreachable split must count SequenceRans objects as
+    // reachable (the campaign accounting depends on this).
+    let dir = TempDir::new().unwrap();
+    let store = small_store(&dir);
+    let inode = crate::store::inode::Inode::new_file(1000, 1000, 0o644);
+    let mut tx = store.begin_tx().unwrap();
+    Store::put_inode_in_tx(&mut tx, 3, &inode).unwrap();
+    tx.commit(&CrashHooks::none()).unwrap();
+    let sentence =
+        b"the quick brown fox jumps over the lazy dog and then walks back to the riverbed ";
+    let mut content = Vec::new();
+    for i in 0..600 {
+        content.extend_from_slice(sentence);
+        content.extend_from_slice(format!("sentence number {i} has a unique tail ").as_bytes());
+    }
+    store.write_region(3, 0, &content).unwrap();
+    let unreachable = crate::store::gc::unreachable_bytes(&store).unwrap();
+    // The live SequenceRans objects must not be counted unreachable; the
+    // only unreachable bytes are superseded COW records.
+    let limits = store.limits();
+    let (_, desc_bytes) = crate::store::extent_tree::covering(
+        file_root(&store, 3),
+        0,
+        crate::store::BTREE_ORDER,
+        limits.max_fanout,
+        &store,
+    )
+    .unwrap()
+    .unwrap();
+    let desc = crate::format::descriptor::decode(
+        &desc_bytes,
+        limits.max_descriptor_bytes,
+        limits.max_inline_bytes,
+        limits.max_palette,
+        limits.max_period,
+        limits.max_chunk_size,
+    )
+    .unwrap();
+    match &desc {
+        crate::core::representation::Representation::SequenceRans { model, enc_obj, .. } => {
+            let live = crate::store::gc::mark_live(&store).unwrap();
+            assert!(live.contains(model), "model object must be reachable");
+            assert!(live.contains(enc_obj), "enc object must be reachable");
+        }
+        other => panic!("expected SEQUENCE_RANS, got {:?}", other.family()),
+    }
+    // Unreachable is small: only the superseded pre-write inode/tree.
+    assert!(
+        unreachable < content.len() as u64,
+        "unreachable {unreachable}"
+    );
 }
 
 #[test]
