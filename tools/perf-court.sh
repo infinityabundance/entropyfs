@@ -232,18 +232,29 @@ echo "1M read latency µs p50/p95/p99: $READ_PCTS"
 # --- bindgen build workload ----------------------------------------------
 BINDGEN_WALL_S=""
 WORK_HASH=""
+BINDGEN_RESULT="not-run"
 if [[ $DO_BINDGEN -eq 1 ]]; then
     echo "--- bindgen build workload (target on the mount) ---"
     WORK_SRC="$REPO_ROOT/tools/bindgen-workload"
-    WORK_HASH="$(tar -C "$WORK_SRC" -cf - . | sha256sum | awk '{print $1}')"
+    WORK_HASH="$(tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -C "$WORK_SRC" -cf - . | sha256sum | awk '{print $1}')"
     echo "workload source hash: $WORK_HASH"
     mkdir -p "$MOUNTPOINT/work"
     cp -r "$WORK_SRC"/. "$MOUNTPOINT/work/"
+    BINDGEN_LOG="$STORE_DIR/bindgen-build.log"
     T0=$(date +%s%N)
-    CARGO_TARGET_DIR="$MOUNTPOINT/work-target" cargo build --release --manifest-path "$MOUNTPOINT/work/Cargo.toml" 2>&1 | tail -5
-    T1=$(date +%s%N)
-    BINDGEN_WALL_S=$(python3 -c "print(f'{($T1-$T0)/1e9:.2f}')")
-    echo "bindgen build wall: ${BINDGEN_WALL_S}s"
+    if CARGO_TARGET_DIR="$MOUNTPOINT/work-target" cargo build --release --manifest-path "$MOUNTPOINT/work/Cargo.toml" >"$BINDGEN_LOG" 2>&1; then
+        T1=$(date +%s%N)
+        BINDGEN_WALL_S=$(python3 -c "print(f'{($T1-$T0)/1e9:.2f}')")
+        BINDGEN_RESULT="ok"
+        echo "bindgen build wall: ${BINDGEN_WALL_S}s"
+        tail -3 "$BINDGEN_LOG"
+    else
+        T1=$(date +%s%N)
+        BINDGEN_WALL_S=""
+        BINDGEN_RESULT="FAILED: $(grep -m1 -E 'error|SIGBUS|panicked' "$BINDGEN_LOG" || tail -1 "$BINDGEN_LOG")"
+        echo "bindgen build FAILED after $(python3 -c "print(f'{($T1-$T0)/1e9:.1f}')")s: $BINDGEN_RESULT"
+    fi
+    cp "$BINDGEN_LOG" "$EVIDENCE_DIR/bindgen-build.log"
     echo "cargo.lock hash: $(sha256sum "$MOUNTPOINT/work/Cargo.lock" 2>/dev/null | awk '{print $1}')"
 fi
 
@@ -260,10 +271,10 @@ DEV_READS=$(( ${DS_AFTER[0]:-0} - ${DS_BEFORE[0]:-0} ))
 echo "device delta: writes=${DEV_WRITES} sectors, reads=${DEV_READS} sectors (${DEV_NAME:-unknown})"
 
 # --- evidence -------------------------------------------------------------
-python3 - "$EVIDENCE_DIR" "$REV" "$KERNEL" "$GOVERNOR" "$CPU_MODEL" "$NPROC" "$MEM" "$MOUNT_DEV" "$FS_TYPE" "$CACHE_STATE" "$SIZE_MIB" "$W4K_MBPS" "$W4KB_MBPS" "$W1M_MBPS" "$READ_MBPS" "$COLD_MBPS" "$FSYNC_P50" "$READ_PCTS" "$BINDGEN_WALL_S" "$WORK_HASH" "$DEV_WRITES" "$DEV_READS" "$TS" <<'PY'
+python3 - "$EVIDENCE_DIR" "$REV" "$KERNEL" "$GOVERNOR" "$CPU_MODEL" "$NPROC" "$MEM" "$MOUNT_DEV" "$FS_TYPE" "$CACHE_STATE" "$SIZE_MIB" "$W4K_MBPS" "$W4KB_MBPS" "$W1M_MBPS" "$READ_MBPS" "$COLD_MBPS" "$FSYNC_P50" "$READ_PCTS" "$BINDGEN_WALL_S" "$BINDGEN_RESULT" "$WORK_HASH" "$DEV_WRITES" "$DEV_READS" "$TS" <<'PY'
 import json, sys
 (d, rev, kernel, gov, cpu, nproc, mem, dev, fstype, cache, size,
- w4k, w4kb, w1m, read, cold, fsync, readpcts, bindgen, workhash, dw, dr, ts) = sys.argv[1:]
+ w4k, w4kb, w1m, read, cold, fsync, readpcts, bindgen, bindgen_result, workhash, dw, dr, ts) = sys.argv[1:]
 fsync_p = fsync.split()
 read_p = readpcts.split()
 results = {
@@ -286,6 +297,7 @@ results = {
     "fsync_latency_us": {"p50": float(fsync_p[0]), "p95": float(fsync_p[1]), "p99": float(fsync_p[2])},
     "read_1m_latency_us": {"p50": float(read_p[0]), "p95": float(read_p[1]), "p99": float(read_p[2])},
     "bindgen_build_wall_s": None if not bindgen else float(bindgen),
+    "bindgen_build_result": bindgen_result,
     "bindgen_workload_source_hash": workhash or None,
     "device_write_sectors_delta": int(dw),
     "device_read_sectors_delta": int(dr),

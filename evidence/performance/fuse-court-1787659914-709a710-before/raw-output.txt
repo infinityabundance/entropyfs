@@ -1,0 +1,43 @@
+=== EntropyFS FUSE perf court ===
+revision: 709a710
+binary: /mnt/1tb_kingston/entropyfs-pre6/target/release/entropyfs
+timestamp: 1787659914
+store: /mnt/1tb_kingston/entropyfs-pre6/target/court-store
+mountpoint: /mnt/1tb_kingston/entropyfs-pre6/target/court-mnt
+size: 64 MiB
+label: before
+
+kernel: 7.2.0-1-cachyos
+governor: performance
+cpu: AMD Ryzen 7 9800X3D 8-Core Processor (16 threads)
+memory: 131533140 KiB
+backing device: /dev/nvme1n1p1 (ext4, st_dev 66305)
+
+created entropyfs store at /mnt/1tb_kingston/entropyfs-pre6/target/court-store (uuid 5302e72ff47ae46865ef5880ce4c0e16)
+entropyfs mounted: /mnt/1tb_kingston/entropyfs-pre6/target/court-store -> /mnt/1tb_kingston/entropyfs-pre6/target/court-mnt (pid 2925060)
+mounted (daemon pid 2925060)
+
+payload: 67108864 bytes shake_128 (deterministic, incompressible)
+--- 4K sync writes (write-through path, dsync) ---
+4K dsync writes: 1.2 MiB/s (52176770187ns wall, 16384 ops, 3185 µs/op incl. per-op fsync)
+--- 4K buffered writes (single trailing fsync) ---
+4K buffered writes: 0.6 MiB/s (104456577703ns wall + trailing fsync)
+--- 1M writes ---
+1M writes: 185.1 MiB/s (345771332ns wall + fsync)
+--- fsync latency (10 fsyncs of the 1M file) ---
+fsync latency µs p50/p95/p99: 320 545 545
+--- sequential read (warm) ×3 ---
+warm sequential read: 2207.1 MiB/s (best of 3)
+--- cold read ---
+cold read skipped: not root or drop_caches unavailable (cache state: warm (retained page cache))
+--- read-latency percentiles (64× 1M reads) ---
+1M read latency µs p50/p95/p99: 1173 1362 1403
+--- bindgen build workload (target on the mount) ---
+workload source hash: 824428929fe76cd3c37276493c945d21d2cf86d08f15cf89694e90b2e711a106
+bindgen build FAILED after 6.4s: FAILED: error: failed to run custom build command for `proc-macro2 v1.0.107`
+cargo.lock hash: 13659abca1bfafc75f04593683117a0d45e895863be2c718b4744bf2c8426a86
+
+unmounted cleanly
+device delta: writes=5869424 sectors, reads=8488 sectors (nvme1n1p1)
+evidence written: /mnt/1tb_kingston/entropyfs-pre6/evidence/performance/fuse-court-1787659914-709a710-before/
+=== court complete ===

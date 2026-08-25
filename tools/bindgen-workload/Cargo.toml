@@ -5,3 +5,7 @@ edition = "2021"
 
 [build-dependencies]
 bindgen = "0.70"
+
+# Standalone: never absorbed into a parent workspace (this corpus is copied
+# onto a mount and built from arbitrary trees).
+[workspace]

@@ -1,8 +1,11 @@
 # Performance Methodology
 
-Status: pre-results methodology. This document defines what evidence must
-exist before any EntropyFS performance, storage-density, optimization, or
-capacity claim is treated as a project fact.
+Status: active. This document defines what evidence must exist before any
+EntropyFS performance, storage-density, optimization, or capacity claim is
+treated as a project fact. It was written as pre-results methodology and its
+rules are unchanged by the arrival of results: the first sealed evidence is
+archived under `evidence/performance/` (see `evidence/performance/INDEX.md`),
+and the rules below continue to govern every future claim.
 
 This file mirrors the paper's empirical program. It is intentionally written
 before performance results are available so the measurement rules are not
@@ -214,4 +217,8 @@ Each run should include:
 - short human-readable report.
 
 The absence of files in `evidence/performance/` means no project performance
-claim has yet been admitted.
+claim has yet been admitted. As of the first sealed campaign
+(`campaign-1787658658-67d977a/`) and the Phase-6 FUSE court pair
+(`fuse-court-*`) the claims documented in `evidence/performance/INDEX.md`
+are admitted; anything not archived there remains exploratory and must be
+labeled as such.
