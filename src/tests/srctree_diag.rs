@@ -57,7 +57,7 @@ fn write_chunks(store: &Store, ino: u64, bytes: &[u8]) {
         .unwrap();
 }
 
-fn numbers(store: &Store) -> (u64, u64, u64, BTreeMap<String, u64>) {
+pub(crate) fn numbers(store: &Store) -> (u64, u64, u64, BTreeMap<String, u64>) {
     // (logical, reachable, total_backing, families)
     let total_backing = dir_bytes(store.dir());
     let unreachable = crate::store::gc::unreachable_bytes(store).unwrap();

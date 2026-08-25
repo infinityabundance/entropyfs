@@ -13,6 +13,7 @@ pub mod durability;
 pub mod enospc;
 pub mod fsck;
 pub mod helpers;
+pub mod model_oracle;
 pub mod namespace_ops;
 pub mod optimizer;
 pub mod persistent_store;

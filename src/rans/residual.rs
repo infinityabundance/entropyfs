@@ -197,10 +197,13 @@ impl Encoder for RansEncoder {
             Ok(e) => e,
             Err(_) => return Vec::new(),
         };
-        if encoded.len() >= input.len() {
+        let model_bytes = metadata::encode_model(&model);
+        // Phase-9G0: the payload-vs-raw gate must include the persisted
+        // model bytes — a chunk that saves fewer encoded bytes than its
+        // model costs can never beat RAW.
+        if encoded.len().saturating_add(model_bytes.len()) >= input.len() {
             return Vec::new();
         }
-        let model_bytes = metadata::encode_model(&model);
         let enc_obj = ObjectRecord::data(encoded);
         let model_obj = ObjectRecord::model(model_bytes);
         let rep = Representation::Rans {
@@ -278,10 +281,11 @@ impl Encoder for RansResidualEncoder {
                 Ok(e) => e,
                 Err(_) => continue,
             };
-            if encoded.len() >= diff.len() {
+            let model_bytes = metadata::encode_model(&model);
+            // Phase-9G0: include the persisted model bytes in the gate.
+            if encoded.len().saturating_add(model_bytes.len()) >= diff.len() {
                 continue;
             }
-            let model_bytes = metadata::encode_model(&model);
             let enc_obj = ObjectRecord::data(encoded);
             let model_obj = ObjectRecord::model(model_bytes);
             let residual = Residual::RansCoded {

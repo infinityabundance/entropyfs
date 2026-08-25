@@ -1014,8 +1014,19 @@ fn encode_one_stream(stream: &[u8]) -> Option<(StreamSlot, Vec<u8>)> {
         _ => {
             let model: RansModel = normalize_histogram(&hist, SCALE_BITS, CODEC)?;
             match encode_stream(stream, &model) {
-                Ok(enc) if enc.len() < stream.len() => {
-                    Some((StreamSlot::Rans(metadata::encode_model(&model)), enc))
+                Ok(enc) => {
+                    let model_bytes = metadata::encode_model(&model);
+                    // Phase-9G0: the stream-level RAW/rANS choice must
+                    // include the serialized model bytes. A stream that
+                    // saves a few encoded bytes while requiring a large
+                    // persisted model is not a win; without this the
+                    // sequence encoders persisted models for streams whose
+                    // rANS gain was smaller than the model itself.
+                    if enc.len() + model_bytes.len() < stream.len() {
+                        Some((StreamSlot::Rans(model_bytes), enc))
+                    } else {
+                        Some((StreamSlot::Raw, stream.to_vec()))
+                    }
                 }
                 _ => Some((StreamSlot::Raw, stream.to_vec())),
             }
