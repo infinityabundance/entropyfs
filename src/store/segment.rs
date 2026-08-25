@@ -305,6 +305,55 @@ pub fn list_segments(dir: &Path) -> Result<Vec<u64>, SegmentError> {
     Ok(out)
 }
 
+/// Recovery fallback: the newest valid ROOT record across all segments,
+/// reconstructed into a superblock (ADR-0008 Phase 6). Used when the
+/// superblock slots reference root records that a power loss destroyed
+/// (deferred durability writes the inactive slot before the segment data
+/// is fsync'd). Returns `(superblock, root)`.
+pub fn scan_newest_root(
+    dir: &Path,
+    max_records_per_segment: u64,
+) -> Result<
+    Option<(
+        crate::format::superblock::Superblock,
+        crate::store::root::Root,
+    )>,
+    SegmentError,
+> {
+    let mut best: Option<(
+        crate::format::superblock::Superblock,
+        crate::store::root::Root,
+    )> = None;
+    for seq in list_segments(dir)? {
+        let path = segment_path(dir, seq);
+        let (records, _) = scan_segment(&path, max_records_per_segment)?;
+        for rec in records {
+            if rec.tag != crate::format::version::RecordTag::Root {
+                continue;
+            }
+            let Ok(root) = crate::store::root::Root::decode(&rec.payload) else {
+                continue;
+            };
+            let sb = crate::format::superblock::Superblock {
+                uuid: root.uuid,
+                generation: root.generation,
+                root_object_id: root.id(),
+                segment_seq: root.segment_seq,
+                incompat: 0, // feature bits are re-flagged by later commits
+                ..Default::default()
+            };
+            let replace = match &best {
+                None => true,
+                Some((b, _)) => root.generation > b.generation,
+            };
+            if replace {
+                best = Some((sb, root));
+            }
+        }
+    }
+    Ok(best)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

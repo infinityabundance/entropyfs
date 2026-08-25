@@ -251,7 +251,7 @@ pub fn fsck(dir: &Path, options: &FsckOptions) -> Result<FsckReport, String> {
     verify::verify_all(&mut ctx)?;
 
     // Independent reachability walk.
-    let live = graph::mark_live(&ctx)?;
+    let live = graph::mark_live(&mut ctx)?;
     let (leaked_objects, leaked_bytes) = graph::leaked(&ctx, &live);
     graph::report_leaks(&mut ctx, &live)?;
 

@@ -651,18 +651,15 @@ impl Filesystem for EntropyFs {
         _req: &Request,
         _ino: INodeNo,
         _fh: FileHandle,
-        datasync: bool,
+        _datasync: bool,
         reply: ReplyEmpty,
     ) {
+        // Durability barrier (Phase 6): deferred writes become
+        // power-durable here (ADR-0008: records → fdatasync → superblock
+        // flip → fsync). v1 applies the full barrier for both FSYNC and
+        // FDATASYNC (data and metadata are interleaved in the segments).
         let mut store = self.store();
-        let res = if datasync {
-            store.fdatasync_segment()
-        } else {
-            store
-                .flush_segment()
-                .and_then(|_| store.fdatasync_segment())
-        };
-        match res {
+        match store.durability_barrier(&CrashHooks::none()) {
             Ok(()) => reply.ok(),
             Err(e) => reply.error(Self::errno(&e)),
         }

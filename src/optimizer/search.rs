@@ -140,6 +140,42 @@ pub fn encode_guided(
         if let Some(f) = crate::core::candidate::fill_candidate(ctx.target, cid) {
             candidates.push((Channel::Raw, f));
         }
+    }
+
+    // P0 (previous version) is evaluated early in the foreground: its
+    // bytes are already in hand (the RMW read), so it is nearly free, and
+    // a decisive win lets the search skip the expensive families.
+    if ctx.mode == SearchMode::Foreground && options.allow_bases {
+        if let Some(b) = &ctx.prev_version {
+            if !crate::optimizer::rebase::chain_contains(store, b, &cid) {
+                let p0_ctx = CandidateContext {
+                    limits: &limits,
+                    policy: &policy,
+                    content_id: cid,
+                    bases: std::slice::from_ref(b),
+                    dedup: None,
+                };
+                let cands =
+                    crate::entropy::residual::BaseResidualEncoder.encode(ctx.target, &p0_ctx);
+                candidates.extend(cands.into_iter().map(|c| (Channel::PrevVersion, c)));
+                // Large diffs may compress well as a rANS-coded residual.
+                let rans_cands =
+                    crate::rans::residual::RansResidualEncoder.encode(ctx.target, &p0_ctx);
+                candidates.extend(rans_cands.into_iter().map(|c| (Channel::PrevVersion, c)));
+            }
+        }
+    }
+
+    // Decisive-win early exit (Phase 6): if a cheap candidate already
+    // beats RAW by a large margin, the expensive families (rANS,
+    // configurational rank/unrank) cannot plausibly win — skip them and
+    // keep the write path latency-conscious (§16).
+    let raw_bytes = ctx.target.len() as u64;
+    let mut best_so_far: Option<&Candidate> = cheapest_of(&candidates, &policy);
+    let mut decisive = best_so_far
+        .map(|c| c.cost.persisted_bytes() <= raw_bytes / 8)
+        .unwrap_or(false);
+    if !decisive && options.allow_configurational {
         for enc in [
             Box::new(crate::entropy::sparse::SparseEncoder) as Box<dyn Encoder>,
             Box::new(crate::entropy::palette::PaletteEncoder),
@@ -151,9 +187,13 @@ pub fn encode_guided(
                     .map(|c| (Channel::Raw, c)),
             );
         }
+        best_so_far = cheapest_of(&candidates, &policy);
+        decisive = best_so_far
+            .map(|c| c.cost.persisted_bytes() <= raw_bytes / 8)
+            .unwrap_or(false);
     }
     let mut rans_measurement: Option<f64> = None;
-    if options.allow_rans {
+    if options.allow_rans && !decisive {
         let rans_cands = crate::rans::residual::RansEncoder.encode(ctx.target, &base_ctx);
         if let Some(best_rans) = pick_cheapest(&rans_cands, &policy) {
             rans_measurement = Some(measurement_for_ratio(
@@ -185,6 +225,12 @@ pub fn encode_guided(
             continue;
         }
         if options.allow_dsfb_ranking && !plan.should_evaluate(channel, position) {
+            continue;
+        }
+        // P0 was already evaluated up front in the foreground (its bytes
+        // are in hand); the plan loop only re-evaluates it in background
+        // mode where the full plan order matters.
+        if ctx.mode == SearchMode::Foreground && channel == Channel::PrevVersion {
             continue;
         }
         // Foreground keeps extra-base materialization rare: only P0 (in
@@ -250,6 +296,11 @@ pub fn encode_guided(
             let cands = crate::entropy::residual::BaseResidualEncoder.encode(ctx.target, &base_ctx);
             produced += cands.len();
             candidates.extend(cands.into_iter().map(|c| (channel, c)));
+            // Large diffs may compress well as a rANS-coded residual.
+            let rans_cands =
+                crate::rans::residual::RansResidualEncoder.encode(ctx.target, &base_ctx);
+            produced += rans_cands.len();
+            candidates.extend(rans_cands.into_iter().map(|c| (channel, c)));
         }
         if channel == Channel::Universe && options.allow_universe {
             let cands = crate::entropy::universe::UniverseEncoder.encode(ctx.target, &base_ctx);
@@ -456,6 +507,17 @@ fn measurement_for_ratio(ratio: f64) -> f64 {
     (1.0 - ratio.clamp(0.0, 1.0)).clamp(0.0, 1.0)
 }
 
+/// Cheapest candidate in a (channel, candidate) list.
+fn cheapest_of<'a>(
+    candidates: &'a [(Channel, Candidate)],
+    policy: &crate::core::cost::Policy,
+) -> Option<&'a Candidate> {
+    candidates
+        .iter()
+        .min_by_key(|(_, c)| c.total(policy))
+        .map(|(_, c)| c)
+}
+
 /// The outcome-quality scalar fed to the regime tracker: 1.0 for perfect
 /// structural/generated wins, the channel measurement for
 /// base/rans/raw-driven wins.
@@ -622,6 +684,59 @@ mod tests {
         };
         let out = encode_guided(&mut store, &ctx, OptimizeOptions::raw_only()).unwrap();
         assert!(matches!(out.update.descriptor, Representation::Raw { .. }));
+    }
+
+    #[test]
+    fn oversized_descriptor_candidate_is_rejected() {
+        // A BaseResidual with a huge RangeReplace residual can beat RAW on
+        // byte cost while exceeding max_descriptor_bytes — it must be
+        // rejected by validation (a committed oversized descriptor is
+        // undecodable: EIO on read, fsck errors). Found by the Phase 6
+        // cargo-build SIGBUS investigation.
+        let dir = TempDir::new().unwrap();
+        let mut store = create_store(&dir);
+        let f = ino(&mut store);
+        // Base: 64 KiB of pattern A.
+        let base: Vec<u8> = (0..65536u64)
+            .map(|i| (((i.wrapping_mul(7 * 2654435761)) >> 8) % 251) as u8)
+            .collect();
+        store.write_region(f, 0, &base).unwrap();
+        // Target: pattern B (a large, non-compressible diff — RangeReplace
+        // literals would exceed the descriptor limit).
+        let target: Vec<u8> = (0..65536u64)
+            .map(|i| (((i.wrapping_mul(11 * 2654435761)) >> 8) % 251) as u8)
+            .collect();
+        store.write_region(f, 0, &target).unwrap();
+        // The committed representation must be decodable (never an
+        // oversized descriptor), and fsck must be clean.
+        let limits = *store.limits();
+        let inode = store.get_inode(f).unwrap().unwrap();
+        let root = match inode.data {
+            crate::store::inode::InodeData::File { extent_root } => extent_root,
+            _ => unreachable!(),
+        };
+        let entries =
+            crate::store::extent_tree::scan_all(root, 64, limits.max_fanout, &store).unwrap();
+        for (_, bytes) in entries {
+            assert!(
+                bytes.len() as u64 <= limits.max_descriptor_bytes,
+                "descriptor exceeds the format limit"
+            );
+            let d = crate::format::descriptor::decode(
+                &bytes,
+                limits.max_descriptor_bytes,
+                limits.max_inline_bytes,
+                limits.max_palette,
+                limits.max_period,
+                limits.max_chunk_size,
+            )
+            .unwrap();
+            assert!(d.validate(&limits).is_ok());
+        }
+        let read = store.read_file(f, 0, 65536).unwrap();
+        assert_eq!(read, target);
+        let report = crate::fsck::fsck(dir.path(), &crate::fsck::FsckOptions::default()).unwrap();
+        assert!(report.is_clean(), "fsck: {}", report.render());
     }
 
     #[test]

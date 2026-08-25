@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod crash_recovery;
+pub mod durability;
 pub mod enospc;
 pub mod fsck;
 pub mod helpers;

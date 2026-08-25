@@ -213,24 +213,50 @@ impl FsckCtx {
 
     fn load_root(&mut self) -> Result<(), String> {
         let sb = self.active.clone();
-        let root_bytes = self
+        let slot_root = self
             .object_index
             .get(&sb.root_object_id)
             .map(|loc| {
                 segment::read_payload(&self.dir, loc.segment_seq, loc.offset, loc.stored_len)
             })
             .transpose()
-            .map_err(|e: SegmentError| format!("root payload read: {e}"))?
-            .ok_or_else(|| "root object missing from segments".to_string())?;
-        match crate::integrity::root::verify_root(&sb, &root_bytes) {
-            Ok(root) => self.root = Some(root),
-            Err(e) => self.issues.push(FsckIssue::new(
-                Severity::Error,
-                Category::Root,
-                format!("active root verification failed: {e}"),
-            )),
+            .map_err(|e: SegmentError| format!("root payload read: {e}"))?;
+        if let Some(bytes) = slot_root {
+            if let Ok(root) = crate::integrity::root::verify_root(&sb, &bytes) {
+                if root.generation == sb.generation {
+                    self.root = Some(root);
+                    return Ok(());
+                }
+            }
         }
-        Ok(())
+        // Deferred-durability fallback (Phase 6): the slot's root may have
+        // been destroyed by a power loss before its fsync. Recover the
+        // newest valid ROOT record from the segments and report the
+        // fallback.
+        match segment::scan_newest_root(&self.dir, self.options.max_records_per_segment) {
+            Ok(Some((sb, root))) => {
+                self.issues.push(FsckIssue::new(
+                    Severity::Warning,
+                    Category::Root,
+                    format!(
+                        "active superblock root missing/invalid; recovered newest root record (generation {})",
+                        root.generation
+                    ),
+                ));
+                self.active = sb;
+                self.root = Some(root);
+                Ok(())
+            }
+            Ok(None) => {
+                self.issues.push(FsckIssue::new(
+                    Severity::Error,
+                    Category::Root,
+                    "no valid root: slot root missing and no root record in segments".to_string(),
+                ));
+                Ok(())
+            }
+            Err(e) => Err(format!("segment root scan: {e}")),
+        }
     }
 }
 

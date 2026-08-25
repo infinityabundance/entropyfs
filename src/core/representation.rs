@@ -375,8 +375,14 @@ impl Representation {
 
     /// Validate structural invariants that do not require external
     /// resolution: lengths, palette consistency, periodic arithmetic,
-    /// inline size, reference sanity.
+    /// inline size, reference sanity, and the encoded descriptor size
+    /// (a descriptor that exceeds `max_descriptor_bytes` could win on raw
+    /// byte cost yet be undecodable — every persisted descriptor must
+    /// decode).
     pub fn validate(&self, limits: &crate::core::limits::Limits) -> Result<(), ReprError> {
+        if self.encoded_size() > limits.max_descriptor_bytes {
+            return Err(ReprError::DescriptorTooLarge);
+        }
         match self {
             Representation::Zero { len } => {
                 check_len(*len, limits)?;
@@ -722,6 +728,8 @@ pub enum ReprError {
     UnknownUniverse,
     /// Unknown transform id.
     UnknownTransform,
+    /// Encoded descriptor exceeds the format limit.
+    DescriptorTooLarge,
     /// Permutation length must be in 1..=34.
     PermutationSize,
     /// Permutation rank out of range.

@@ -273,8 +273,8 @@ impl Store {
         let lock = open_lock(dir)?;
         let sb_path = dir.join("superblock");
         let pair = SuperblockPair::read(&sb_path)?;
-        let sb = pair.choose()?;
-        // Rebuild the object index from segments.
+        // Rebuild the object index from segments (needed to resolve the
+        // root object; also the source for the recovery fallback).
         let mut object_index = ObjectIndex::new();
         let segments = segment::list_segments(dir)?;
         for seq in &segments {
@@ -293,24 +293,20 @@ impl Store {
                 );
             }
         }
-        // Load the root object.
-        let root_bytes = object_index
-            .get(&sb.root_object_id)
-            .map(|loc| segment::read_payload(dir, loc.segment_seq, loc.offset, loc.stored_len))
-            .transpose()?
-            .ok_or_else(|| StoreError::Superblock("root object missing".into()))?;
-        let root = Root::decode(&root_bytes)
-            .map_err(|e| StoreError::Superblock(format!("root decode: {e:?}")))?;
-        if root.generation != sb.generation {
-            return Err(StoreError::Superblock(
-                "root generation mismatch with superblock".into(),
-            ));
-        }
+        // Choose the committed superblock. With deferred durability the
+        // inactive slot is written before its segment data is fsync'd; a
+        // power loss can therefore leave the newest slot referencing a
+        // lost root record. Recovery validates the chosen slot's root and
+        // falls back to the newest valid ROOT record found in the
+        // segments — a complete earlier transaction (ADR-0008: recovery
+        // may observe the complete previous or complete new transaction,
+        // never an impossible hybrid).
+        let (sb, root) = Self::choose_root(&pair, dir, &object_index, config)?;
         let mut store = Self {
             dir: dir.to_path_buf(),
             config: *config,
             object_index,
-            root,
+            root: root.clone(),
             superblock: sb.clone(),
             generation: sb.generation,
             current_segment: None,
@@ -326,6 +322,41 @@ impl Store {
         // Deep-verify the chosen root quickly (structural).
         recovery::verify_root(&store)?;
         Ok(store)
+    }
+
+    /// Recovery root selection: prefer the highest-generation superblock
+    /// slot whose root object decodes with a matching generation; fall
+    /// back to the newest valid ROOT record in the segments (see
+    /// [`Store::open`]).
+    fn choose_root(
+        pair: &SuperblockPair,
+        dir: &Path,
+        object_index: &ObjectIndex,
+        config: &StoreConfig,
+    ) -> Result<(Superblock, Root), StoreError> {
+        // 1. Superblock slots, highest generation first.
+        let mut slots: Vec<Superblock> = [pair.a.clone(), pair.b.clone()]
+            .into_iter()
+            .flatten()
+            .collect();
+        slots.sort_by_key(|s| std::cmp::Reverse(s.generation));
+        for sb in slots {
+            if let Some(root) = load_root_for(&sb, dir, object_index)? {
+                if root.generation == sb.generation {
+                    return Ok((sb, root));
+                }
+            }
+        }
+        // 2. Fallback: the newest valid root record in the segments (the
+        //    last complete transaction; power loss may have destroyed the
+        //    slot-referenced roots of un-fsynced commits).
+        segment::scan_newest_root(dir, config.max_records_per_segment)
+            .map_err(|e| StoreError::Io(e.to_string()))?
+            .ok_or_else(|| {
+                StoreError::Superblock(
+                    "no valid root: slot roots missing and no root record in segments".into(),
+                )
+            })
     }
 
     /// The store directory.
@@ -432,7 +463,7 @@ impl Store {
     /// only when its content id resolves in the chunk index (a future
     /// reader resolves `BaseResidual.base` through the chunk index, so an
     /// unresolvable base would be undecodable). Depth reflects the base
-    /// chunk's own reference depth so chains are cost-accounted.
+    /// chunk's own chain depth so chains are cost-accounted.
     pub fn base_chunk_at(
         &self,
         ino: u64,
@@ -446,7 +477,16 @@ impl Store {
         if bytes.len() != len {
             return Ok(None); // shorter than requested: hole/tail at EOF
         }
-        let id = crate::core::extent::ChunkId::of(&bytes);
+        self.base_chunk_from_bytes(&bytes)
+    }
+
+    /// Build a candidate base from already-materialized bytes (the write
+    /// path's RMW read) without re-reading the store.
+    pub fn base_chunk_from_bytes(
+        &self,
+        bytes: &[u8],
+    ) -> Result<Option<crate::core::candidate::BaseChunk>, StoreError> {
+        let id = crate::core::extent::ChunkId::of(bytes);
         let Some(desc_bytes) = self.chunk_descriptor(&id)? else {
             return Ok(None);
         };
@@ -463,7 +503,11 @@ impl Store {
             Err(_) => return Ok(None),
         };
         let depth = crate::optimizer::rebase::chain_depth(self, &desc);
-        Ok(Some(crate::core::candidate::BaseChunk { id, bytes, depth }))
+        Ok(Some(crate::core::candidate::BaseChunk {
+            id,
+            bytes: bytes.to_vec(),
+            depth,
+        }))
     }
 
     /// The current descriptor bytes of the extent covering `offset` of
@@ -663,6 +707,38 @@ impl Store {
     pub fn fsync_superblock(&self) -> Result<(), StoreError> {
         let f = File::open(&self.superblock_path)?;
         f.sync_all()?;
+        Ok(())
+    }
+
+    /// The durability barrier (ADR-0008, Phase 6): makes the current
+    /// in-memory root durable — segment fdatasync, segment-directory sync,
+    /// superblock slot write, superblock fsync. Called by `fsync()`; also
+    /// the final step of a full `Tx::commit`. A power loss may lose every
+    /// deferred commit since the last barrier (POSIX: only fsync'd data is
+    /// power-durable), but recovery can never wedge: it validates the
+    /// chosen slot's root and falls back to the newest valid root record
+    /// in the segments.
+    pub fn durability_barrier(
+        &mut self,
+        hooks: &crate::store::transaction::CrashHooks,
+    ) -> Result<(), StoreError> {
+        // Records have been appended (by the deferred commit(s)); the
+        // segment has not been fdatasync'd yet.
+        hooks.hit(crate::store::transaction::CrashPoint::AfterRecordAppend)?;
+        // 1. fdatasync the affected segment.
+        self.fdatasync_segment()?;
+        hooks.hit(crate::store::transaction::CrashPoint::AfterSegmentFdatasync)?;
+        // 2. new segment directory entries durable.
+        self.sync_segments_dir()?;
+        hooks.hit(crate::store::transaction::CrashPoint::AfterSegmentDirFsync)?;
+        // 3. write the inactive superblock slot (idempotent: the deferred
+        //    commit already wrote it to the page cache) and fsync it.
+        let root = self.root.clone();
+        let root_id = root.id();
+        self.write_superblock(root_id, &root)?;
+        hooks.hit(crate::store::transaction::CrashPoint::AfterSuperblockWrite)?;
+        self.fsync_superblock()?;
+        hooks.hit(crate::store::transaction::CrashPoint::AfterSuperblockFsync)?;
         Ok(())
     }
 
@@ -1167,6 +1243,74 @@ impl Store {
             Store::put_inode_in_tx(&mut tx, ino, &inode)?;
         }
         tx.commit(hooks)?;
+        Ok(())
+    }
+
+    /// Commit a set of extent updates with deferred durability (the FUSE
+    /// write path; durability is provided by `fsync` →
+    /// [`Store::durability_barrier`]). Process-crash safe; power-durable
+    /// only after the next barrier.
+    pub fn commit_file_extents_deferred(
+        &mut self,
+        ino: u64,
+        updates: Vec<ExtentUpdate>,
+        new_size: Option<u64>,
+        hooks: &crate::store::transaction::CrashHooks,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.begin_tx()?;
+        for u in updates {
+            for obj in u.objects {
+                let tag = match obj.kind {
+                    crate::core::candidate::ObjectKind::Data => RecordTag::Data,
+                    crate::core::candidate::ObjectKind::Model => RecordTag::Model,
+                };
+                let ml = if tag == RecordTag::Data {
+                    Some(u.descriptor.len())
+                } else {
+                    None
+                };
+                crate::store::transaction::put_object(&mut tx, tag, obj.payload, ml);
+            }
+            Store::put_chunk_in_tx(&mut tx, &u.content_id, &u.descriptor)?;
+            Store::put_extent_in_tx(&mut tx, ino, u.offset, &u.descriptor)?;
+        }
+        if let Some(size) = new_size {
+            let inode = Store::inode_for_tx(&tx, ino)?;
+            let mut inode = inode;
+            if let InodeData::File { extent_root } = &inode.data {
+                if !extent_root.is_zero() {
+                    let limits = tx.store.config.limits;
+                    let all = crate::store::extent_tree::scan_all(
+                        *extent_root,
+                        BTREE_ORDER,
+                        limits.max_fanout,
+                        &tx,
+                    )?;
+                    let mut keep_root = *extent_root;
+                    for (start, _) in all {
+                        if start >= size {
+                            let (nr, _) = crate::store::extent_tree::remove(
+                                keep_root,
+                                start,
+                                BTREE_ORDER,
+                                limits.max_fanout,
+                                &mut tx,
+                            )?;
+                            keep_root = nr;
+                        }
+                    }
+                    if keep_root != *extent_root {
+                        inode.data = InodeData::File {
+                            extent_root: keep_root,
+                        };
+                    }
+                }
+            }
+            inode.size = size;
+            inode.mtime = crate::store::inode::Timespec::now();
+            Store::put_inode_in_tx(&mut tx, ino, &inode)?;
+        }
+        let _ = tx.commit_deferred(hooks)?;
         Ok(())
     }
 
@@ -1953,10 +2097,11 @@ impl Store {
             // read (clipped to the file size) so untouched bytes survive.
             let full_chunk = write_start == 0 && write_end == chunk_class as usize;
             let mut chunk_bytes = vec![0u8; chunk_class as usize];
+            let mut partial: Vec<u8> = Vec::new();
             if !full_chunk {
                 let read_end = (chunk_off + chunk_class).min(old_size);
                 if read_end > chunk_off {
-                    let partial = self.read_file(ino, chunk_off, read_end - chunk_off)?;
+                    partial = self.read_file(ino, chunk_off, read_end - chunk_off)?;
                     let n = partial.len().min(chunk_class as usize);
                     chunk_bytes[..n].copy_from_slice(&partial[..n]);
                 }
@@ -1974,9 +2119,17 @@ impl Store {
             // Phase 4: the guided search (DSFB-ordered, §16). P0 is the
             // previous version of this chunk (the natural edit base for
             // versioned data, H2); it is only usable when the old extent
-            // resolves in the chunk index.
+            // resolves in the chunk index. When the RMW already
+            // materialized the full pre-write chunk, reuse those bytes
+            // instead of re-reading the store (Phase 6 hot path).
             let mut prev_version = if old_size > chunk_off {
-                self.base_chunk_at(ino, chunk_off, chunk_len)?
+                if !full_chunk && old_size >= chunk_off + chunk_len as u64 {
+                    self.base_chunk_from_bytes(&partial[..chunk_len])?
+                } else if full_chunk {
+                    self.base_chunk_at(ino, chunk_off, chunk_len)?
+                } else {
+                    None // old extent shorter than the target chunk
+                }
             } else {
                 None
             };
@@ -2013,7 +2166,7 @@ impl Store {
             chunk += 1;
         }
 
-        self.commit_file_extents(ino, updates, Some(new_size), &CrashHooks::none())?;
+        self.commit_file_extents_deferred(ino, updates, Some(new_size), &CrashHooks::none())?;
         Ok(())
     }
 
@@ -2514,6 +2667,23 @@ fn open_lock(dir: &Path) -> Result<File, StoreError> {
     flock(&file, FlockOperation::LockExclusive)
         .map_err(|e| StoreError::Io(format!("store lock failed: {e}")))?;
     Ok(file)
+}
+
+/// Load and validate the root object a superblock references (None when
+/// missing/undecodable — the recovery fallback path).
+fn load_root_for(
+    sb: &Superblock,
+    dir: &Path,
+    object_index: &ObjectIndex,
+) -> Result<Option<Root>, StoreError> {
+    let Some(loc) = object_index.get(&sb.root_object_id) else {
+        return Ok(None);
+    };
+    let bytes = segment::read_payload(dir, loc.segment_seq, loc.offset, loc.stored_len)?;
+    match Root::decode(&bytes) {
+        Ok(root) => Ok(Some(root)),
+        Err(_) => Ok(None),
+    }
 }
 
 /// Ensure the store directory exists (create helper).

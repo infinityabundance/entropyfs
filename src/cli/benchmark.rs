@@ -288,6 +288,10 @@ pub fn run(args: &BenchmarkArgs) -> Result<(), String> {
 
     let used = store.physical_used();
     let families = representation_distribution(&store, 3).map_err(|e| e.to_string())?;
+    // Deferred writes: make the benchmark durable before reporting.
+    store
+        .durability_barrier(&CrashHooks::none())
+        .map_err(|e| e.to_string())?;
     println!("benchmark: {total} logical bytes");
     println!("write:   {write_mbps:.1} MiB/s");
     println!("read:    {read_mbps:.1} MiB/s (verified {verified} bytes)");

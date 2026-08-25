@@ -42,7 +42,7 @@ enum MarkKind {
 }
 
 /// Walk the graph and return the live object set.
-pub fn mark_live(ctx: &FsckCtx) -> Result<HashSet<ChunkId>, String> {
+pub fn mark_live(ctx: &mut FsckCtx) -> Result<HashSet<ChunkId>, String> {
     let mut live: HashSet<ChunkId> = HashSet::new();
     let mut work: VecDeque<(ChunkId, MarkKind)> = VecDeque::new();
     let root = ctx
@@ -155,7 +155,7 @@ fn fetch_inode(ctx: &FsckCtx, id: &ChunkId) -> Result<Inode, String> {
 }
 
 fn walk_tree(
-    ctx: &FsckCtx,
+    ctx: &mut FsckCtx,
     node_id: &ChunkId,
     value_kind: TreeValue,
     live: &mut HashSet<ChunkId>,
@@ -226,21 +226,32 @@ fn walk_tree(
 }
 
 fn mark_descriptor_refs(
-    ctx: &FsckCtx,
+    ctx: &mut FsckCtx,
     bytes: &[u8],
     live: &mut HashSet<ChunkId>,
     work: &mut VecDeque<(ChunkId, MarkKind)>,
 ) -> Result<(), String> {
     let o = &ctx.options;
-    let desc = crate::format::descriptor::decode(
+    let desc = match crate::format::descriptor::decode(
         bytes,
         o.max_descriptor_bytes,
         o.max_inline_bytes,
         o.max_palette,
         o.max_period,
         o.max_chunk_size,
-    )
-    .map_err(|e| format!("descriptor decode: {e:?}"))?;
+    ) {
+        Ok(d) => d,
+        // A corrupt descriptor cannot be walked; report it as an issue and
+        // continue (fsck must never abort on one bad record).
+        Err(e) => {
+            ctx.issues.push(FsckIssue::new(
+                Severity::Error,
+                Category::Reference,
+                format!("descriptor decode failed during reachability walk: {e:?}"),
+            ));
+            return Ok(());
+        }
+    };
     let mut refs = Vec::new();
     match &desc {
         Representation::Raw { obj, .. } => refs.push(*obj),

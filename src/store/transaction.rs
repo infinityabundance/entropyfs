@@ -146,14 +146,35 @@ impl<'a> Tx<'a> {
         self.store.fetch_object(id)
     }
 
-    /// Commit: append records, sync, flip the superblock (ADR-0008).
-    pub fn commit(mut self, hooks: &CrashHooks) -> Result<(), StoreError> {
+    /// Commit: full durability — append records, sync the segment, flip
+    /// the superblock, fsync it (ADR-0008). Used by CLI/batch paths and
+    /// the crash-court tests.
+    pub fn commit(self, hooks: &CrashHooks) -> Result<(), StoreError> {
+        let store = self.commit_deferred(hooks)?;
+        store.durability_barrier(hooks)?;
+        Ok(())
+    }
+
+    /// Commit logically: the transaction becomes the in-memory current
+    /// root and its records are flushed to the backing file's page cache
+    /// and the inactive superblock slot is written (page cache only, no
+    /// fsync). A process crash preserves the writes; a power loss may lose
+    /// everything since the last [`Store::durability_barrier`] (POSIX:
+    /// only fsync'd data is power-durable). Recovery validates the chosen
+    /// slot's root and falls back to the newest valid root record in the
+    /// segments, so a stale slot can never wedge the filesystem. Returns
+    /// the store (for the caller to run the barrier when needed).
+    pub fn commit_deferred(
+        mut self,
+        hooks: &CrashHooks,
+    ) -> Result<&'a mut crate::store::Store, StoreError> {
         // 0. ENOSPC guard: refuse before staging anything (the watermark
         //    keeps the GC emergency reserve untouched).
         self.store.ensure_commit_space(&self.records)?;
         // 1. finalize the root and stage its record WITH the other records
         //    so the whole commit is one flush (the superblock must never
-        //    reference a root record that is not durable).
+        //    reference a root record that is not at least page-cache
+        //    durable).
         self.root.generation = self.store.generation() + 1;
         self.root.segment_seq = self.store.current_segment_seq();
         let root_bytes = self.root.encode();
@@ -164,24 +185,17 @@ impl<'a> Tx<'a> {
             materialized_len: None,
         });
         hooks.hit(CrashPoint::AfterRootWrite)?;
-        // 2. append all new immutable records (including the root)
+        // 2. append all new immutable records (including the root).
         self.store.append_records(&mut self.records)?;
-        hooks.hit(CrashPoint::AfterRecordAppend)?;
-        // 3. fdatasync the affected segment
-        self.store.fdatasync_segment()?;
-        hooks.hit(CrashPoint::AfterSegmentFdatasync)?;
-        // 4. new segment directory entries durable
-        self.store.sync_segments_dir()?;
-        hooks.hit(CrashPoint::AfterSegmentDirFsync)?;
-        // 5. write the inactive superblock slot
+        // 3. flush the segment to the file's page cache (process-crash
+        //    durable; the power barrier is the durability barrier).
+        self.store.flush_segment()?;
+        // 4. write the inactive superblock slot (page cache; fsync at the
+        //    barrier). Torn slot writes are detected at recovery.
         self.store.write_superblock(root_id, &self.root)?;
-        hooks.hit(CrashPoint::AfterSuperblockWrite)?;
-        // 6. fsync the superblock file
-        self.store.fsync_superblock()?;
-        hooks.hit(CrashPoint::AfterSuperblockFsync)?;
-        // 7. publish in-memory state
+        // 5. publish in-memory state.
         self.store.publish_commit(&self.root, root_id)?;
-        Ok(())
+        Ok(self.store)
     }
 }
 
