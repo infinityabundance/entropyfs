@@ -386,6 +386,46 @@ pub enum Representation {
         /// Materialized length.
         len: u64,
     },
+    /// Cross-chunk dictionary match coding (Phase-9B; ADR-0005): the
+    /// SEQUENCE_RANS command semantics plus a fourth *copy-source* stream
+    /// (one byte per copy: `SRC_LOCAL` = the u16 value is a backward
+    /// distance in the already-materialized output, `SRC_DICT` = it is an
+    /// absolute offset into the dictionary chunk). The dictionary is the
+    /// previous same-file chunk (v1); it is a content-addressed chunk
+    /// reference, so its own persisted state is accounted where it is
+    /// materialized, and the reference depth (dictionary chain + 1) is
+    /// capped by `max_reference_depth` so cross-chunk dictionary chains
+    /// never defeat bounded random access.
+    SequenceDict {
+        /// Content id of the dictionary chunk.
+        dictionary: ChunkId,
+        /// Materialized length of the dictionary chunk (≤ 64 KiB; u16
+        /// DICT offsets).
+        dictionary_len: u32,
+        /// Content id of the model object (4 length-prefixed slots).
+        model: ChunkId,
+        /// Content id of the encoded object (4 concatenated streams:
+        /// commands, literals, offsets, copy sources).
+        enc_obj: ChunkId,
+        /// Model scale bits (shared by all four streams).
+        scale_bits: u8,
+        /// Codec used for the streams.
+        codec: RansCodec,
+        /// Encoded command-stream length (bytes).
+        seq_len: u32,
+        /// Encoded literal-stream length (bytes).
+        lit_len: u32,
+        /// Encoded offset-stream length (bytes).
+        off_len: u32,
+        /// Encoded copy-source-stream length (bytes).
+        src_len: u32,
+        /// Command count (= decoded command-stream length).
+        cmds: u32,
+        /// Decoded literal-stream length (total literal bytes).
+        lit_out: u32,
+        /// Materialized length.
+        len: u64,
+    },
 }
 
 impl Representation {
@@ -404,7 +444,8 @@ impl Representation {
             | Representation::EntropyRef { len, .. }
             | Representation::Permutation { len, .. }
             | Representation::SequenceRans { len, .. }
-            | Representation::SparseBlock64 { len, .. } => *len,
+            | Representation::SparseBlock64 { len, .. }
+            | Representation::SequenceDict { len, .. } => *len,
             Representation::Inline { data } => data.len() as u64,
         }
     }
@@ -431,6 +472,7 @@ impl Representation {
             Representation::Permutation { .. } => 0x0C,
             Representation::SequenceRans { .. } => 0x0D,
             Representation::SparseBlock64 { .. } => 0x0E,
+            Representation::SequenceDict { .. } => 0x0F,
         }
     }
 
@@ -451,6 +493,7 @@ impl Representation {
             Representation::Permutation { .. } => "PERMUTATION",
             Representation::SequenceRans { .. } => "SEQUENCE_RANS",
             Representation::SparseBlock64 { .. } => "SPARSE_BLOCK64",
+            Representation::SequenceDict { .. } => "SEQUENCE_DICT",
         }
     }
 
@@ -484,6 +527,9 @@ impl Representation {
             Representation::Permutation { alphabet, .. } => 16 + alphabet.len() as u64,
             Representation::SequenceRans { .. } => 32 + 32 + 1 + 1 + 4 + 4 + 4 + 4 + 4,
             Representation::SparseBlock64 { .. } => 32 + 32 + 1 + 1 + 4 + 4 + 4 + 4 + 4 + 4,
+            // dictionary id + dictionary_len + model + enc + scale + codec
+            // + seq/lit/off/src/cmds/lit_out.
+            Representation::SequenceDict { .. } => 32 + 4 + 32 + 32 + 1 + 1 + 4 + 4 + 4 + 4 + 4 + 4,
         };
         base + payload
     }
@@ -766,6 +812,55 @@ impl Representation {
                     return Err(ReprError::SparseBlockLiteralCount);
                 }
             }
+            Representation::SequenceDict {
+                dictionary,
+                dictionary_len,
+                model,
+                enc_obj,
+                scale_bits,
+                seq_len,
+                lit_len,
+                off_len,
+                src_len,
+                cmds,
+                lit_out,
+                len,
+                ..
+            } => {
+                check_len(*len, limits)?;
+                if dictionary.is_zero() || model.is_zero() || enc_obj.is_zero() {
+                    return Err(ReprError::ZeroObjectId);
+                }
+                if !(1..=16).contains(scale_bits) {
+                    return Err(ReprError::BadScaleBits);
+                }
+                // DICT offsets are u16: the dictionary must be non-empty
+                // and at most 64 KiB, and it is a logical chunk, so it
+                // cannot exceed the chunk-class bound either.
+                if *dictionary_len == 0
+                    || *dictionary_len as u64 > crate::rans::sequence::MAX_DICT as u64
+                    || *dictionary_len as u64 > limits.max_chunk_size
+                {
+                    return Err(ReprError::BadDictionary);
+                }
+                let max_stream = limits.max_chunk_size.saturating_add(64);
+                for s in [*seq_len, *lit_len, *off_len, *src_len] {
+                    if s as u64 > max_stream {
+                        return Err(ReprError::SequenceStreamTooLarge);
+                    }
+                }
+                if (*lit_out as u64) > *len {
+                    return Err(ReprError::SequenceLitOutMismatch);
+                }
+                if *cmds == 0 && *len > 0 {
+                    return Err(ReprError::SequenceNoCommands);
+                }
+                // Every command writes at least one byte, so the command
+                // count cannot exceed the output length.
+                if (*cmds as u64) > *len {
+                    return Err(ReprError::SequenceCmdsMismatch);
+                }
+            }
         }
         Ok(())
     }
@@ -992,6 +1087,9 @@ pub enum ReprError {
     SparseBlockWords,
     /// SPARSE_BLOCK64 literal count is inconsistent with the marked bytes.
     SparseBlockLiteralCount,
+    /// SEQUENCE_DICT dictionary length is zero, exceeds 64 KiB (u16 DICT
+    /// offsets), or exceeds the chunk-class bound.
+    BadDictionary,
 }
 
 impl std::fmt::Display for ReprError {

@@ -174,6 +174,7 @@ Representation tags and payloads:
 | 0x0C | PERMUTATION | rank u128, alphabet (len bytes; distinct, strictly increasing, len ≤ 34) |
 | 0x0D | SEQUENCE_RANS | model `[u8;32]`, enc_obj `[u8;32]`, scale_bits u8, codec u8, seq_len u32, lit_len u32, off_len u32, cmds u32, lit_out u32 |
 | 0x0E | SPARSE_BLOCK64 | model `[u8;32]`, enc_obj `[u8;32]`, scale_bits u8, codec u8, pc_len u32, rank_len u32, lit_len u32, words u32, nonzero u32, lit_out u32 |
+| 0x0F | SEQUENCE_DICT | dictionary `[u8;32]`, dictionary_len u32, model `[u8;32]`, enc_obj `[u8;32]`, scale_bits u8, codec u8, seq_len u32, lit_len u32, off_len u32, src_len u32, cmds u32, lit_out u32 |
 
 SEQUENCE_RANS (0x0D) is the local-match + entropy floor: an LZ77-style
 hash-chain matcher turns the extent into three byte streams — *commands*,
@@ -206,6 +207,25 @@ literal stream). `words = ceil(len / 8)`; `nonzero` = number of words with
 marked bytes. This removes the plain-SPARSE `u128` combination-rank cliff
 (`10 ≤ k ≤ n−10` at 64 KiB) while staying bounded and popcount-friendly.
 The three streams share the SEQUENCE_RANS codec.
+
+SEQUENCE_DICT (0x0F, Phase-9B) is cross-chunk dictionary match coding: the
+same command semantics as SEQUENCE_RANS plus a fourth *copy-source*
+stream — one byte per copy command saying whether the command's u16 value
+is a LOCAL backward distance into the already-materialized output (`0x00`)
+or a DICT absolute offset into the ≤64 KiB dictionary chunk (`0x01`). The
+model object holds FOUR slots; the enc object is
+`[commands][literals][offsets][sources]` (`seq_len + lit_len + off_len +
+src_len` == enc object length; `src_len` decodes to one byte per copy
+command). The dictionary is a content-addressed chunk reference (the
+previous same-file chunk, v1). A LOCAL copy is byte-progressive
+(`out[p+i] = out[p+i-d]`); a DICT copy reads a contiguous range
+(`out[p..p+len] = dict[off..off+len]`), so a DICT match longer than 131
+bytes is split into continuation commands whose u16 values ADVANCE the
+dictionary offset (`off, off+131, off+262, …`). `dictionary_len` bounds
+DICT offsets (u16 → ≤ 65536) and the reference depth is accounted like a
+base chain: the dictionary's own chain depth plus 1 must not exceed
+`max_reference_depth`, so cross-chunk dictionary chains can never defeat
+bounded random access.
 
 Residual (for BASE_RESIDUAL / ENTROPY_REF), kinds:
 
@@ -252,7 +272,9 @@ validated constructors and validates via `malformed::validate_freq_model`.
 
 ## 8a. SEQUENCE_RANS model object (payload of tag 0x02)
 
-Three slots, one per stream (commands, literals, offsets):
+Three or four slots (SEQUENCE_RANS / BASE_SEQUENCE / SPARSE_BLOCK64 use
+three: commands, literals, offsets; SEQUENCE_DICT uses four: commands,
+literals, offsets, copy sources):
 
 | Field | Type |
 |-------|------|

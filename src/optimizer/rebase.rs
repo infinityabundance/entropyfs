@@ -20,7 +20,9 @@ pub const REBASE_DEPTH_THRESHOLD: u8 = 2;
 /// direct reference). For the full chain depth use [`chain_depth`].
 pub const fn depth_of(desc: &Representation) -> u8 {
     match desc {
-        Representation::ExactRef { .. } | Representation::BaseResidual { .. } => 1,
+        Representation::ExactRef { .. }
+        | Representation::BaseResidual { .. }
+        | Representation::SequenceDict { .. } => 1,
         _ => 0,
     }
 }
@@ -37,6 +39,7 @@ pub fn chain_depth(store: &Store, desc: &Representation) -> u8 {
         let next_id = match cur {
             Representation::ExactRef { target, .. } => Some(*target),
             Representation::BaseResidual { base, .. } => Some(*base),
+            Representation::SequenceDict { dictionary, .. } => Some(*dictionary),
             _ => None,
         };
         let Some(id) = next_id else { break };
@@ -97,6 +100,7 @@ pub fn chain_contains(
         let next = match &desc {
             Representation::ExactRef { target: t, .. } => Some(*t),
             Representation::BaseResidual { base: b, .. } => Some(*b),
+            Representation::SequenceDict { dictionary: d, .. } => Some(*d),
             _ => None,
         };
         let Some(next) = next else {
@@ -126,9 +130,21 @@ pub fn flatten_if_deep(
     let policy = *store.policy();
     // Re-encode through the unguided cheap path (no bases → depth 0).
     let update = Store::encode_chunk(bytes, start, *cid, &limits, &policy)?;
-    // The unguided encoder guarantees exactness; verify anyway (§32 gate
-    // for every committed representation).
-    let back = crate::core::materialize::materialize_to_vec(&update.descriptor, store, &limits)
+    // §32 gate: the unguided encoder guarantees exactness; verify anyway
+    // through a resolver that sees the update's OWN new objects (they are
+    // staged, not yet committed — materializing through the bare store
+    // would fail on rANS/sequence model and stream objects; found by the
+    // SequenceDict background chain, Phase-9B).
+    let resolver = crate::optimizer::search::CandidateResolver::new(
+        store,
+        update
+            .objects
+            .iter()
+            .map(|o| (o.id, o.payload.clone()))
+            .collect(),
+        None,
+    );
+    let back = crate::core::materialize::materialize_to_vec(&update.descriptor, &resolver, &limits)
         .map_err(|e| StoreError::Descriptor(e.to_string()))?;
     if back != bytes {
         return Ok(None); // never commit a corrupting flatten

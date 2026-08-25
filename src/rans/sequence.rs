@@ -35,6 +35,28 @@
 //! is rANS-encoded or raw per its slot. Everything is content-addressed
 //! and counted in the candidate's persisted byte total — the raw fallback
 //! inside the family never hides bytes.
+//!
+//! # SequenceDict (Phase-9B): cross-chunk dictionary context
+//!
+//! `SEQUENCE_DICT` extends the same command semantics with a fourth stream:
+//! the *copy-source* stream, one byte per copy command, saying whether the
+//! command's u16 value is a LOCAL backward distance into the already-
+//! materialized output (`0x00`) or a DICT absolute offset into the ≤64 KiB
+//! dictionary chunk (`0x01`). The model object holds four slots, the enc
+//! object four concatenated streams:
+//!
+//! ```text
+//! commands | literals | offsets | sources
+//! ```
+//!
+//! The dictionary is a content-addressed chunk reference (the previous
+//! same-file chunk, Phase-9B v1). The descriptor's `dictionary_len` bounds
+//! DICT offsets (u16 → ≤ 65536) and the reference depth is accounted like
+//! a base chain: the dictionary's own chain depth plus 1 must not exceed
+//! `max_reference_depth`, so cross-chunk dictionary chains can never
+//! defeat bounded random access. SequenceDict stays a *distinct* family
+//! from `BaseSequence` (temporal deltas) and `SequenceRans` (local-only)
+//! to preserve the attribution boundary.
 
 #![forbid(unsafe_code)]
 
@@ -48,6 +70,17 @@ use crate::rans::residual::encode_stream;
 /// Minimum match length (a 4-byte copy costs 3 bytes pre-entropy: command
 /// byte + u16 offset; 4 literal bytes cost 4).
 pub const MIN_MATCH: usize = 4;
+/// Copy-source symbol: the u16 value is a backward distance in the
+/// already-materialized output (byte-progressive copy).
+pub const SRC_LOCAL: u8 = 0x00;
+/// Copy-source symbol: the u16 value is an absolute offset into the
+/// dictionary chunk.
+pub const SRC_DICT: u8 = 0x01;
+/// Maximum dictionary size: DICT offsets are u16 LE, so a dictionary can
+/// be at most 64 KiB (offsets 0..=65535).
+pub const MAX_DICT: usize = 65536;
+/// Dict-match chain depth cap (deterministic, bounded search).
+const DICT_CHAIN_DEPTH: usize = 8;
 /// Maximum copy length per command (`0xFF - 0x80 + 4`).
 pub const MAX_COPY: usize = 131;
 /// Maximum literal run per command (`0x7F + 1`).
@@ -95,6 +128,18 @@ pub struct EncodedSequence {
     pub cmds: u32,
     /// Decoded literal byte count.
     pub lit_out: u32,
+}
+
+/// The fully encoded N-stream family (Phase-9B generalization): model
+/// object, enc object, and one encoded length per stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedStreams {
+    /// Model object payload (N slots).
+    pub model_obj: Vec<u8>,
+    /// Enc object payload (N concatenated streams).
+    pub enc_obj: Vec<u8>,
+    /// Encoded length of each stream, in stream order.
+    pub lens: Vec<u32>,
 }
 
 /// Sequence stream errors (typed; never panic).
@@ -218,6 +263,198 @@ pub fn encode_sequence(input: &[u8]) -> SequenceStreams {
     }
 }
 
+/// The four raw streams of a SequenceDict parse (Phase-9B): the usual
+/// commands/literals/offsets plus one copy-source byte per copy command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DictStreams {
+    /// One command byte per command (same semantics as SequenceRans).
+    pub commands: Vec<u8>,
+    /// Literal-run bytes in command order.
+    pub literals: Vec<u8>,
+    /// One u16 LE offset per copy command (LOCAL: distance; DICT: absolute
+    /// dictionary offset).
+    pub offsets: Vec<u8>,
+    /// One source byte (`SRC_LOCAL`/`SRC_DICT`) per copy command.
+    pub sources: Vec<u8>,
+}
+
+/// The raw LZ77 streams for `input` against both the local history and the
+/// external dictionary (greedy, bounded hash-chain matcher).
+///
+/// At every position the longer of the local match and the dictionary
+/// match wins; equal lengths deterministically prefer the LOCAL match
+/// (identical stream cost, cheaper decoder state). Deterministic and
+/// bounded: both chain walks are depth-capped, offsets/distances are u16,
+/// every loop is length-bounded by `input.len()`. Returns `None` for an
+/// empty input or an unusable dictionary.
+pub fn encode_sequence_dict(input: &[u8], dict: &[u8]) -> Option<DictStreams> {
+    let n = input.len();
+    if n == 0 || dict.is_empty() || dict.len() > MAX_DICT {
+        return None;
+    }
+    let mut commands = Vec::new();
+    let mut literals = Vec::new();
+    let mut offsets = Vec::new();
+    let mut sources = Vec::new();
+    let hsize = 1usize << 16;
+    // Local hash chains over the input (as consumed).
+    let mut head = vec![u32::MAX; hsize];
+    let mut chain = vec![u32::MAX; n];
+    // Dictionary hash chains over the whole dictionary (built once; the
+    // dictionary is immutable for the duration of the parse).
+    let mut d_head = vec![u32::MAX; hsize];
+    let mut d_chain = vec![u32::MAX; dict.len()];
+    let dict_limit = dict.len().saturating_sub(MIN_MATCH - 1);
+    for (p, slot) in d_chain.iter_mut().enumerate().take(dict_limit) {
+        let h = hash_at(dict, p);
+        *slot = d_head[h];
+        d_head[h] = p as u32;
+    }
+    let mut pos = 0usize;
+    while pos < n {
+        if pos + MIN_MATCH <= n {
+            if let Some((dist, len, source)) =
+                best_match(input, pos, dict, &head, &chain, &d_head, &d_chain)
+            {
+                // Same copy-clipping contract as SequenceRans: a tail
+                // remainder of 1..=3 bytes would decode as a 128-byte
+                // literal run — clip it so the remainder lands in the
+                // literal path (byte-exactness preserved).
+                let mut len = len;
+                let rem = len % MAX_COPY;
+                if rem > 0 && rem < MIN_MATCH {
+                    len -= rem;
+                }
+                let mut remaining = len;
+                // A LOCAL copy is byte-progressive (continuation commands
+                // repeat the same distance over the growing output); a
+                // DICT copy reads a contiguous dict range, so each
+                // continuation command must carry the ADVANCED absolute
+                // offset (dict[off + i*131 ..]) — the decoder reads every
+                // command's u16 independently.
+                let mut cur_off = dist;
+                while remaining > 0 {
+                    let take = remaining.min(MAX_COPY);
+                    debug_assert!((MIN_MATCH..=MAX_COPY).contains(&take));
+                    commands.push((0x80 + take - MIN_MATCH) as u8);
+                    offsets.extend_from_slice(&(cur_off as u16).to_le_bytes());
+                    sources.push(source);
+                    if source == SRC_DICT {
+                        cur_off = cur_off.saturating_add(take);
+                    }
+                    remaining -= take;
+                }
+                let end = pos + len;
+                while pos < end {
+                    if pos + MIN_MATCH <= n {
+                        let h = hash_at(input, pos);
+                        chain[pos] = head[h];
+                        head[h] = pos as u32;
+                    }
+                    pos += 1;
+                }
+                continue;
+            }
+        }
+        // Literal run: consume positions with no match, capped at 128.
+        let start = pos;
+        let mut run = 0usize;
+        while pos < n && run < MAX_LIT_RUN {
+            let has_match = pos + MIN_MATCH <= n
+                && best_match(input, pos, dict, &head, &chain, &d_head, &d_chain).is_some();
+            if has_match {
+                break;
+            }
+            if pos + MIN_MATCH <= n {
+                let h = hash_at(input, pos);
+                chain[pos] = head[h];
+                head[h] = pos as u32;
+            }
+            pos += 1;
+            run += 1;
+        }
+        if run > 0 {
+            commands.push((run - 1) as u8);
+            literals.extend_from_slice(&input[start..pos]);
+        }
+    }
+    Some(DictStreams {
+        commands,
+        literals,
+        offsets,
+        sources,
+    })
+}
+
+/// The longer of the local match and the dictionary match at `pos`
+/// (deterministic: equal lengths prefer LOCAL).
+fn best_match(
+    input: &[u8],
+    pos: usize,
+    dict: &[u8],
+    head: &[u32],
+    chain: &[u32],
+    d_head: &[u32],
+    d_chain: &[u32],
+) -> Option<(usize, usize, u8)> {
+    let local = find_match(input, pos, head, chain);
+    let dm = find_dict_match(input, pos, dict, d_head, d_chain);
+    match (local, dm) {
+        (Some((ld, ll)), Some((dd, dl))) => {
+            if dl > ll {
+                Some((dd, dl, SRC_DICT))
+            } else {
+                Some((ld, ll, SRC_LOCAL))
+            }
+        }
+        (Some(m), None) => Some((m.0, m.1, SRC_LOCAL)),
+        (None, Some(m)) => Some((m.0, m.1, SRC_DICT)),
+        (None, None) => None,
+    }
+}
+
+/// Find the longest dictionary match at `pos`, capped by `DICT_CHAIN_DEPTH`
+/// chain walks. Returns `(offset, len)` with `len >= MIN_MATCH`. The match
+/// cannot extend past the dictionary end or the input end.
+fn find_dict_match(
+    input: &[u8],
+    pos: usize,
+    dict: &[u8],
+    d_head: &[u32],
+    d_chain: &[u32],
+) -> Option<(usize, usize)> {
+    let n = input.len();
+    let h = hash_at(input, pos);
+    let max_len = n - pos;
+    let mut c = d_head[h];
+    let mut best_len = 0usize;
+    let mut best_off = 0usize;
+    let mut depth = 0usize;
+    while c != u32::MAX && depth < DICT_CHAIN_DEPTH {
+        let cpos = c as usize;
+        let avail = dict.len() - cpos;
+        let limit = max_len.min(avail);
+        let mut l = 0usize;
+        while l < limit && dict[cpos + l] == input[pos + l] {
+            l += 1;
+        }
+        if l >= MIN_MATCH && l > best_len {
+            best_len = l;
+            best_off = cpos;
+            if l == max_len {
+                break; // matched to the input end: nothing can be longer
+            }
+        }
+        c = d_chain[cpos];
+        depth += 1;
+    }
+    if best_len >= MIN_MATCH {
+        Some((best_off, best_len))
+    } else {
+        None
+    }
+}
+
 /// Find the longest match at `pos`, capped by `CHAIN_DEPTH` chain walks.
 /// Returns `(dist, len)` with `len >= MIN_MATCH`. Deterministic tie-break:
 /// longer wins; equal lengths keep the most recent candidate (first in the
@@ -280,13 +517,33 @@ pub fn encode_streams(streams: &SequenceStreams) -> Option<EncodedSequence> {
     if streams.commands.is_empty() {
         return None;
     }
-    let mut model_obj = Vec::with_capacity(3 * 3 + 3 * 512);
+    let enc = encode_streams_n(&[
+        streams.commands.clone(),
+        streams.literals.clone(),
+        streams.offsets.clone(),
+    ])?;
+    Some(EncodedSequence {
+        model_obj: enc.model_obj,
+        enc_obj: enc.enc_obj,
+        seq_len: enc.lens[0],
+        lit_len: enc.lens[1],
+        off_len: enc.lens[2],
+        cmds: streams.commands.len() as u32,
+        lit_out: streams.literals.len() as u32,
+    })
+}
+
+/// Encode N raw streams (Phase-9B generalization; N in 1..=4): per-stream
+/// histogram, degenerate streams stored raw, rANS where it wins. Returns
+/// `None` when any stream cannot be represented.
+pub fn encode_streams_n(streams: &[Vec<u8>]) -> Option<EncodedStreams> {
+    if streams.is_empty() {
+        return None;
+    }
+    let mut model_obj = Vec::with_capacity(streams.len() * 3 + streams.len() * 512);
     let mut enc_obj = Vec::new();
-    let mut lens = [0u32; 3];
-    for (i, stream) in [&streams.commands, &streams.literals, &streams.offsets]
-        .iter()
-        .enumerate()
-    {
+    let mut lens = Vec::with_capacity(streams.len());
+    for stream in streams {
         let (slot, payload) = encode_one_stream(stream)?;
         match &slot {
             StreamSlot::Rans(model_bytes) => {
@@ -303,17 +560,13 @@ pub fn encode_streams(streams: &SequenceStreams) -> Option<EncodedSequence> {
                 model_obj.extend_from_slice(&0u16.to_le_bytes());
             }
         }
-        lens[i] = payload.len() as u32;
+        lens.push(payload.len() as u32);
         enc_obj.extend_from_slice(&payload);
     }
-    Some(EncodedSequence {
+    Some(EncodedStreams {
         model_obj,
         enc_obj,
-        seq_len: lens[0],
-        lit_len: lens[1],
-        off_len: lens[2],
-        cmds: streams.commands.len() as u32,
-        lit_out: streams.literals.len() as u32,
+        lens,
     })
 }
 
@@ -341,19 +594,26 @@ fn encode_one_stream(stream: &[u8]) -> Option<(StreamSlot, Vec<u8>)> {
     }
 }
 
-/// Parse the three-slot model object. `max_bytes` bounds the input; the
-/// per-slot model payloads are additionally capped by the format's
-/// per-model bound.
-pub fn parse_model_object(bytes: &[u8], max_bytes: u64) -> Result<[StreamSlot; 3], SequenceError> {
+/// Parse an N-slot model object (Phase-9B generalization; N in 1..=4).
+/// `max_bytes` bounds the input; the per-slot model payloads are
+/// additionally capped by the format's per-model bound.
+pub fn parse_model_object_slots(
+    bytes: &[u8],
+    max_bytes: u64,
+    slots: usize,
+) -> Result<Vec<StreamSlot>, SequenceError> {
+    if slots == 0 || slots > 4 {
+        return Err(SequenceError::Malformed);
+    }
     if bytes.len() as u64 > max_bytes {
         return Err(SequenceError::TooLarge {
             len: bytes.len() as u64,
             max: max_bytes,
         });
     }
-    let mut out = [StreamSlot::Empty, StreamSlot::Empty, StreamSlot::Empty];
+    let mut out = Vec::with_capacity(slots);
     let mut pos = 0usize;
-    for slot in out.iter_mut() {
+    for _ in 0..slots {
         let kind = *bytes.get(pos).ok_or(SequenceError::Truncated)?;
         pos += 1;
         let len = u16::from_le_bytes(
@@ -364,30 +624,40 @@ pub fn parse_model_object(bytes: &[u8], max_bytes: u64) -> Result<[StreamSlot; 3
                 .expect("2-byte slice"),
         ) as usize;
         pos += 2;
-        match kind {
+        let slot = match kind {
             SLOT_RANS => {
                 let b = bytes.get(pos..pos + len).ok_or(SequenceError::Truncated)?;
-                *slot = StreamSlot::Rans(b.to_vec());
+                StreamSlot::Rans(b.to_vec())
             }
             SLOT_RAW => {
                 if len != 0 {
                     return Err(SequenceError::Malformed);
                 }
-                *slot = StreamSlot::Raw;
+                StreamSlot::Raw
             }
             SLOT_EMPTY => {
                 if len != 0 {
                     return Err(SequenceError::Malformed);
                 }
+                StreamSlot::Empty
             }
             other => return Err(SequenceError::UnknownKind(other)),
-        }
+        };
+        out.push(slot);
         pos += len;
     }
     if pos != bytes.len() {
         return Err(SequenceError::TrailingBytes);
     }
     Ok(out)
+}
+
+/// Parse the three-slot model object. `max_bytes` bounds the input; the
+/// per-slot model payloads are additionally capped by the format's
+/// per-model bound.
+pub fn parse_model_object(bytes: &[u8], max_bytes: u64) -> Result<[StreamSlot; 3], SequenceError> {
+    let v = parse_model_object_slots(bytes, max_bytes, 3)?;
+    Ok([v[0].clone(), v[1].clone(), v[2].clone()])
 }
 
 /// The descriptor stream-length fields shared by SEQUENCE_RANS, the
@@ -430,6 +700,194 @@ pub struct StreamRefs {
     pub codec: RansCodec,
 }
 
+/// Decode N streams (N in 3..=4: commands, literals, offsets, [sources])
+/// from the model and enc objects, validating every length. Shared by the
+/// SEQUENCE_RANS / BASE_SEQUENCE materialize paths, the SPARSE_BLOCK64
+/// arm, and the SEQUENCE_DICT path.
+///
+/// Stream roles by index: 0 = commands (decodes to `commands_expected`),
+/// 1 = literals (decodes to `literals_expected`), 2 = offsets (decodes to
+/// `copies × off_per_copy`), 3 = copy sources (decodes to `copies`).
+/// `copies_override` pins the copy count (SPARSE_BLOCK64's nonzero-word
+/// count); `None` derives it from the decoded command stream (the
+/// SequenceRans/BaseSequence/SequenceDict convention).
+#[allow(clippy::too_many_arguments)] // the arguments are the format's own field set
+pub fn decode_streams_n(
+    ctx: &dyn crate::core::materialize::DecoderContext,
+    limits: &crate::core::limits::Limits,
+    refs: StreamRefs,
+    encoded_lens: &[u32],
+    commands_expected: u64,
+    literals_expected: u64,
+    copies_override: Option<u64>,
+    off_per_copy: u32,
+) -> Result<Vec<Vec<u8>>, crate::core::materialize::MaterializeError> {
+    use crate::core::materialize::MaterializeError;
+    let n = encoded_lens.len();
+    if !(3..=4).contains(&n) {
+        return Err(MaterializeError::InvalidDescriptor(
+            "stream count must be 3 or 4".into(),
+        ));
+    }
+    let StreamRefs {
+        model,
+        enc_obj,
+        scale_bits,
+        codec,
+    } = refs;
+    // Stream lengths must compose exactly to the enc object.
+    let enc_total: u64 = encoded_lens.iter().map(|&l| l as u64).sum();
+    if enc_total > limits.max_alloc_bytes {
+        return Err(MaterializeError::AllocTooLarge {
+            requested: enc_total,
+            max: limits.max_alloc_bytes,
+        });
+    }
+    let model_bytes = ctx.fetch_object(&model)?;
+    let slots = parse_model_object_slots(
+        &model_bytes,
+        max_model_object_bytes_n(limits.max_model_bytes, n),
+        n,
+    )
+    .map_err(|e| MaterializeError::Sequence(e.to_string()))?;
+    let enc = ctx.fetch_object(&enc_obj)?;
+    if enc.len() as u64 != enc_total {
+        return Err(MaterializeError::InvalidDescriptor(
+            "enc object length mismatch".into(),
+        ));
+    }
+    let mut slices: Vec<&[u8]> = Vec::with_capacity(n);
+    let mut p = 0usize;
+    for &l in encoded_lens {
+        slices.push(&enc[p..p + l as usize]);
+        p += l as usize;
+    }
+
+    // Stream 0: commands (decoded first; the copy count derives from it
+    // unless the caller pinned it).
+    let commands: Vec<u8> = match &slots[0] {
+        StreamSlot::Rans(m) => {
+            ctx.decode_rans(m, slices[0], scale_bits, codec, commands_expected)?
+        }
+        StreamSlot::Raw => {
+            if slices[0].len() as u64 != commands_expected {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "raw command stream length mismatch".into(),
+                ));
+            }
+            slices[0].to_vec()
+        }
+        StreamSlot::Empty => {
+            return Err(MaterializeError::InvalidDescriptor(
+                "empty command stream".into(),
+            ));
+        }
+    };
+    if commands.len() as u64 != commands_expected {
+        return Err(MaterializeError::InvalidDescriptor(
+            "command stream decoded length mismatch".into(),
+        ));
+    }
+    let copies = match copies_override {
+        Some(c) => c,
+        None => commands.iter().filter(|&&b| b >= 0x80).count() as u64,
+    };
+    let off_out = copies.checked_mul(off_per_copy as u64).ok_or_else(|| {
+        MaterializeError::InvalidDescriptor("offset stream length overflow".into())
+    })?;
+    if off_out > limits.max_alloc_bytes {
+        return Err(MaterializeError::AllocTooLarge {
+            requested: off_out,
+            max: limits.max_alloc_bytes,
+        });
+    }
+
+    // Stream 1: literals.
+    let literals: Vec<u8> = match &slots[1] {
+        StreamSlot::Rans(m) => {
+            ctx.decode_rans(m, slices[1], scale_bits, codec, literals_expected)?
+        }
+        StreamSlot::Raw => {
+            if slices[1].len() as u64 != literals_expected {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "raw literal stream length mismatch".into(),
+                ));
+            }
+            slices[1].to_vec()
+        }
+        StreamSlot::Empty => {
+            if literals_expected != 0 || slices[1].len() as u64 != 0 {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "non-empty literal stream without a model".into(),
+                ));
+            }
+            Vec::new()
+        }
+    };
+    if literals.len() as u64 != literals_expected {
+        return Err(MaterializeError::InvalidDescriptor(
+            "literal stream decoded length mismatch".into(),
+        ));
+    }
+
+    // Stream 2: offsets.
+    let offsets: Vec<u8> = match &slots[2] {
+        StreamSlot::Rans(m) => ctx.decode_rans(m, slices[2], scale_bits, codec, off_out)?,
+        StreamSlot::Raw => {
+            if slices[2].len() as u64 != off_out {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "raw offset stream length mismatch".into(),
+                ));
+            }
+            slices[2].to_vec()
+        }
+        StreamSlot::Empty => {
+            if off_out != 0 {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "non-empty offset stream without a model".into(),
+                ));
+            }
+            Vec::new()
+        }
+    };
+    if offsets.len() as u64 != off_out {
+        return Err(MaterializeError::InvalidDescriptor(
+            "offset stream decoded length mismatch".into(),
+        ));
+    }
+
+    let mut out = vec![commands, literals, offsets];
+    if n == 4 {
+        // Stream 3: copy sources (one byte per copy command).
+        let sources: Vec<u8> = match &slots[3] {
+            StreamSlot::Rans(m) => ctx.decode_rans(m, slices[3], scale_bits, codec, copies)?,
+            StreamSlot::Raw => {
+                if slices[3].len() as u64 != copies {
+                    return Err(MaterializeError::InvalidDescriptor(
+                        "raw source stream length mismatch".into(),
+                    ));
+                }
+                slices[3].to_vec()
+            }
+            StreamSlot::Empty => {
+                if copies != 0 {
+                    return Err(MaterializeError::InvalidDescriptor(
+                        "non-empty source stream without a model".into(),
+                    ));
+                }
+                Vec::new()
+            }
+        };
+        if sources.len() as u64 != copies {
+            return Err(MaterializeError::InvalidDescriptor(
+                "source stream decoded length mismatch".into(),
+            ));
+        }
+        out.push(sources);
+    }
+    Ok(out)
+}
+
 /// Decode the three streams (commands, literals, offsets) from the model
 /// and enc objects, validating every length. Shared by the SEQUENCE_RANS
 /// / BASE_SEQUENCE materialize paths and the SPARSE_BLOCK64 arm.
@@ -447,142 +905,78 @@ pub fn decode_three_streams(
     units: Option<u32>,
     off_per_copy: u32,
 ) -> Result<DecodedStreams, crate::core::materialize::MaterializeError> {
-    use crate::core::materialize::MaterializeError;
-    let StreamRefs {
-        model,
-        enc_obj,
-        scale_bits,
-        codec,
-    } = refs;
-    let ThreeStreams {
-        seq_len,
-        lit_len,
-        off_len,
-        cmds,
-        lit_out,
-    } = lens;
-    // Stream lengths must compose exactly to the enc object.
-    let enc_total = (seq_len as u64)
-        .checked_add(lit_len as u64)
-        .and_then(|v| v.checked_add(off_len as u64))
-        .ok_or(MaterializeError::InvalidDescriptor(
-            "stream lengths overflow".into(),
-        ))?;
-    if enc_total > limits.max_alloc_bytes {
-        return Err(MaterializeError::AllocTooLarge {
-            requested: enc_total,
-            max: limits.max_alloc_bytes,
-        });
-    }
-    let model_bytes = ctx.fetch_object(&model)?;
-    let slots = parse_model_object(&model_bytes, max_model_object_bytes(limits.max_model_bytes))
-        .map_err(|e| MaterializeError::Sequence(e.to_string()))?;
-    let enc = ctx.fetch_object(&enc_obj)?;
-    if enc.len() as u64 != enc_total {
-        return Err(MaterializeError::InvalidDescriptor(
-            "enc object length mismatch".into(),
-        ));
-    }
-    let seq_slice = &enc[..seq_len as usize];
-    let lit_slice = &enc[seq_len as usize..seq_len as usize + lit_len as usize];
-    let off_slice = &enc[seq_len as usize + lit_len as usize..];
-
-    // Commands.
-    let commands: Vec<u8> = match &slots[0] {
-        StreamSlot::Rans(m) => ctx.decode_rans(m, seq_slice, scale_bits, codec, cmds as u64)?,
-        StreamSlot::Raw => {
-            if seq_len != cmds {
-                return Err(MaterializeError::InvalidDescriptor(
-                    "raw command stream length mismatch".into(),
-                ));
-            }
-            seq_slice.to_vec()
-        }
-        StreamSlot::Empty => {
-            return Err(MaterializeError::InvalidDescriptor(
-                "empty command stream".into(),
-            ));
-        }
-    };
-    if commands.len() as u64 != cmds as u64 {
-        return Err(MaterializeError::InvalidDescriptor(
-            "command stream decoded length mismatch".into(),
-        ));
-    }
-    let copies = match units {
-        Some(u) => u as usize,
-        None => commands.iter().filter(|&&b| b >= 0x80).count(),
-    };
-    let off_out = (copies as u64).checked_mul(off_per_copy as u64).ok_or(
-        MaterializeError::InvalidDescriptor("offset stream length overflow".into()),
+    let v = decode_streams_n(
+        ctx,
+        limits,
+        refs,
+        &[lens.seq_len, lens.lit_len, lens.off_len],
+        lens.cmds as u64,
+        lens.lit_out as u64,
+        units.map(|u| u as u64),
+        off_per_copy,
     )?;
-    if off_out > limits.max_alloc_bytes {
-        return Err(MaterializeError::AllocTooLarge {
-            requested: off_out,
-            max: limits.max_alloc_bytes,
-        });
-    }
-    // Literals.
-    let literals: Vec<u8> = match &slots[1] {
-        StreamSlot::Rans(m) => ctx.decode_rans(m, lit_slice, scale_bits, codec, lit_out as u64)?,
-        StreamSlot::Raw => {
-            if lit_len != lit_out {
-                return Err(MaterializeError::InvalidDescriptor(
-                    "raw literal stream length mismatch".into(),
-                ));
-            }
-            lit_slice.to_vec()
-        }
-        StreamSlot::Empty => {
-            if lit_out != 0 || lit_len != 0 {
-                return Err(MaterializeError::InvalidDescriptor(
-                    "non-empty literal stream without a model".into(),
-                ));
-            }
-            Vec::new()
-        }
-    };
-    if literals.len() as u64 != lit_out as u64 {
-        return Err(MaterializeError::InvalidDescriptor(
-            "literal stream decoded length mismatch".into(),
-        ));
-    }
-    // Offsets.
-    let offsets: Vec<u8> = match &slots[2] {
-        StreamSlot::Rans(m) => ctx.decode_rans(m, off_slice, scale_bits, codec, off_out)?,
-        StreamSlot::Raw => {
-            if off_len as u64 != off_out {
-                return Err(MaterializeError::InvalidDescriptor(
-                    "raw offset stream length mismatch".into(),
-                ));
-            }
-            off_slice.to_vec()
-        }
-        StreamSlot::Empty => {
-            if off_out != 0 {
-                return Err(MaterializeError::InvalidDescriptor(
-                    "non-empty offset stream without a model".into(),
-                ));
-            }
-            Vec::new()
-        }
-    };
-    if offsets.len() as u64 != off_out {
-        return Err(MaterializeError::InvalidDescriptor(
-            "offset stream decoded length mismatch".into(),
-        ));
-    }
     Ok(DecodedStreams {
-        commands,
-        literals,
-        offsets,
+        commands: v[0].clone(),
+        literals: v[1].clone(),
+        offsets: v[2].clone(),
     })
+}
+
+/// The descriptor stream-length fields of the SEQUENCE_DICT family
+/// (four streams: commands, literals, offsets, copy sources).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FourStreams {
+    /// Encoded command-stream length.
+    pub seq_len: u32,
+    /// Encoded literal-stream length.
+    pub lit_len: u32,
+    /// Encoded offset-stream length.
+    pub off_len: u32,
+    /// Encoded copy-source-stream length.
+    pub src_len: u32,
+    /// Decoded command count.
+    pub cmds: u32,
+    /// Decoded literal byte count.
+    pub lit_out: u32,
+}
+
+/// Decode the four streams (commands, literals, offsets, copy sources)
+/// for the SEQUENCE_DICT family. The copy count derives from the command
+/// stream; each copy consumes one u16 offset and one source byte.
+pub fn decode_four_streams(
+    ctx: &dyn crate::core::materialize::DecoderContext,
+    limits: &crate::core::limits::Limits,
+    refs: StreamRefs,
+    lens: FourStreams,
+) -> Result<DictStreams, crate::core::materialize::MaterializeError> {
+    let v = decode_streams_n(
+        ctx,
+        limits,
+        refs,
+        &[lens.seq_len, lens.lit_len, lens.off_len, lens.src_len],
+        lens.cmds as u64,
+        lens.lit_out as u64,
+        None,
+        2,
+    )?;
+    Ok(DictStreams {
+        commands: v[0].clone(),
+        literals: v[1].clone(),
+        offsets: v[2].clone(),
+        sources: v[3].clone(),
+    })
+}
+
+/// Max model-object size for N per-stream models plus the slot headers,
+/// bounded against the format's per-model cap.
+pub const fn max_model_object_bytes_n(per_model: u64, slots: usize) -> u64 {
+    per_model.saturating_mul(slots as u64).saturating_add(64)
 }
 
 /// Max model-object size for one chunk: three per-stream models plus the
 /// slot headers, bounded against the format's per-model cap.
 pub const fn max_model_object_bytes(per_model: u64) -> u64 {
-    per_model.saturating_mul(3).saturating_add(64)
+    max_model_object_bytes_n(per_model, 3)
 }
 
 /// The SequenceRans candidate family (foreground + background).
@@ -648,6 +1042,119 @@ impl Encoder for SequenceEncoder {
     }
 }
 
+/// The SequenceDict candidate family (Phase-9B): local-history + external
+/// dictionary match coding over the same command semantics, with a fourth
+/// copy-source stream. The dictionary is the previous same-file chunk
+/// (v1); the reference is explicit, costed, and depth-capped.
+#[derive(Debug, Clone)]
+pub struct SequenceDictEncoder {
+    /// Content id of the dictionary chunk (must resolve in the chunk
+    /// index at decode time).
+    pub dictionary: crate::core::extent::ChunkId,
+    /// Materialized dictionary bytes (≤ 64 KiB).
+    pub dict_bytes: Vec<u8>,
+    /// Reference depth the dictionary chunk already contributes (its own
+    /// chain depth). The candidate's depth is `dict_depth + 1`; the
+    /// encoder refuses candidates that would exceed the decode cap.
+    pub dict_depth: u8,
+}
+
+impl Encoder for SequenceDictEncoder {
+    fn name(&self) -> &'static str {
+        "SEQUENCE_DICT"
+    }
+
+    fn encode(&self, input: &[u8], ctx: &CandidateContext<'_>) -> Vec<Candidate> {
+        if input.is_empty() || input.len() as u64 > ctx.limits.max_chunk_size {
+            return Vec::new();
+        }
+        // Depth cap: a dictionary chain must never defeat bounded random
+        // access (Phase-9B constraint; §51). The decode-time cap would
+        // catch it, but refusing at encode time avoids wasted validation.
+        if self.dict_depth.saturating_add(1) > ctx.limits.max_reference_depth {
+            return Vec::new();
+        }
+        // LZ overhead (four models + four streams + dictionary reference)
+        // cannot win on tiny inputs; skip the CPU.
+        if input.len() < 128 {
+            return Vec::new();
+        }
+        if self.dict_bytes.is_empty() || self.dict_bytes.len() > MAX_DICT {
+            return Vec::new();
+        }
+        let streams = match encode_sequence_dict(input, &self.dict_bytes) {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+        // When the dictionary contributed nothing (no DICT copies), the
+        // parse is strictly a SequenceRans parse with an extra 32-byte
+        // reference and a fourth stream: skip it so the local-only family
+        // wins on cost without the wasted descriptor.
+        if !streams.sources.contains(&SRC_DICT) {
+            return Vec::new();
+        }
+        let cmds = streams.commands.len() as u32;
+        let lit_out = streams.literals.len() as u32;
+        let enc = match encode_streams_n(&[
+            streams.commands,
+            streams.literals,
+            streams.offsets,
+            streams.sources,
+        ]) {
+            Some(e) => e,
+            None => return Vec::new(),
+        };
+        let model_obj = ObjectRecord::model(enc.model_obj);
+        let enc_obj = ObjectRecord::data(enc.enc_obj);
+        let rep = Representation::SequenceDict {
+            dictionary: self.dictionary,
+            dictionary_len: self.dict_bytes.len() as u32,
+            model: model_obj.id,
+            enc_obj: enc_obj.id,
+            scale_bits: SCALE_BITS,
+            codec: CODEC,
+            seq_len: enc.lens[0],
+            lit_len: enc.lens[1],
+            off_len: enc.lens[2],
+            src_len: enc.lens[3],
+            cmds,
+            lit_out,
+            len: input.len() as u64,
+        };
+        // Honest gate: descriptor + model object + enc object (the
+        // dictionary chunk itself is counted as a reference, and its own
+        // persisted state is accounted wherever it is materialized) must
+        // beat the raw bytes, else RAW/SequenceRans wins on cost.
+        let total = rep
+            .encoded_size()
+            .saturating_add(model_obj.payload.len() as u64)
+            .saturating_add(enc_obj.payload.len() as u64);
+        if total >= input.len() as u64 {
+            return Vec::new();
+        }
+        let split = ByteSplit {
+            // dictionary + model + enc content ids.
+            reference: 96,
+            ..Default::default()
+        };
+        let mut cost = crate::core::candidate::account_objects(
+            crate::core::cost::estimate(&rep, &split, model_obj.payload.len() as u64),
+            &[enc_obj.clone(), model_obj.clone()],
+        );
+        // The candidate's reference depth includes the dictionary chunk's
+        // own chain depth (§15: λ_depth penalizes deep chains; the
+        // decode-time cap is enforced in `materialize`).
+        cost.depth = cost.depth.saturating_add(self.dict_depth);
+        vec![Candidate {
+            representation: rep,
+            objects: vec![enc_obj, model_obj],
+            cost,
+            content_id: ctx.content_id,
+        }]
+    }
+}
+
+/// The SequenceDict candidate family (Phase-9B): local-history + external
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -996,5 +1503,271 @@ mod tests {
             literals,
             offsets,
         }
+    }
+
+    /// A dictionary chunk with strong repeated structure (the versioned
+    /// corpus's chunk-0 class: period-7 pattern). Exactly 64 KiB so it is
+    /// addressable by u16 DICT offsets.
+    fn dict_chunk() -> Vec<u8> {
+        let mut out = Vec::with_capacity(65536);
+        let pattern: Vec<u8> = (0..7u32).map(|i| (i * 37 % 251) as u8).collect();
+        while out.len() < 65536 {
+            let take = (65536 - out.len()).min(pattern.len());
+            out.extend_from_slice(&pattern[..take]);
+        }
+        assert_eq!(out.len(), MAX_DICT);
+        out
+    }
+
+    #[test]
+    fn dict_parse_uses_dictionary_and_roundtrips_exactly() {
+        // Input = the dictionary pattern with a light edit: most of the
+        // input is DICT-copyable, so the parse must use DICT sources and
+        // the manual walk must reproduce the input byte-exactly.
+        let dict = dict_chunk();
+        let mut input = dict.clone();
+        input[100] ^= 0x5A;
+        input[65535] ^= 0x01;
+        let streams = encode_sequence_dict(&input, &dict).unwrap();
+        assert!(
+            streams.sources.contains(&SRC_DICT),
+            "expected DICT copies on a dictionary-correlated input"
+        );
+        // Manual decoder walk (mirrors the materialize path).
+        let mut lits = 0usize;
+        let mut offs = 0usize;
+        let mut srcs = 0usize;
+        let mut out = Vec::with_capacity(input.len());
+        for (i, &cmd) in streams.commands.iter().enumerate() {
+            if cmd < 0x80 {
+                let run = cmd as usize + 1;
+                assert!(lits + run <= streams.literals.len(), "lit overflow at {i}");
+                out.extend_from_slice(&streams.literals[lits..lits + run]);
+                lits += run;
+            } else {
+                let clen = cmd as usize - 0x80 + 4;
+                assert!(srcs < streams.sources.len(), "src exhausted at {i}");
+                let source = streams.sources[srcs];
+                srcs += 1;
+                assert!(offs + 2 <= streams.offsets.len(), "off exhausted at {i}");
+                let v =
+                    u16::from_le_bytes([streams.offsets[offs], streams.offsets[offs + 1]]) as usize;
+                offs += 2;
+                match source {
+                    SRC_LOCAL => {
+                        assert!(v > 0 && v <= out.len(), "bad dist {v} at {i}");
+                        for _ in 0..clen {
+                            let b = out[out.len() - v];
+                            out.push(b);
+                        }
+                    }
+                    SRC_DICT => {
+                        assert!(v + clen <= dict.len(), "dict copy out of bounds at {i}");
+                        out.extend_from_slice(&dict[v..v + clen]);
+                    }
+                    other => panic!("unknown source {other} at {i}"),
+                }
+            }
+        }
+        assert_eq!(srcs, streams.sources.len());
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn dict_long_match_continuation_advances_offset() {
+        // Regression (Phase-9B): a DICT match longer than MAX_COPY is
+        // split into continuation commands. A LOCAL continuation repeats
+        // the same backward distance (byte-progressive); a DICT
+        // continuation must ADVANCE the absolute offset, or the decoder
+        // re-reads the same dict bytes.
+        //
+        // Dict layout: a 25536-byte sequence S, then S again (40 KiB in
+        // the second copy). The hash bucket for S[0..4] has positions 0
+        // and 25536; the chain head is 25536 (higher), with 40 KiB of
+        // availability — a long contiguous DICT match for an input equal
+        // to dict[25536..65536].
+        let seq: Vec<u8> = (0..25536u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 16) as u8)
+            .collect();
+        let mut dict = seq.clone();
+        dict.extend_from_slice(&seq);
+        // Pad with the start of seq so the second 40 KiB run is exactly
+        // seq ++ seq[..14464] (the same bytes as dict[..40000]).
+        dict.extend_from_slice(&seq[..65536 - 2 * seq.len()]);
+        assert_eq!(dict.len(), MAX_DICT);
+        assert_eq!(&dict[25536..], &dict[..65536 - 25536]);
+        let input: Vec<u8> = dict[25536..].to_vec(); // 40000 bytes
+        let streams = encode_sequence_dict(&input, &dict).unwrap();
+        assert!(streams.sources.contains(&SRC_DICT));
+        // Manual decoder walk: DICT copies must compose to the input even
+        // across continuation commands (offset advancement).
+        let mut lits = 0usize;
+        let mut offs = 0usize;
+        let mut srcs = 0usize;
+        let mut out = Vec::with_capacity(input.len());
+        let mut dict_copies = 0usize;
+        for &cmd in &streams.commands {
+            if cmd < 0x80 {
+                let run = cmd as usize + 1;
+                out.extend_from_slice(&streams.literals[lits..lits + run]);
+                lits += run;
+            } else {
+                let clen = cmd as usize - 0x80 + 4;
+                let source = streams.sources[srcs];
+                srcs += 1;
+                let v =
+                    u16::from_le_bytes([streams.offsets[offs], streams.offsets[offs + 1]]) as usize;
+                offs += 2;
+                match source {
+                    SRC_LOCAL => {
+                        for _ in 0..clen {
+                            let b = out[out.len() - v];
+                            out.push(b);
+                        }
+                    }
+                    SRC_DICT => {
+                        out.extend_from_slice(&dict[v..v + clen]);
+                        dict_copies += 1;
+                    }
+                    other => panic!("unknown source {other}"),
+                }
+            }
+        }
+        assert!(
+            dict_copies >= 2,
+            "expected a continuation chain (got {dict_copies} DICT copies)"
+        );
+        assert_eq!(out, input, "long DICT continuation must advance offsets");
+    }
+
+    #[test]
+    fn dict_encoder_wins_and_validates() {
+        let limits = Limits::default();
+        let policy = Policy::default();
+        let dict = dict_chunk();
+        let mut input = dict.clone();
+        for i in (0..65536).step_by(17) {
+            input[i] ^= 0x03;
+        }
+        let dict_id = crate::core::extent::ChunkId::of(&dict);
+        let enc = SequenceDictEncoder {
+            dictionary: dict_id,
+            dict_bytes: dict.clone(),
+            dict_depth: 0,
+        };
+        let ctx = ctx_for(&input, &limits, &policy);
+        let cands = enc.encode(&input, &ctx);
+        assert_eq!(cands.len(), 1);
+        let cand = &cands[0];
+        assert!(matches!(
+            cand.representation,
+            Representation::SequenceDict { .. }
+        ));
+        // Depth must be 1 (dict_depth 0 + the reference itself).
+        assert_eq!(cand.cost.depth, 1);
+        let mut resolver = MemResolver::from_map(
+            cand.objects
+                .iter()
+                .map(|o| (o.id, o.payload.clone()))
+                .collect(),
+        );
+        // The dictionary chunk must resolve at decode: register it as a
+        // RAW chunk whose payload object is the dict bytes.
+        resolver.put_chunk(
+            dict_id,
+            Representation::Raw {
+                obj: dict_id,
+                len: dict.len() as u64,
+            },
+        );
+        resolver.put_object(dict_id, dict);
+        validate_candidate(cand, &input, &resolver, &limits).unwrap();
+        // The dictionary reference must dominate the win (the family is
+        // meaningfully cheaper than the raw bytes).
+        assert!(
+            cand.cost.persisted_bytes() < input.len() as u64 / 4,
+            "persisted {} >= raw/4",
+            cand.cost.persisted_bytes()
+        );
+    }
+
+    #[test]
+    fn dict_skips_unrelated_dictionary() {
+        // A dictionary sharing no byte values with the input (all 0xFF vs
+        // text) can never produce a DICT match: no DICT copies appear and
+        // the family declines (a SequenceRans-only parse would win there).
+        let limits = Limits::default();
+        let policy = Policy::default();
+        let dict = vec![0xFFu8; 65536];
+        let mut input = text_chunk();
+        input.resize(65536, b' ');
+        let enc = SequenceDictEncoder {
+            dictionary: crate::core::extent::ChunkId::of(&dict),
+            dict_bytes: dict,
+            dict_depth: 0,
+        };
+        let cands = enc.encode(&input, &ctx_for(&input, &limits, &policy));
+        assert!(cands.is_empty());
+    }
+
+    #[test]
+    fn dict_depth_cap_refuses_candidate() {
+        // A dictionary whose chain already hits the depth cap must produce
+        // no candidate: the reference would defeat bounded random access.
+        let limits = Limits::default();
+        let policy = Policy::default();
+        let dict = dict_chunk();
+        let input = text_chunk();
+        let enc = SequenceDictEncoder {
+            dictionary: crate::core::extent::ChunkId::of(&dict),
+            dict_bytes: dict,
+            dict_depth: limits.max_reference_depth, // already at the cap
+        };
+        let cands = enc.encode(&input, &ctx_for(&input, &limits, &policy));
+        assert!(cands.is_empty());
+    }
+
+    #[test]
+    fn dict_urandom_has_no_fake_density() {
+        // H6-style negative control: urandom input against a DIFFERENT
+        // urandom dictionary (every input byte XOR-decorrelated from the
+        // dict so no 4-byte window can match) must not produce a
+        // candidate — a random implicit dictionary creates no free
+        // compression.
+        let limits = Limits::default();
+        let policy = Policy::default();
+        let dict = noise(65536);
+        let mut input = noise(65536);
+        for b in &mut input {
+            *b ^= 0xAA;
+        }
+        let enc = SequenceDictEncoder {
+            dictionary: crate::core::extent::ChunkId::of(&dict),
+            dict_bytes: dict,
+            dict_depth: 0,
+        };
+        assert!(
+            enc.encode(&input, &ctx_for(&input, &limits, &policy))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn dict_dictionary_must_be_bounded() {
+        // A dictionary larger than 64 KiB cannot be addressed by u16
+        // offsets: the encoder must refuse it.
+        let limits = Limits::default();
+        let policy = Policy::default();
+        let dict = vec![0u8; MAX_DICT + 1];
+        let enc = SequenceDictEncoder {
+            dictionary: crate::core::extent::ChunkId::of(&dict),
+            dict_bytes: dict,
+            dict_depth: 0,
+        };
+        let input = text_chunk();
+        assert!(
+            enc.encode(&input, &ctx_for(&input, &limits, &policy))
+                .is_empty()
+        );
     }
 }

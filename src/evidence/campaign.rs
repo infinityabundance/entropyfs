@@ -1352,6 +1352,22 @@ fn extent_decomposition(
                 refs.push(*model);
                 refs.push(*enc_obj);
             }
+            // The dictionary is a referenced chunk (like a base): its own
+            // persisted state is accounted where IT is materialized; count
+            // the reference for CAS-sharing attribution.
+            Representation::SequenceDict {
+                dictionary,
+                model,
+                enc_obj,
+                ..
+            } => {
+                model_objs.insert(*model);
+                payload_objs.insert(*enc_obj);
+                refs.push(*model);
+                refs.push(*enc_obj);
+                payload_objs.insert(*dictionary);
+                refs.push(*dictionary);
+            }
             Representation::ExactRef { target, len, .. } => {
                 payload_objs.insert(*target);
                 refs.push(*target);

@@ -49,6 +49,10 @@ pub struct GuidedContext<'a> {
     pub target: &'a [u8],
     /// P0: the previous version of this chunk, when known (write path).
     pub prev_version: Option<crate::core::candidate::BaseChunk>,
+    /// The previous same-file chunk (the SequenceDict dictionary,
+    /// Phase-9B). Foreground: the batch overlay / RMW bytes (nearly
+    /// free); background: the committed previous chunk.
+    pub dictionary: Option<crate::core::candidate::BaseChunk>,
     /// The batch's pending state (Phase-8C): chunks already encoded in
     /// this group-commit transaction, so exact dedup can see the batch's
     /// own entries (they are not yet in the committed chunk index).
@@ -75,6 +79,14 @@ pub struct PendingBatch {
     /// (needed to materialize a pending descriptor during §32
     /// validation; the objects commit in the same transaction).
     pub objects: std::collections::HashMap<ChunkId, Vec<u8>>,
+    /// Content id → reference depth of the FIRST-occurrence descriptor
+    /// (Phase-9B): the depth a SequenceDict candidate would inherit if it
+    /// used that chunk as its dictionary. Depth 0 for terminal families;
+    /// `1 + dictionary_depth` for SEQUENCE_DICT; 1 for EXACT_REF/
+    /// BASE_RESIDUAL chains built on committed chunks. Registered with
+    /// the descriptor so in-batch dictionary chains stay within
+    /// `max_reference_depth`.
+    pub depths: std::collections::HashMap<ChunkId, u8>,
 }
 
 /// Outcome of a guided search.
@@ -88,6 +100,10 @@ pub struct SearchOutcome {
     pub bases_tried: Vec<(Channel, bool)>,
     /// Winning channel attribution.
     pub winner: Channel,
+    /// Reference depth of the winning representation (0 for terminal
+    /// families; base/dictionary chains add their depth). Used by the
+    /// batch to register in-batch depths for SequenceDict chaining.
+    pub depth: u8,
     /// DSFB regime after this observation.
     pub regime: Regime,
     /// The search plan used.
@@ -205,12 +221,22 @@ pub fn encode_guided(
     // Decisive-win early exit (Phase 6): if a cheap candidate already
     // beats RAW by a large margin, the expensive families (rANS,
     // configurational rank/unrank) cannot plausibly win — skip them and
-    // keep the write path latency-conscious (§16). "Cheap" is measured
-    // MARGINALLY: an object that already exists (committed CAS or the
-    // batch pending state) costs zero payload bytes.
+    // keep the write path latency-conscious (§16). The metric is MARGINAL
+    // bytes in the foreground (an object that already exists — committed
+    // CAS or the batch pending state — costs zero payload bytes; reusing
+    // it is the entire point of the content-addressed store). The
+    // BACKGROUND optimizer, by contrast, must be able to REPLACE an
+    // existing representation with a denser one, so it orders by FULL
+    // persisted bytes and never short-circuits on a marginal-cheap
+    // incumbent (Phase-9B: a chunk whose RAW object already exists would
+    // otherwise look marginally free and block every re-encoding).
     let raw_bytes = ctx.target.len() as u64;
-    let mut decisive = cheapest_marginal(&candidates, store, ctx.pending)
-        .map(|c| marginal_bytes(c, store, ctx.pending) <= raw_bytes / 8)
+    let metric = |c: &Candidate| candidate_metric(c, store, ctx.pending, ctx.mode);
+    let mut decisive = candidates
+        .iter()
+        .map(|(_, c)| c)
+        .min_by_key(|c| metric(c))
+        .map(|c| metric(c) <= raw_bytes / 8)
         .unwrap_or(false);
     if !decisive && options.allow_configurational {
         for enc in [
@@ -225,8 +251,11 @@ pub fn encode_guided(
                     .map(|c| (Channel::Raw, c)),
             );
         }
-        decisive = cheapest_marginal(&candidates, store, ctx.pending)
-            .map(|c| marginal_bytes(c, store, ctx.pending) <= raw_bytes / 8)
+        decisive = candidates
+            .iter()
+            .map(|(_, c)| c)
+            .min_by_key(|c| metric(c))
+            .map(|c| metric(c) <= raw_bytes / 8)
             .unwrap_or(false);
     }
     let mut rans_measurement: Option<f64> = None;
@@ -240,8 +269,11 @@ pub fn encode_guided(
             ));
         }
         candidates.extend(cands.into_iter().map(|c| (Channel::Rans, c)));
-        decisive = cheapest_marginal(&candidates, store, ctx.pending)
-            .map(|c| marginal_bytes(c, store, ctx.pending) <= raw_bytes / 8)
+        decisive = candidates
+            .iter()
+            .map(|(_, c)| c)
+            .min_by_key(|c| metric(c))
+            .map(|c| metric(c) <= raw_bytes / 8)
             .unwrap_or(false);
     }
     if options.allow_sequence_rans && !decisive {
@@ -253,6 +285,29 @@ pub fn encode_guided(
             ));
         }
         candidates.extend(cands.into_iter().map(|c| (Channel::Rans, c)));
+    }
+    if options.allow_sequence_dict && !decisive {
+        // E2 (Phase-9B): the cross-chunk dictionary family. The previous
+        // same-file chunk's bytes are already in hand (batch overlay / RMW
+        // read in the foreground; the committed previous chunk in the
+        // background), so this is nearly free; the depth cap (dictionary
+        // chain + 1) keeps dictionary references from chaining unboundedly,
+        // and the cycle check rejects a dictionary whose chain contains
+        // the target chunk itself. DSFB sizes the rest of the search; the
+        // in-hand dictionary is cheap enough to always evaluate.
+        if let Some(dict) = &ctx.dictionary {
+            if dict.depth.saturating_add(1) <= limits.max_reference_depth
+                && !crate::optimizer::rebase::chain_contains(store, dict, &cid)
+            {
+                let enc = crate::rans::sequence::SequenceDictEncoder {
+                    dictionary: dict.id,
+                    dict_bytes: dict.bytes.clone(),
+                    dict_depth: dict.depth,
+                };
+                let cands = enc.encode(ctx.target, &base_ctx);
+                candidates.extend(cands.into_iter().map(|c| (Channel::PrevInFile, c)));
+            }
+        }
     }
     if let Some(r) = crate::core::candidate::raw_candidate(ctx.target, cid, &limits) {
         candidates.push((Channel::Raw, r));
@@ -370,10 +425,15 @@ pub fn encode_guided(
     }
 
     // --- Validate (§32) and pick the cheapest valid candidate.
-    let (winner_channel, winner) =
-        pick_best_valid(store, &candidates, ctx.target, &limits, ctx.pending).ok_or_else(|| {
-            StoreError::Invariant("no valid candidate (RAW must always work)".into())
-        })?;
+    let (winner_channel, winner) = pick_best_valid(
+        store,
+        &candidates,
+        ctx.target,
+        &limits,
+        ctx.pending,
+        ctx.mode,
+    )
+    .ok_or_else(|| StoreError::Invariant("no valid candidate (RAW must always work)".into()))?;
     let update = ExtentUpdate {
         offset: ctx.offset,
         descriptor: winner.representation.clone(),
@@ -431,6 +491,7 @@ pub fn encode_guided(
         evaluated: candidates.len(),
         bases_tried,
         winner: winner_channel,
+        depth: winner.cost.depth,
         regime,
         plan,
     })
@@ -533,16 +594,22 @@ fn marginal_bytes(cand: &Candidate, store: &Store, pending: Option<&PendingBatch
     total
 }
 
-/// Cheapest candidate by marginal persisted bytes.
-fn cheapest_marginal<'a>(
-    candidates: &'a [(Channel, Candidate)],
+/// The cost metric that orders candidate validation: MARGINAL bytes in
+/// the foreground (an object that already exists — committed CAS or the
+/// batch pending state — costs zero payload bytes, so reuse wins), FULL
+/// persisted bytes in the background (the optimizer must be able to
+/// REPLACE an existing representation with a denser one even when the
+/// incumbent's objects already exist).
+fn candidate_metric(
+    cand: &Candidate,
     store: &Store,
     pending: Option<&PendingBatch>,
-) -> Option<&'a Candidate> {
-    candidates
-        .iter()
-        .map(|(_, c)| c)
-        .min_by_key(|c| marginal_bytes(c, store, pending))
+    mode: SearchMode,
+) -> u64 {
+    match mode {
+        SearchMode::Foreground => marginal_bytes(cand, store, pending),
+        SearchMode::Background => cand.cost.persisted_bytes(),
+    }
 }
 
 /// Validate candidates (§32) and return the cheapest valid one with its
@@ -550,18 +617,22 @@ fn cheapest_marginal<'a>(
 /// is a hard error path that must fall through to RAW. Each candidate is
 /// validated against a resolver that can see the committed store, the
 /// candidate's own new objects, and (Phase-8C) the batch's pending
-/// descriptors/objects. Ordering is by MARGINAL bytes: objects that
-/// already exist (committed or pending) cost zero, so canonical reuse of
-/// a stored descriptor competes fairly with a fresh encoding.
+/// descriptors/objects. Ordering is by the mode-appropriate metric:
+/// MARGINAL bytes in the foreground (objects that already exist —
+/// committed or pending — cost zero, so canonical reuse of a stored
+/// descriptor competes fairly with a fresh encoding) and FULL persisted
+/// bytes in the background (the incumbent's already-existing objects must
+/// not make a denser replacement look expensive).
 fn pick_best_valid<'a>(
     store: &Store,
     candidates: &'a [(Channel, Candidate)],
     target: &[u8],
     limits: &crate::core::limits::Limits,
     pending: Option<&'a PendingBatch>,
+    mode: SearchMode,
 ) -> Option<(Channel, &'a Candidate)> {
     let mut order: Vec<usize> = (0..candidates.len()).collect();
-    order.sort_by_key(|&i| marginal_bytes(&candidates[i].1, store, pending));
+    order.sort_by_key(|&i| candidate_metric(&candidates[i].1, store, pending, mode));
     for &i in &order {
         let (channel, cand) = &candidates[i];
         let resolver = CandidateResolver {
@@ -733,6 +804,7 @@ mod tests {
             offset: 0,
             target,
             prev_version: prev,
+            dictionary: None,
             pending: None,
             mode: SearchMode::Foreground,
         };
@@ -879,6 +951,7 @@ mod tests {
             offset: 0,
             target: &zeros,
             prev_version: None,
+            dictionary: None,
             pending: None,
             mode: SearchMode::Foreground,
         };

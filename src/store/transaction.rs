@@ -424,6 +424,21 @@ fn descriptor_object_ids(bytes: &[u8], limits: &crate::core::limits::Limits) -> 
     ) else {
         return Vec::new();
     };
+    descriptor_objects(&desc, limits)
+}
+
+/// The object ids a decoded descriptor references. Shared by the
+/// transaction-local reachability walk (which stages B-tree records under
+/// their content ids) and the background optimizer's incumbent accounting
+/// (`current_persisted_bytes` must count every persistent bit necessary to
+/// decode the extent — Phase-9B exposed that object-backed families other
+/// than RAW/RANS were being undercounted, which made the optimizer refuse
+/// valid densifications).
+pub(crate) fn descriptor_objects(
+    desc: &Representation,
+    limits: &crate::core::limits::Limits,
+) -> Vec<ChunkId> {
+    let _ = limits;
     let mut out = Vec::new();
     let residual_objs = |r: &crate::core::representation::Residual, out: &mut Vec<ChunkId>| {
         use crate::core::representation::Residual;
@@ -440,7 +455,8 @@ fn descriptor_object_ids(bytes: &[u8], limits: &crate::core::limits::Limits) -> 
         Representation::Raw { obj, .. } => out.push(*obj),
         Representation::Rans { model, enc_obj, .. }
         | Representation::SequenceRans { model, enc_obj, .. }
-        | Representation::SparseBlock64 { model, enc_obj, .. } => {
+        | Representation::SparseBlock64 { model, enc_obj, .. }
+        | Representation::SequenceDict { model, enc_obj, .. } => {
             out.push(*model);
             out.push(*enc_obj);
         }

@@ -104,6 +104,7 @@ pub fn family_name(desc: &crate::core::representation::Representation) -> &'stat
         crate::core::representation::Representation::Permutation { .. } => "PERMUTATION",
         crate::core::representation::Representation::SequenceRans { .. } => "SEQUENCE_RANS",
         crate::core::representation::Representation::SparseBlock64 { .. } => "SPARSE_BLOCK64",
+        crate::core::representation::Representation::SequenceDict { .. } => "SEQUENCE_DICT",
     }
 }
 

@@ -1,5 +1,35 @@
 # EntropyFS changelog
 
+## Unreleased (Phase 9B — SequenceDict)
+
+- `SEQUENCE_DICT` (tag 0x0F, feature bit 12): cross-chunk dictionary match
+  coding. The previous same-file chunk is used as an external ≤64 KiB
+  dictionary alongside local history: a fourth *copy-source* stream says
+  whether each u16 is a LOCAL backward distance (byte-progressive) or a
+  DICT absolute offset; a DICT match longer than 131 bytes advances the
+  offset across continuation commands. Depth-capped like base chains
+  (`dictionary chain + 1 ≤ max_reference_depth`), so cross-chunk
+  dictionary references can never defeat bounded random access; periodic
+  terminal anchors emerge automatically at the depth cap.
+- Write-path integration: the batch overlay provides the previous chunk's
+  bytes nearly free (`PendingBatch.depths` registers in-batch reference
+  depths); the background optimizer re-encodes RAW extents to
+  SEQUENCE_DICT via the committed previous chunk.
+- Correctness fixes surfaced by SequenceDict:
+  - `flatten_if_deep` now validates the flattened update through a
+    resolver that sees the update's own staged objects (previously
+    materializing through the bare store failed on object-backed
+    families with `MissingObject`).
+  - `current_persisted_bytes` now accounts every object a descriptor
+    references (RAW/RANS were the only families counted; object-backed
+    incumbents looked nearly free and blocked densification).
+  - Background candidate ordering now uses FULL persisted bytes (the
+    foreground keeps marginal bytes so reuse wins); a chunk whose
+    incumbent's objects already exist is no longer immune to
+    replacement.
+- Ablation: `allow_sequence_dict` gate, `no-sequence-dict` leave-one-out
+  mode, cumulative-ladder step E2 (post-registration extension).
+
 ## v0.2.0 (2026-08-25)
 
 **Format note (correction to the release commit's wording):** the v0.2.0

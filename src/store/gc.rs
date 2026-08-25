@@ -342,6 +342,9 @@ fn collect_descriptor_refs(
         Representation::BaseResidual { base, .. } => {
             referenced.insert(*base);
         }
+        Representation::SequenceDict { dictionary, .. } => {
+            referenced.insert(*dictionary);
+        }
         _ => {}
     }
     Ok(())
@@ -381,6 +384,10 @@ fn mark_descriptor_refs(
             refs.push(*enc_obj);
         }
         Representation::SparseBlock64 { model, enc_obj, .. } => {
+            refs.push(*model);
+            refs.push(*enc_obj);
+        }
+        Representation::SequenceDict { model, enc_obj, .. } => {
             refs.push(*model);
             refs.push(*enc_obj);
         }

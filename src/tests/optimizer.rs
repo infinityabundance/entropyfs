@@ -133,9 +133,10 @@ fn drift_workload_stays_shallow_and_exact() {
 #[test]
 fn background_pass_densifies_sequential_edits() {
     // H2/H4: sequentially written chunks that are tiny edits of the first
-    // chunk. The foreground write path (first write to each offset, no
-    // bases) cannot use P3; the background pass can, and must rewrite to
-    // BASE_RESIDUAL without changing bytes.
+    // chunk. Phase-9B: the foreground write path now densifies these AT
+    // WRITE TIME via SequenceDict (previous same-file chunk as the
+    // dictionary); the background pass must stay byte-exact, never regress
+    // density, and have nothing left to densify.
     let dir = TempDir::new().unwrap();
     let store = create_store(&dir);
     let f = ino(&store);
@@ -151,10 +152,30 @@ fn background_pass_densifies_sequential_edits() {
     let before = store.read_file(f, 0, 4 * 65536).unwrap();
     let physical_before = store.physical_used();
 
+    // The edited chunks must already be densified (SEQUENCE_DICT against
+    // the previous chunk — never RAW), and far below the raw size.
+    let exts = extents_of(&store, f);
+    let raw = 4 * 65536u64;
+    let mut total: u64 = 0;
+    for (off, d) in &exts {
+        assert_ne!(d.family(), "RAW", "extent at {off} must not be RAW");
+        total += crate::optimizer::background::current_persisted_bytes(&store, d);
+    }
+    assert!(
+        total < raw / 20,
+        "foreground must densify sequential edits: {total} >= {raw}/20"
+    );
+    assert!(
+        exts.iter()
+            .any(|(_, d)| matches!(d, Representation::SequenceDict { .. })),
+        "expected SEQUENCE_DICT for the edited chunks, got families: {:?}",
+        exts.iter().map(|(_, d)| d.family()).collect::<Vec<_>>()
+    );
+
     let stats = optimize_pass(&store, OptimizeOptions::default(), None, None).unwrap();
-    assert!(stats.rewritten > 0, "expected rewrites, got {stats:?}");
     let after = store.read_file(f, 0, 4 * 65536).unwrap();
     assert_eq!(after, before, "background pass changed logical bytes");
+    let _ = stats;
     // Densification is measured after GC: the append-only store retains
     // superseded objects until reclaim, so compare post-GC usage.
     crate::store::gc::collect(&store, &CrashHooks::none()).unwrap();
@@ -162,19 +183,6 @@ fn background_pass_densifies_sequential_edits() {
     assert!(
         physical_after <= physical_before,
         "densification must not grow the store: before {physical_before}, after {physical_after}"
-    );
-    // The edited chunks must now be base+residual against the previous
-    // chunk (or at least cheaper than RAW/RANS would allow).
-    let exts = extents_of(&store, f);
-    assert!(exts.len() >= 2);
-    let base_residuals = exts
-        .iter()
-        .filter(|(_, d)| matches!(d, Representation::BaseResidual { .. }))
-        .count();
-    assert!(
-        base_residuals >= 1,
-        "expected at least one BASE_RESIDUAL, got families: {:?}",
-        exts.iter().map(|(_, d)| d.family()).collect::<Vec<_>>()
     );
 }
 

@@ -1009,6 +1009,9 @@ impl Store {
             Representation::SparseBlock64 { .. } => {
                 features |= crate::format::features::Feature::SparseBlock64.mask();
             }
+            Representation::SequenceDict { .. } => {
+                features |= crate::format::features::Feature::SequenceDict.mask();
+            }
             _ => {}
         }
         let bytes = crate::format::descriptor::encode(descriptor)?;
@@ -2472,11 +2475,47 @@ impl Store {
                     });
                 }
             }
+            // Phase-9B: the SequenceDict dictionary is the previous
+            // same-file chunk. Sequential writes make its bytes nearly
+            // free: the batch overlay holds the uncommitted previous chunk
+            // (its descriptor commits in this same transaction, so a
+            // reference resolves at decode); otherwise the committed
+            // store. Overlay bytes are only usable when the previous
+            // chunk was freshly encoded in this batch (its descriptor is
+            // registered in the pending state); an aliased chunk
+            // (EXACT_REF) resolves through the committed index, and its
+            // overlay bytes would not match at decode.
+            let mut dictionary: Option<crate::core::candidate::BaseChunk> = None;
+            if chunk_off >= chunk_class {
+                let prev_off = chunk_off - chunk_class;
+                let overlay_hit = overlay.as_ref().and_then(|o| o.get(&prev_off).cloned());
+                match overlay_hit {
+                    Some(prev_bytes) => {
+                        if let Some(p) = pending.as_ref() {
+                            let pcid = crate::core::extent::ChunkId::of(&prev_bytes);
+                            if p.descriptors.contains_key(&pcid) {
+                                let depth = p.depths.get(&pcid).copied().unwrap_or(0);
+                                dictionary = Some(crate::core::candidate::BaseChunk {
+                                    id: pcid,
+                                    bytes: prev_bytes,
+                                    depth,
+                                });
+                            }
+                        }
+                    }
+                    None => {
+                        // Previous chunk not touched in this batch: the
+                        // committed store is authoritative.
+                        dictionary = self.base_chunk_at(ino, prev_off, chunk_len)?;
+                    }
+                }
+            }
             let ctx = crate::optimizer::search::GuidedContext {
                 ino,
                 offset: chunk_off,
                 target: chunk_bytes,
                 prev_version,
+                dictionary,
                 pending: pending.as_deref(),
                 mode: crate::optimizer::search::SearchMode::Foreground,
             };
@@ -2495,6 +2534,13 @@ impl Store {
                     p.descriptors
                         .entry(outcome.update.content_id)
                         .or_insert(desc_bytes);
+                    // Phase-9B: register the descriptor's reference depth
+                    // so a later chunk in this batch can use it as a
+                    // SequenceDict dictionary without exceeding the decode
+                    // cap (first occurrence wins, like the descriptor).
+                    p.depths
+                        .entry(outcome.update.content_id)
+                        .or_insert(outcome.depth);
                 }
                 for obj in &outcome.update.objects {
                     p.objects.entry(obj.id).or_insert(obj.payload.clone());

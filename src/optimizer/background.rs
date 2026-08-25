@@ -40,24 +40,21 @@ pub struct BackgroundStats {
 }
 
 /// Account the current persisted bytes attributable to an extent
-/// (descriptor + directly referenced object payloads, §2 accounting:
-/// every persistent bit necessary to decode the extent).
+/// (descriptor + the objects it references, §2 accounting: every
+/// persistent bit necessary to decode the extent).
+///
+/// Phase-9B fix: this previously counted only RAW/RANS object ids, so
+/// SEQUENCE_RANS / SPARSE_BLOCK64 / SEQUENCE_DICT model+enc objects and
+/// residual streams were invisible to the incumbent cost — the optimizer
+/// then refused every densification of an object-backed extent because
+/// the incumbent looked nearly free.
 pub fn current_persisted_bytes(
     store: &Store,
     desc: &crate::core::representation::Representation,
 ) -> u64 {
     let mut total = desc.encoded_size();
-    let mut object_ids: Vec<&ChunkId> = Vec::new();
-    match desc {
-        crate::core::representation::Representation::Raw { obj, .. } => object_ids.push(obj),
-        crate::core::representation::Representation::Rans { model, enc_obj, .. } => {
-            object_ids.push(model);
-            object_ids.push(enc_obj);
-        }
-        _ => {}
-    }
-    for id in object_ids {
-        if let Some(loc) = store.object_index().get(id) {
+    for id in crate::store::transaction::descriptor_objects(desc, &store.config().limits) {
+        if let Some(loc) = store.object_index().get(&id) {
             total = total.saturating_add(loc.stored_len);
         }
     }
@@ -173,6 +170,14 @@ pub fn optimize_pass(
                 offset: start,
                 target: &bytes,
                 prev_version: None,
+                // Phase-9B: the previous same-file chunk is the
+                // SequenceDict dictionary (background: from the committed
+                // store).
+                dictionary: if start >= limits.chunk_class {
+                    store.base_chunk_at(at, start - limits.chunk_class, bytes.len())?
+                } else {
+                    None
+                },
                 pending: None,
                 mode: SearchMode::Background,
             };

@@ -582,6 +582,155 @@ pub fn materialize(
             }
             Ok(())
         }
+        Representation::SequenceDict {
+            dictionary,
+            dictionary_len,
+            model,
+            enc_obj,
+            scale_bits,
+            codec,
+            seq_len,
+            lit_len,
+            off_len,
+            src_len,
+            cmds,
+            lit_out,
+            len,
+        } => {
+            if *len > limits.max_alloc_bytes {
+                return Err(MaterializeError::AllocTooLarge {
+                    requested: *len,
+                    max: limits.max_alloc_bytes,
+                });
+            }
+            // Every command writes at least one byte, so the command count
+            // can never exceed the output length (bounds the decode_rans
+            // allocation below).
+            if (*cmds as u64) > *len {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "sequence command count exceeds output length".into(),
+                ));
+            }
+            if *dictionary_len as u64 > limits.max_alloc_bytes {
+                return Err(MaterializeError::AllocTooLarge {
+                    requested: *dictionary_len as u64,
+                    max: limits.max_alloc_bytes,
+                });
+            }
+            // Resolve and materialize the dictionary chunk at depth+1: the
+            // depth cap bounds dictionary chains, so cross-chunk references
+            // can never defeat bounded random access (Phase-9B constraint).
+            let dict_desc = ctx.fetch_descriptor(dictionary)?;
+            if dict_desc.len() != *dictionary_len as u64 {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "dictionary length mismatch".into(),
+                ));
+            }
+            let mut dict_bytes = vec![0u8; *dictionary_len as usize];
+            materialize(&dict_desc, ctx, limits, depth + 1, budget, &mut dict_bytes)?;
+            let d = crate::rans::sequence::decode_four_streams(
+                ctx,
+                limits,
+                crate::rans::sequence::StreamRefs {
+                    model: *model,
+                    enc_obj: *enc_obj,
+                    scale_bits: *scale_bits,
+                    codec: *codec,
+                },
+                crate::rans::sequence::FourStreams {
+                    seq_len: *seq_len,
+                    lit_len: *lit_len,
+                    off_len: *off_len,
+                    src_len: *src_len,
+                    cmds: *cmds,
+                    lit_out: *lit_out,
+                },
+            )?;
+            let (commands, literals, offsets, sources) =
+                (d.commands, d.literals, d.offsets, d.sources);
+            // Walk the commands: LITERAL appends verbatim; COPY consumes
+            // one source byte and one u16 value — LOCAL copies are
+            // byte-progressive backward references into the output, DICT
+            // copies are absolute offsets into the materialized dictionary.
+            let mut pos = 0usize;
+            let mut lit = 0usize;
+            let mut off = 0usize;
+            let mut src = 0usize;
+            for &cmd in &commands {
+                if cmd < 0x80 {
+                    let run = cmd as usize + 1;
+                    if pos + run > output.len() || lit + run > literals.len() {
+                        return Err(MaterializeError::InvalidDescriptor(
+                            "literal run overflow".into(),
+                        ));
+                    }
+                    output[pos..pos + run].copy_from_slice(&literals[lit..lit + run]);
+                    pos += run;
+                    lit += run;
+                    spend(run as u64, budget)?;
+                } else {
+                    let clen = cmd as usize - 0x80 + 4;
+                    if src + 1 > sources.len() {
+                        return Err(MaterializeError::InvalidDescriptor(
+                            "copy source exhausted".into(),
+                        ));
+                    }
+                    let source = sources[src];
+                    src += 1;
+                    if off + 2 > offsets.len() {
+                        return Err(MaterializeError::InvalidDescriptor(
+                            "copy offset exhausted".into(),
+                        ));
+                    }
+                    let v = u16::from_le_bytes([offsets[off], offsets[off + 1]]) as usize;
+                    off += 2;
+                    match source {
+                        crate::rans::sequence::SRC_LOCAL => {
+                            if v == 0 || v > pos {
+                                return Err(MaterializeError::InvalidDescriptor(
+                                    "copy distance out of range".into(),
+                                ));
+                            }
+                            if pos + clen > output.len() {
+                                return Err(MaterializeError::InvalidDescriptor(
+                                    "copy overflow".into(),
+                                ));
+                            }
+                            for _ in 0..clen {
+                                output[pos] = output[pos - v];
+                                pos += 1;
+                            }
+                        }
+                        crate::rans::sequence::SRC_DICT => {
+                            if v.checked_add(clen).is_none() || v + clen > dict_bytes.len() {
+                                return Err(MaterializeError::InvalidDescriptor(
+                                    "dict copy out of dictionary bounds".into(),
+                                ));
+                            }
+                            if pos + clen > output.len() {
+                                return Err(MaterializeError::InvalidDescriptor(
+                                    "copy overflow".into(),
+                                ));
+                            }
+                            output[pos..pos + clen].copy_from_slice(&dict_bytes[v..v + clen]);
+                            pos += clen;
+                        }
+                        other => {
+                            return Err(MaterializeError::InvalidDescriptor(format!(
+                                "unknown copy source {other}"
+                            )));
+                        }
+                    }
+                    spend(clen as u64, budget)?;
+                }
+            }
+            if pos != output.len() || lit != literals.len() {
+                return Err(MaterializeError::InvalidDescriptor(
+                    "sequence command walk did not cover the output".into(),
+                ));
+            }
+            Ok(())
+        }
     }
 }
 

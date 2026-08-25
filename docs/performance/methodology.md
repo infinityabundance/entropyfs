@@ -108,6 +108,9 @@ A6  + entropy universes
 A7  + DSFB candidate guidance
 A8  + background re-optimization
 E1  + SequenceRans fast floor (post-registration; the production pipeline)
+E2  + SequenceDict cross-chunk dictionary (post-registration, Phase-9B;
+    local history + external same-file dictionary in one stream,
+    depth-capped)
 ```
 
 Note: content-addressed object sharing (identical payload → one content

@@ -191,6 +191,10 @@ pub fn estimated_read_cycles(rep: &Representation) -> u64 {
         Representation::SequenceRans { .. } => len * 5,
         // Per-word popcount + rank unranking + literal placement.
         Representation::SparseBlock64 { .. } => len / 8 + 8,
+        // Four rANS streams + the copy walk + the dictionary chunk
+        // materialization (the dictionary's own decode is accounted in its
+        // extent's cost; this adds the reference indirection).
+        Representation::SequenceDict { .. } => len * 5 + 64,
     }
 }
 
@@ -211,6 +215,9 @@ pub fn estimated_write_cycles(rep: &Representation) -> u64 {
         // LZ hash search + three histograms + three rANS encodes.
         Representation::SequenceRans { .. } => len * 8,
         Representation::SparseBlock64 { .. } => len / 8 + 16,
+        // LZ search over input + dictionary, four histograms, four rANS
+        // encodes.
+        Representation::SequenceDict { .. } => len * 10,
     }
 }
 
@@ -238,6 +245,8 @@ pub fn dependent_reads(rep: &Representation) -> u32 {
         Representation::SequenceRans { .. } => 2,
         // Model object + enc object.
         Representation::SparseBlock64 { .. } => 2,
+        // Model object + enc object + the dictionary chunk materialization.
+        Representation::SequenceDict { .. } => 3,
     }
 }
 
@@ -245,8 +254,9 @@ pub fn dependent_reads(rep: &Representation) -> u32 {
 /// families; 1 for a reference that adds one level).
 pub fn reference_depth(rep: &Representation) -> u8 {
     match rep {
-        Representation::ExactRef { .. } => 1,
-        Representation::BaseResidual { .. } => 1,
+        Representation::ExactRef { .. }
+        | Representation::BaseResidual { .. }
+        | Representation::SequenceDict { .. } => 1,
         _ => 0,
     }
 }

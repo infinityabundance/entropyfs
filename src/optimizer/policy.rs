@@ -45,6 +45,12 @@ pub struct OptimizeOptions {
     /// (`SequenceEncoder`, ladder step E1). Gated separately so A1 and the
     /// "direct rANS" baseline measure pure byte rANS.
     pub allow_sequence_rans: bool,
+    /// SequenceDict — the post-registration cross-chunk dictionary family
+    /// (`SequenceDictEncoder`, ladder step E2): local-history + external
+    /// same-file dictionary in one stream. Gated separately from base
+    /// residuals so the temporal (BaseSequence) and contextual (Sequence-
+    /// Dict) attribution boundaries stay clean.
+    pub allow_sequence_dict: bool,
     /// Base+residual coding against the in-hand previous version (P0): the
     /// "base residuals" step of the cumulative ladder (methodology §4 A3).
     pub allow_bases: bool,
@@ -64,6 +70,7 @@ impl Default for OptimizeOptions {
             allow_configurational: true,
             allow_byte_rans: true,
             allow_sequence_rans: true,
+            allow_sequence_dict: true,
             allow_bases: true,
             allow_temporal_bases: true,
             allow_universe: true,
@@ -80,6 +87,7 @@ impl OptimizeOptions {
             allow_configurational: false,
             allow_byte_rans: false,
             allow_sequence_rans: false,
+            allow_sequence_dict: false,
             allow_bases: false,
             allow_temporal_bases: false,
             allow_universe: false,
@@ -95,6 +103,7 @@ impl OptimizeOptions {
             allow_configurational: false,
             allow_byte_rans: true,
             allow_sequence_rans: false,
+            allow_sequence_dict: false,
             allow_bases: false,
             allow_temporal_bases: false,
             allow_universe: false,
@@ -110,6 +119,7 @@ impl OptimizeOptions {
             allow_configurational: false,
             allow_byte_rans: false,
             allow_sequence_rans: true,
+            allow_sequence_dict: false,
             allow_bases: false,
             allow_temporal_bases: false,
             allow_universe: false,
@@ -146,6 +156,7 @@ impl OptimizeOptions {
             Representation::Raw { .. } => true,
             Representation::Rans { .. } => self.allow_byte_rans,
             Representation::SequenceRans { .. } => self.allow_sequence_rans,
+            Representation::SequenceDict { .. } => self.allow_sequence_dict,
             Representation::ExactRef { .. } => self.allow_exact_ref,
             Representation::BaseResidual { .. } => self.allow_bases,
             Representation::EntropyRef { .. } => self.allow_universe,
@@ -219,6 +230,13 @@ impl OptimizeOptions {
                 },
             ),
             (
+                "no-sequence-dict",
+                OptimizeOptions {
+                    allow_sequence_dict: false,
+                    ..Default::default()
+                },
+            ),
+            (
                 "no-universe",
                 OptimizeOptions {
                     allow_universe: false,
@@ -258,6 +276,7 @@ impl OptimizeOptions {
                     allow_configurational: false,
                     allow_byte_rans: true,
                     allow_sequence_rans: false,
+                    allow_sequence_dict: false,
                     allow_bases: false,
                     allow_temporal_bases: false,
                     allow_universe: false,
@@ -273,6 +292,7 @@ impl OptimizeOptions {
                     allow_configurational: false,
                     allow_byte_rans: true,
                     allow_sequence_rans: false,
+                    allow_sequence_dict: false,
                     allow_bases: true,
                     allow_temporal_bases: false,
                     allow_universe: false,
@@ -288,6 +308,7 @@ impl OptimizeOptions {
                     allow_configurational: true,
                     allow_byte_rans: true,
                     allow_sequence_rans: false,
+                    allow_sequence_dict: false,
                     allow_bases: true,
                     allow_temporal_bases: false,
                     allow_universe: false,
@@ -303,6 +324,7 @@ impl OptimizeOptions {
                     allow_configurational: true,
                     allow_byte_rans: true,
                     allow_sequence_rans: false,
+                    allow_sequence_dict: false,
                     allow_bases: true,
                     allow_temporal_bases: true,
                     allow_universe: false,
@@ -318,6 +340,7 @@ impl OptimizeOptions {
                     allow_configurational: true,
                     allow_byte_rans: true,
                     allow_sequence_rans: false,
+                    allow_sequence_dict: false,
                     allow_bases: true,
                     allow_temporal_bases: true,
                     allow_universe: true,
@@ -333,6 +356,7 @@ impl OptimizeOptions {
                     allow_configurational: true,
                     allow_byte_rans: true,
                     allow_sequence_rans: false,
+                    allow_sequence_dict: false,
                     allow_bases: true,
                     allow_temporal_bases: true,
                     allow_universe: true,
@@ -348,6 +372,7 @@ impl OptimizeOptions {
                     allow_configurational: true,
                     allow_byte_rans: true,
                     allow_sequence_rans: false,
+                    allow_sequence_dict: false,
                     allow_bases: true,
                     allow_temporal_bases: true,
                     allow_universe: true,
@@ -358,6 +383,10 @@ impl OptimizeOptions {
             // E1 = the post-registration SequenceRans floor (the current
             // production pipeline: full + background pass).
             ("E1-sequence-rans", OptimizeOptions::default(), true),
+            // E2 = E1 + the cross-chunk dictionary family (SequenceDict,
+            // Phase-9B): local-history + external same-file dictionary in
+            // one stream, depth-capped.
+            ("E2-sequence-dict", OptimizeOptions::default(), true),
         ]
     }
 }
