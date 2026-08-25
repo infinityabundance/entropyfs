@@ -44,11 +44,27 @@ pub struct MountArgs {
     /// reads it).
     #[arg(long, value_name = "PATH")]
     pub stats_file: Option<PathBuf>,
+    /// Phase-10B foreground representation policy: how much search CPU
+    /// the write path spends per chunk. full = every family (pre-10B);
+    /// cheap = probe first, high-entropy chunks go dedup+ZERO/FILL+RAW;
+    /// raw = hash->CAS->RAW (the background optimizer still densifies).
+    #[arg(long, value_name = "MODE", default_value = "full")]
+    pub foreground: String,
 }
 
 /// Run the mount daemon.
 pub fn run(args: &MountArgs) -> Result<(), String> {
-    let config = StoreConfig::default();
+    let mut config = StoreConfig::default();
+    config.foreground = match args.foreground.as_str() {
+        "full" => crate::optimizer::foreground::ForegroundPolicy::full(),
+        "cheap" => crate::optimizer::foreground::ForegroundPolicy::cheap(),
+        "raw" => crate::optimizer::foreground::ForegroundPolicy::raw_only(),
+        other => {
+            return Err(format!(
+                "unknown --foreground mode {other:?} (expected full | cheap | raw)"
+            ));
+        }
+    };
     let store = Store::open(&args.store, &config).map_err(|e| e.to_string())?;
     let params = MountParams {
         store_dir: args.store.clone(),

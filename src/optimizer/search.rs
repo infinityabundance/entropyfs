@@ -131,11 +131,15 @@ const FOREGROUND_BASE_TRUST: f64 = 0.5;
 
 /// Run the guided search for one chunk. `store` is used read-only for
 /// validation and base materialization; the DSFB observer is updated
-/// (performance-only state).
+/// (performance-only state). `fg` is the Phase-10B foreground policy:
+/// it decides how much search CPU this chunk deserves in the write path
+/// (the background optimizer always passes `ForegroundPolicy::full()`;
+/// the policy only gates Foreground mode).
 pub fn encode_guided(
     store: &Store,
     ctx: &GuidedContext<'_>,
     options: OptimizeOptions,
+    fg: crate::optimizer::foreground::ForegroundPolicy,
 ) -> Result<SearchOutcome, StoreError> {
     let limits = *store.limits();
     let policy = *store.policy();
@@ -152,6 +156,17 @@ pub fn encode_guided(
     let cid = ChunkId::of(ctx.target);
     let key = ChunkKey::new(ctx.ino, index, cid);
 
+    // Phase-10B: the foreground family set — the probe decides how much
+    // of the candidate plane this chunk deserves (high-entropy chunks
+    // skip the LZ/entropy families; RAW is exact and the background
+    // optimizer revisits later). In Background mode the set is
+    // unrestricted (the configuration's own gates are the only limits).
+    let fg_set = if ctx.mode == SearchMode::Foreground {
+        crate::optimizer::foreground::foreground_allows(&options, &fg, ctx.target)
+    } else {
+        crate::optimizer::foreground::ForegroundFamilySet::unrestricted()
+    };
+
     let mut candidates: Vec<(Channel, Candidate)> = Vec::new();
     let mut bases_tried: Vec<(Channel, bool)> = Vec::new();
 
@@ -166,7 +181,7 @@ pub fn encode_guided(
     // aliased chunk index entry must stay for decodability, so the
     // apparent savings are vacuous (cross-extent dedup already happened
     // in the foreground write path).
-    if ctx.mode == SearchMode::Foreground {
+    if ctx.mode == SearchMode::Foreground && fg_set.dedup {
         let mut dd = store.perf().time("search_dedup", || {
             dedup_candidates(store, ctx.target, cid, &limits, ctx.pending, &options)
         })?;
@@ -189,7 +204,7 @@ pub fn encode_guided(
         bases: &[],
         dedup: None,
     };
-    if options.allow_configurational {
+    if options.allow_configurational && fg_set.zero_fill {
         store.perf().time("search_zero_fill", || {
             if let Some(z) = crate::core::candidate::zero_candidate(ctx.target, cid, &limits) {
                 candidates.push((Channel::Raw, z)); // attribution: structural
@@ -203,7 +218,7 @@ pub fn encode_guided(
     // P0 (previous version) is evaluated early in the foreground: its
     // bytes are already in hand (the RMW read), so it is nearly free, and
     // a decisive win lets the search skip the expensive families.
-    if ctx.mode == SearchMode::Foreground && options.allow_bases {
+    if ctx.mode == SearchMode::Foreground && options.allow_bases && fg_set.bases {
         if let Some(b) = &ctx.prev_version {
             if !crate::optimizer::rebase::chain_contains(store, b, &cid) {
                 let p0_ctx = CandidateContext {
@@ -249,7 +264,7 @@ pub fn encode_guided(
         .min_by_key(|c| metric(c))
         .map(|c| metric(c) <= raw_bytes / 8)
         .unwrap_or(false);
-    if !decisive && options.allow_configurational {
+    if !decisive && options.allow_configurational && fg_set.configurational {
         store.perf().time("search_configurational", || {
             for enc in [
                 Box::new(crate::entropy::sparse::SparseEncoder) as Box<dyn Encoder>,
@@ -272,7 +287,7 @@ pub fn encode_guided(
             .unwrap_or(false);
     }
     let mut rans_measurement: Option<f64> = None;
-    if options.allow_byte_rans && !decisive {
+    if options.allow_byte_rans && fg_set.byte_rans && !decisive {
         // P6: conventional byte-level rANS (the original methodology's
         // "rANS" — the pure entropy coder over the raw alphabet).
         let cands = store.perf().time("search_byte_rans", || {
@@ -291,7 +306,7 @@ pub fn encode_guided(
             .map(|c| metric(c) <= raw_bytes / 8)
             .unwrap_or(false);
     }
-    if options.allow_sequence_rans && !decisive {
+    if options.allow_sequence_rans && fg_set.sequence_rans && !decisive {
         // E1: the post-registration local-match floor (SequenceRans).
         let cands = store.perf().time("search_sequence_rans", || {
             crate::rans::sequence::SequenceEncoder.encode(ctx.target, &base_ctx)
@@ -303,7 +318,11 @@ pub fn encode_guided(
         }
         candidates.extend(cands.into_iter().map(|c| (Channel::Rans, c)));
     }
-    if options.allow_sequence_rans_deep && !decisive && ctx.mode == SearchMode::Background {
+    if options.allow_sequence_rans_deep
+        && fg_set.sequence_deep
+        && !decisive
+        && ctx.mode == SearchMode::Background
+    {
         // E4 (Phase-9E): the deep-match family — repcodes + extended
         // length codes + the deep background matcher (chain 256, lazy
         // parse, rep-distance priority). Background-only: the foreground
@@ -313,7 +332,7 @@ pub fn encode_guided(
         });
         candidates.extend(cands.into_iter().map(|c| (Channel::Rans, c)));
     }
-    if options.allow_sequence_dict && !decisive {
+    if options.allow_sequence_dict && fg_set.sequence_dict && !decisive {
         // E2 (Phase-9B): the cross-chunk dictionary family. The previous
         // same-file chunk's bytes are already in hand (batch overlay / RMW
         // read in the foreground; the committed previous chunk in the
@@ -338,7 +357,7 @@ pub fn encode_guided(
             }
         }
     }
-    if options.allow_shared_dict && !decisive {
+    if options.allow_shared_dict && fg_set.shared_dict && !decisive {
         // E3 (Phase-9C): the shared amortized dictionary family. The
         // shared dictionary is a committed chunk supplied by the
         // background shared-dict pass; the previous same-file chunk (when
@@ -392,6 +411,14 @@ pub fn encode_guided(
             continue;
         }
         if !options.channel_allowed(channel) {
+            continue;
+        }
+        // Phase-10B: the budgeted base/universe channels are part of the
+        // skipped family set for high-entropy/raw-only foreground chunks.
+        if channel == Channel::Universe && !fg_set.universe {
+            continue;
+        }
+        if channel != Channel::Universe && !fg_set.bases {
             continue;
         }
         if options.allow_dsfb_ranking && !plan.should_evaluate(channel, position) {
@@ -884,7 +911,13 @@ mod tests {
             pending: None,
             mode: SearchMode::Foreground,
         };
-        encode_guided(store, &ctx, OptimizeOptions::default()).unwrap()
+        encode_guided(
+            store,
+            &ctx,
+            OptimizeOptions::default(),
+            crate::optimizer::foreground::ForegroundPolicy::full(),
+        )
+        .unwrap()
     }
 
     /// Cryptographically uniform deterministic bytes (BLAKE3 of a counter):
@@ -1032,7 +1065,13 @@ mod tests {
             pending: None,
             mode: SearchMode::Foreground,
         };
-        let out = encode_guided(&store, &ctx, OptimizeOptions::raw_only()).unwrap();
+        let out = encode_guided(
+            &store,
+            &ctx,
+            OptimizeOptions::raw_only(),
+            crate::optimizer::foreground::ForegroundPolicy::full(),
+        )
+        .unwrap();
         assert!(matches!(out.update.descriptor, Representation::Raw { .. }));
     }
 

@@ -214,7 +214,12 @@ fn evaluate_commit_extent(
             pending: None,
             mode: SearchMode::Background,
         };
-        match encode_guided(store, &ctx, options) {
+        match encode_guided(
+            store,
+            &ctx,
+            options,
+            crate::optimizer::foreground::ForegroundPolicy::full(),
+        ) {
             Ok(o) => searched.push((o.update, 0)),
             Err(_) => stats.errors += 1,
         }
@@ -236,7 +241,12 @@ fn evaluate_commit_extent(
                 pending: None,
                 mode: SearchMode::Background,
             };
-            match encode_guided(store, &ctx, options) {
+            match encode_guided(
+                store,
+                &ctx,
+                options,
+                crate::optimizer::foreground::ForegroundPolicy::full(),
+            ) {
                 Ok(o) => searched.push((o.update, 0)),
                 Err(_) => stats.errors += 1,
             }

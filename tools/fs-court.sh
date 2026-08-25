@@ -46,6 +46,8 @@ OUTROOT="${2:-$REPO_ROOT/evidence/performance}"
 # foreground section with the background optimizer disabled so an idle
 # worker can never contaminate the timing attribution).
 FUSE_THREADS="${COURT_FUSE_THREADS:-1}"
+# Phase-10B: the foreground representation policy (full | cheap | raw).
+FOREGROUND="${COURT_FOREGROUND:-full}"
 
 if [[ ! -x "$ENTROPYFS_BIN" ]]; then
     echo "error: $ENTROPYFS_BIN not found (build with: cargo build --release)" >&2
@@ -317,7 +319,7 @@ else
 fi
 
 # --- 8. EntropyFS (FUSE, unprivileged; symmetric buffered/durable + reads) --
-log "== entropyfs (FUSE store, threads=$FUSE_THREADS, no background optimizer) =="
+log "== entropyfs (FUSE store, threads=$FUSE_THREADS, foreground=$FOREGROUND, no background optimizer) =="
 if [[ -e /dev/fuse ]] && command -v fusermount3 >/dev/null; then
     mkdir -p "$WORKDIR/efs-store" "$WORKDIR/mnt-efs"
     "$ENTROPYFS_BIN" mkfs "$WORKDIR/efs-store" >/dev/null
@@ -329,7 +331,8 @@ if [[ -e /dev/fuse ]] && command -v fusermount3 >/dev/null; then
     # timings) for the perf analysis.
     "$ENTROPYFS_BIN" mount "$WORKDIR/efs-store" "$WORKDIR/mnt-efs" \
         --threads "$FUSE_THREADS" --no-background-optimize \
-        --stats-file "$OUT/fuse-stats-$FUSE_THREADS.txt" &
+        --foreground "$FOREGROUND" \
+        --stats-file "$OUT/fuse-stats-$FUSE_THREADS-$FOREGROUND.txt" &
     EFS_PID=$!
     for _ in $(seq 1 50); do
         mountpoint -q "$WORKDIR/mnt-efs" && break
@@ -341,11 +344,10 @@ if [[ -e /dev/fuse ]] && command -v fusermount3 >/dev/null; then
         cpu_ticks() { awk '{print $14+$15}' "/proc/$1/stat" 2>/dev/null || echo 0; }
         hz="$(getconf CLK_TCK 2>/dev/null || echo 100)"
         cpu0=$(cpu_ticks "$EFS_PID")
-        measure_mounted entropyfs "entropyfs" "$WORKDIR/mnt-efs" "FUSE mount of $WORKDIR/efs-store (threads=$FUSE_THREADS)"
-        cpu1=$(cpu_ticks "$EFS_PID")
         wall0=$(date +%s%N)
-        sync
+        measure_mounted entropyfs "entropyfs" "$WORKDIR/mnt-efs" "FUSE mount of $WORKDIR/efs-store (threads=$FUSE_THREADS)"
         wall1=$(date +%s%N)
+        cpu1=$(cpu_ticks "$EFS_PID")
         cpu_secs=$(python3 -c "print(f'{($cpu1-$cpu0)/$hz:.2f}')")
         wall_secs=$(python3 -c "print(f'{($wall1-$wall0)/1e9:.2f}')")
         util=$(python3 -c "print(f'{$cpu_secs/max($wall_secs,0.001):.2f}')")
@@ -357,7 +359,8 @@ if [[ -e /dev/fuse ]] && command -v fusermount3 >/dev/null; then
         wait "$EFS_PID" 2>/dev/null || true
         "$ENTROPYFS_BIN" mount "$WORKDIR/efs-store" "$WORKDIR/mnt-efs" \
             --threads "$FUSE_THREADS" --no-background-optimize \
-            --stats-file "$OUT/fuse-stats-$FUSE_THREADS-cold.txt" &
+            --foreground "$FOREGROUND" \
+            --stats-file "$OUT/fuse-stats-$FUSE_THREADS-$FOREGROUND-cold.txt" &
         EFS_PID=$!
         for _ in $(seq 1 50); do
             mountpoint -q "$WORKDIR/mnt-efs" && break
@@ -377,9 +380,9 @@ if [[ -e /dev/fuse ]] && command -v fusermount3 >/dev/null; then
         fi
         "$ENTROPYFS_BIN" unmount "$WORKDIR/mnt-efs" || fusermount3 -u "$WORKDIR/mnt-efs" || true
         wait "$EFS_PID" 2>/dev/null || true
-        if [[ -f "$OUT/fuse-stats-$FUSE_THREADS.txt" ]]; then
-            log "fuse stats ($FUSE_THREADS threads):"
-            log "$(grep -vE '^$' "$OUT/fuse-stats-$FUSE_THREADS.txt" | sed 's/^/  /')"
+        if [[ -f "$OUT/fuse-stats-$FUSE_THREADS-$FOREGROUND.txt" ]]; then
+            log "fuse stats ($FUSE_THREADS threads, $FOREGROUND):"
+            log "$(grep -vE '^$' "$OUT/fuse-stats-$FUSE_THREADS-$FOREGROUND.txt" | sed 's/^/  /')"
         fi
         # Post-GC backing footprint: segments + superblock, apparent AND
         # allocated blocks (the complete store, not just segment lengths).

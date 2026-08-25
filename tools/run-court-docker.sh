@@ -34,6 +34,8 @@ REV="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || true)"
 echo "== running court (revision ${REV:-norev}) in privileged container =="
 exec docker run --rm --privileged --device /dev/loop-control \
     -e "COURT_REV=$REV" \
+    -e "COURT_FUSE_THREADS=${COURT_FUSE_THREADS:-1}" \
+    -e "COURT_FOREGROUND=${COURT_FOREGROUND:-full}" \
     -v "$REPO_ROOT:/repo:ro" \
     -v "$OUTROOT:/repo/evidence/performance:rw" \
     entropyfs-court "$WORKDIR" /repo/evidence/performance

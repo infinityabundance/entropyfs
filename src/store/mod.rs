@@ -129,6 +129,11 @@ pub struct StoreConfig {
     pub root_uid: u32,
     /// Owner gid of the filesystem root directory.
     pub root_gid: u32,
+    /// Phase-10B foreground representation policy: how much search CPU
+    /// the write path spends per chunk. Ablations construct their own
+    /// `OptimizeOptions` and run with the full policy; the mounted
+    /// filesystem carries this one.
+    pub foreground: crate::optimizer::foreground::ForegroundPolicy,
 }
 
 impl Default for StoreConfig {
@@ -144,6 +149,7 @@ impl Default for StoreConfig {
             capacity_override: None,
             root_uid: current_uid(),
             root_gid: current_gid(),
+            foreground: crate::optimizer::foreground::ForegroundPolicy::default(),
         }
     }
 }
@@ -252,6 +258,8 @@ pub struct Store {
     inode_locks: std::sync::Arc<InodeLockTable>,
     /// Phase-10A write-path phase timings (diagnostic only).
     perf: std::sync::Arc<crate::perf::Timings>,
+    /// Phase-10B foreground representation policy.
+    foreground: crate::optimizer::foreground::ForegroundPolicy,
 }
 
 impl std::fmt::Debug for Store {
@@ -314,6 +322,7 @@ impl Store {
             dsfb: std::sync::Mutex::new(crate::dsfb::observer::StorageObserver::default()),
             inode_locks: std::sync::Arc::new(InodeLockTable::default()),
             perf: std::sync::Arc::new(crate::perf::Timings::default()),
+            foreground: config.foreground,
         };
         store.open_segment(0)?;
         // Create the root directory inode (ino 1) and commit the initial
@@ -387,6 +396,7 @@ impl Store {
             dsfb: std::sync::Mutex::new(crate::dsfb::observer::StorageObserver::default()),
             inode_locks: std::sync::Arc::new(InodeLockTable::default()),
             perf: std::sync::Arc::new(crate::perf::Timings::default()),
+            foreground: config.foreground,
         };
         store
             .stats
@@ -490,6 +500,11 @@ impl Store {
     /// Phase-10A write-path phase timings (diagnostic).
     pub fn perf(&self) -> &std::sync::Arc<crate::perf::Timings> {
         &self.perf
+    }
+
+    /// The Phase-10B foreground representation policy.
+    pub fn foreground_policy(&self) -> crate::optimizer::foreground::ForegroundPolicy {
+        self.foreground
     }
 
     /// The committed stats (copied: `StoreStats` is `Copy`).
@@ -2273,16 +2288,19 @@ impl Store {
     /// read-modify-write; one transaction; extends the file size). Takes
     /// the per-inode mutation lock for the whole prepare+commit sequence.
     pub fn write_region(&self, ino: u64, offset: u64, data: &[u8]) -> Result<(), StoreError> {
-        self.write_region_with(
+        self.write_region_with_fg(
             ino,
             offset,
             data,
             crate::optimizer::policy::OptimizeOptions::default(),
+            self.foreground,
         )
     }
 
     /// Write with explicit optimization options (ablation benchmarks, §43).
-    /// Takes the per-inode mutation lock.
+    /// Takes the per-inode mutation lock. Ablation semantics: the full
+    /// foreground policy (the policy gates CPU, not families — ablations
+    /// measure the families).
     pub fn write_region_with(
         &self,
         ino: u64,
@@ -2290,8 +2308,26 @@ impl Store {
         data: &[u8],
         options: crate::optimizer::policy::OptimizeOptions,
     ) -> Result<(), StoreError> {
+        self.write_region_with_fg(
+            ino,
+            offset,
+            data,
+            options,
+            crate::optimizer::foreground::ForegroundPolicy::full(),
+        )
+    }
+
+    /// Write with explicit options AND a foreground policy (Phase-10B).
+    pub fn write_region_with_fg(
+        &self,
+        ino: u64,
+        offset: u64,
+        data: &[u8],
+        options: crate::optimizer::policy::OptimizeOptions,
+        fg: crate::optimizer::foreground::ForegroundPolicy,
+    ) -> Result<(), StoreError> {
         let _lock = self.inode_lock(ino);
-        self.write_region_with_locked(ino, offset, data, options)
+        self.write_region_with_locked_fg(ino, offset, data, options, fg)
     }
 
     /// The write body: the caller holds the per-inode mutation lock.
@@ -2306,10 +2342,28 @@ impl Store {
         data: &[u8],
         options: crate::optimizer::policy::OptimizeOptions,
     ) -> Result<(), StoreError> {
+        self.write_region_with_locked_fg(
+            ino,
+            offset,
+            data,
+            options,
+            crate::optimizer::foreground::ForegroundPolicy::full(),
+        )
+    }
+
+    /// The write body with an explicit foreground policy.
+    pub(crate) fn write_region_with_locked_fg(
+        &self,
+        ino: u64,
+        offset: u64,
+        data: &[u8],
+        options: crate::optimizer::policy::OptimizeOptions,
+        fg: crate::optimizer::foreground::ForegroundPolicy,
+    ) -> Result<(), StoreError> {
         if data.is_empty() {
             return Ok(());
         }
-        let (updates, new_size) = self.prepare_write(ino, offset, data, None, None, options)?;
+        let (updates, new_size) = self.prepare_write(ino, offset, data, None, None, options, fg)?;
         self.commit_file_extents_deferred(ino, updates, Some(new_size), &CrashHooks::none())?;
         Ok(())
     }
@@ -2331,6 +2385,7 @@ impl Store {
         mut overlay: Option<&mut std::collections::BTreeMap<u64, Vec<u8>>>,
         mut pending: Option<&mut crate::optimizer::search::PendingBatch>,
         options: crate::optimizer::policy::OptimizeOptions,
+        fg: crate::optimizer::foreground::ForegroundPolicy,
     ) -> Result<(Vec<ExtentUpdate>, u64), StoreError> {
         if data.is_empty() {
             return Ok((
@@ -2552,7 +2607,7 @@ impl Store {
                 mode: crate::optimizer::search::SearchMode::Foreground,
             };
             let outcome = self.perf.time("search", || {
-                crate::optimizer::search::encode_guided(self, &ctx, options)
+                crate::optimizer::search::encode_guided(self, &ctx, options, fg)
             })?;
             // Phase-8C: register this chunk's descriptor + objects in the
             // batch pending state so later chunks in the same transaction
@@ -2610,6 +2665,7 @@ impl Store {
             crate::optimizer::search::PendingBatch::default();
         let mut updates: Vec<ExtentUpdate> = Vec::new();
         let mut new_size = 0u64;
+        let fg = crate::optimizer::foreground::ForegroundPolicy::full();
         for (offset, data) in &sorted {
             let (u, sz) = self.prepare_write(
                 ino,
@@ -2618,6 +2674,7 @@ impl Store {
                 Some(&mut overlay),
                 Some(&mut pending),
                 options,
+                fg,
             )?;
             updates.extend(u);
             new_size = new_size.max(sz);
