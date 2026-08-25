@@ -88,9 +88,9 @@ a minimum-gain threshold, rep-distance priority). It is background-only
 terminal (depth 0), and shares the rANS/raw codec. The 9D anchor POOL
 (up to four per directory, greedy marginal-savings selection) lets a
 heterogeneous directory give each file its best dictionary; the sealed
-tree court (9D+9E campaign) measures the pair: 2.214× → 2.380× post-GC
-on the real tree, and the standalone deep floor 3.796× vs the fast floor
-3.744× on the src pack.
+tree court (9D+9E campaign) measures the pair: 2.194× → 2.354× post-GC
+on the real tree, and the standalone deep floor 3.786× vs the fast floor
+3.736× on the src pack.
 
 Hard rules:
 

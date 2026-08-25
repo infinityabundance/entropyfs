@@ -63,7 +63,7 @@ physical storage (RAW fallback) — that is a success condition, not a failure.
 | 9 (9B) | **SequenceDict** — cross-chunk dictionary match coding (tag 0x0F, feature bit 12): the previous same-file chunk as an external ≤64 KiB dictionary beside local history, with a fourth copy-source stream (LOCAL backward distance vs DICT absolute offset; DICT continuation advances the offset). Reference depth accounted like a base chain (`dictionary chain + 1 ≤ max_reference_depth`), so cross-chunk references can never defeat bounded random access; terminal anchors emerge automatically at the depth cap. src corpus **4.070×** — beats standalone SequenceRans (3.627×) and zstd-per-64KiB -1 (3.848×). Also fixed three latent defects it surfaced: `flatten_if_deep` staged-object resolution (`MissingObject`), `current_persisted_bytes` object accounting (object-backed incumbents looked free), background full-byte candidate ordering | ✅ implemented + evidence-sealed (`campaign-1787676607-8250f6b/`) |
 | 9 (9C) | **SequenceSharedDict** — shared amortized dictionary match coding (tag 0x10, feature bit 13): local history + optional previous same-file chunk + a **shared cross-file dictionary** in one stream (third copy-source symbol `SRC_SHARED`). The background `shared_dict_pass` picks a per-directory anchor — an existing terminal chunk that maximizes savings against member incumbents — and rewrites strictly-cheaper extents through the same CAS-gated, byte-validated commit path. GC pins the anchor through the reference closure (survives owner deletion). Sealed by the campaign's **tree court**: 279/282 real-tree files are single-chunk (previous-chunk dictionaries get ~no opportunity on a real tree — the packed-stream density is cross-FILE structure); per-file writes **2.182× → 2.328× post-GC** (102 extents, ~85.2 KiB saved) vs zstd per-file 3.541× / per-64KiB 3.991× (-1). The modest real-text gain and the strong synthetic-family mechanism are both recorded as-is | ✅ implemented + evidence-sealed (`campaign-1787679299-8d6e147/`) |
 | 9 (9D) | **Anchor pool**: `shared_dict_pass` selects up to four per-directory anchors greedily by marginal savings against member incumbents; each extent picks its best pool anchor during the rewrite. Heterogeneous directories get per-file dictionary choice (pool saves ~2× the single-anchor on a two-cluster fixture) | ✅ implemented (sealed with 9E) |
-| 9 (9E) | **SequenceDeep** — deep-match family (tag 0x11, feature bit 14): repcodes (REP0/REP1 carry no offset symbol) + extended length codes (one XCOPY/XLIT + u16 extra instead of 131-byte continuation runs), fed by a deep background matcher (chain 256, lazy parse with a minimum-gain threshold, rep-distance priority). Background-only; terminal. Standalone deep floor **3.796× vs fast 3.744×** on the src pack (deep wins all 41 chunks); ladder E4 densifies structured 50,528 → 50,238 B | ✅ implemented + evidence-sealed (`campaign-178768xxxx-<rev>/`) |
+| 9 (9E) | **SequenceDeep** — deep-match family (tag 0x11, feature bit 14): repcodes (REP0/REP1 carry no offset symbol) + extended length codes (one XCOPY/XLIT + u16 extra instead of 131-byte continuation runs), fed by a deep background matcher (chain 256, lazy parse with a minimum-gain threshold, rep-distance priority). Background-only; terminal. Standalone deep floor **3.786× vs fast 3.736×** on the src pack (deep wins all chunks); ladder E4 densifies structured 50,528 → 50,238 B | ✅ implemented + evidence-sealed (`campaign-1787681660-9be6bd3/`) |
 
 ## Measured results
 
@@ -120,11 +120,11 @@ oversized-descriptor fix (Phase 6) eliminated.
   **EntropyFS full 4.070× with SequenceDict** on the packed stream, and
   the Phase-9C/9D/9E tree court answering the open mount-level question:
   on a real tree of separately-written files, per-file zstd -1 is ~3.5×
-  and EntropyFS per-file writes are **2.214×, rising to 2.380× post-GC
+  and EntropyFS per-file writes are **2.194×, rising to 2.354× post-GC
   after the shared-dict pool + deep background pass** — so most of the
   packed-stream density was indeed cross-FILE structure, and the shared
   dictionary (plus the deep matcher, which lifts the standalone src-pack
-  floor from 3.744× to 3.796×) recovers a measured part of it. The rest
+  floor from 3.736× to 3.786×) recovers a measured part of it. The rest
   of the gap to per-file zstd is the fixed pool-size/anchor policy plus
   the matcher's remaining distance-model overhead; recorded as current
   state, not claims.

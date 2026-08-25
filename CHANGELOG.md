@@ -34,10 +34,10 @@ Milestone content (Phase 9D + 9E):
   `raw_sequence_deep()` standalone baseline (foreground write + a
   background pass, since the family is background-only).
 - Evidence (sealed campaign, 7/7 admission): tree court on the real
-  source tree — EntropyFS per-file writes **2.214× → 2.380× post-GC**
-  after the shared-dict pool + deep background pass (155 extents, ~97.8
-  KiB saved); standalone deep floor **3.796× vs the fast floor 3.744×**
-  on the src pack (deep wins all 41 chunks); ladder E4 densifies the
+  source tree — EntropyFS per-file writes **2.194× → 2.354× post-GC**
+  after the shared-dict pool + deep background pass (151 extents, ~93.3
+  KiB saved); standalone deep floor **3.786× vs the fast floor 3.736×**
+  on the src pack (deep wins all chunks); ladder E4 densifies the
   structured corpus 50,528 → 50,238 B. Archived under
   `evidence/performance/` (`INDEX.md` is authoritative).
 
