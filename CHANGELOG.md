@@ -21,21 +21,23 @@ Milestone content (Phase 9C):
   `optimize_pass`. Anchors are terminal (v1), so rewritten extents carry
   depth ≤ 1; GC pins the anchor chunk through the reference closure even
   after its owning file is deleted (regression-tested).
-- The 9C evidence gate is sealed in the campaign's **tree court**: 271/274
+- The 9C evidence gate is sealed in the campaign's **tree court**: 279/282
   real-tree files are single-chunk, so the previous-chunk dictionary gets
   almost no opportunity on a real tree, and the packed-stream density is
-  mostly cross-FILE structure. Per-file zstd baselines: whole 4.884× /
-  per-file 3.518× / per-64KiB 3.982× (-1). EntropyFS per-file writes
-  **2.167× → 2.307× post-GC** after the shared-dict pass (101 extents,
-  ~80.5 KiB saved). The mechanism is proven by synthetic fixtures
+  mostly cross-FILE structure. Per-file zstd baselines: whole 4.978× /
+  per-file 3.541× / per-64KiB 3.991× (-1). EntropyFS per-file writes
+  **2.182× → 2.328× post-GC** after the shared-dict pass (102 extents,
+  ~85.2 KiB saved). The mechanism is proven by synthetic fixtures
   (random-looking shared headers → large wins); the modest real-tree gain
   is recorded as-is.
 - Ablation: `allow_shared_dict` gate, `no-shared-dict` leave-one-out mode,
   cumulative-ladder step E3 (post-registration extension), DSFB channel
   P8 (`shared_dict`).
-- Evidence: the sealed Phase-9C campaign (7/7 admission) under
-  `evidence/performance/` (`INDEX.md` is authoritative); the intermediate
-  flat-tree run is amended in its directory, never silently kept.
+- Evidence: the sealed Phase-9C campaign `campaign-1787679299-8d6e147`
+  (7/7 admission) under `evidence/performance/` (`INDEX.md` is
+  authoritative); the two intermediate tree-court measurements (flat
+  placement; RAW-scored anchors) are amended in `INDEX.md`, never
+  silently kept.
 
 ## v0.3.0 (2026-08-25)
 

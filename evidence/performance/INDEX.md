@@ -17,6 +17,7 @@ they document are admitted — nothing more.
 | `campaign-1787671040-923df7b/` | `923df7b` | **Attribution correction + transaction-local CAS canonicalization** (Phase-8C v2). Split gates: A1 is pure byte rANS; SequenceRans is the post-registration E1 step; `allow_exact_ref` gates only the alias representation (CAS sharing is an invariant). Physical fix: duplicate payload/B-tree/model records are never re-appended (one record per content id per transaction). Structured: E1 = 50,528 B (1,328×); **post-GC total backing 55,921 B (1,200×), allocated blocks 61,440 B (1,092×)** vs the 5.1 MB pre-GC backing of earlier campaigns. zstd-per-64KiB diagnostic: SequenceRans 3.556× within 5% of zstd-per-64K 3.739× (whole-file zstd -1 4.420×) ⇒ the gap is cross-chunk context → SequenceDict direction. All §8 admission rules OK. |
 | `campaign-1787674068-4892644/` | `4892644` | **Phase 9A sealed**: transaction-local COW-intermediate pruning. The incompressible physical floor collapses to ~1.00× (urandom reachable 33,652,515 B / total backing 33,658,070 B / allocated 33,665,024 B); `unreachable_bytes_by_record_tag` evidence proves the post-GC gap was B-tree intermediates. All §8 admission rules OK. |
 | `campaign-1787676607-8250f6b/` | `8250f6b` | **Phase 9B sealed (SequenceDict)**: cross-chunk dictionary match coding (tag 0x0F, feature bit 12). src corpus 4.070× (up from 3.51×) — EntropyFS full now beats standalone SequenceRans (3.627×) and zstd-per-64KiB -1 (3.848×); the whole-file zstd gap (-1 4.636× / -19 6.787×) is now genuinely cross-64K-window context. E2 ladder step present; leave-one-out 13 rows; ladder 11 rows. urandom 0.997× reachable / 1.00× backing (negative control holds). H2 temporal signal preserved (sequential 3.013× vs shuffled 1.788×, +40.6%); post-GC the base chain still costs more than no-base (1,265,786 vs 1,165,681 B) — recorded as-is per the “accept whatever number comes out” rule. GC traffic: optimizer scanned 512, rewrote 0 — the foreground SequenceDict write path already densifies sequential edits (regression test updated accordingly). All §8 admission rules OK. |
+| `campaign-1787679299-8d6e147/` | `8d6e147` | **Phase 9C sealed (SequenceSharedDict)**: shared amortized dictionary match coding (tag 0x10, feature bit 13). The tree court (real-tree corpus, one inode per file under its real directory structure) seals the 9C evidence gate: 279/282 files are single-chunk, so the previous-chunk dictionary gets almost no opportunity on a real tree (SEQUENCE_DICT used 3×), and the packed-stream density (src 4.09×) is mostly cross-FILE structure. zstd baselines on the tree: whole 4.978× / per-file 3.541× / per-64KiB 3.991× (-1). EntropyFS per-file writes: **2.182× → 2.328× post-GC after the shared-dict pass** (102 extents rewritten, ~85.2 KiB saved) — a real, attributable cross-file gain on ordinary source text, with the mechanism proven by the synthetic family fixtures (random-looking shared headers → large wins). E3 ladder step present; leave-one-out 14 rows; ladder 12 rows. The two intermediate runs (flat-placed tree: 0 rewrites; then real dirs with RAW-scored anchors: 27 rewrites) were unadmitted measurement iterations — their tree courts are amended in the note below, never silently kept. All §8 admission rules OK. |
 | `fuse-court-1787659785-027c959-head/` | `027c959` | FUSE-frontend perf court, **after** Phase 6 (current main). |
 | `fuse-court-1787659914-709a710-before/` | `709a710` | FUSE-frontend perf court, **before** Phase 6 (same workloads, same workload hash `82442892…`). |
 | `fuse-court-1787664579-d90772c/` | `d90772c` | FUSE-frontend perf court, **Phase 8** (concurrency refactor + writeback negotiation + batch group commit + SequenceRans floor; same deterministic shake_128 payload, same bindgen workload `82442892…`). |
@@ -448,3 +449,26 @@ Phase-6 session numbers in the README ("4K writes 35→47 MB/s, 1M writes
 exploratory observations; the admitted numbers are the ones in the tables
 above. The synthetic 16.876× ablation fixture (`evidence/ablation-*.json`)
 is retained as a Phase-4 ablation fixture only, never as a headline claim.
+
+## Phase-9C tree-court amendment
+
+Two intermediate tree-court measurements were produced during Phase 9C
+development and are superseded by the sealed `8d6e147` campaign row
+above. They were never admitted; this note records why, so the fixed
+measurement is never mistaken for a tuned one:
+
+1. The first tree court wrote every file flat under the root directory.
+   274 heterogeneous files formed one group, no single anchor could
+   capture directory-local structure, and the pass rewrote 0 extents —
+   the shared dictionary looked useless. The defect was the *measurement*
+   (flat placement), not the mechanism.
+2. The second tree court mirrored real directories but scored anchor
+   candidates against RAW bytes rather than the extents' incumbent
+   representations. It rewrote 27 extents and saved ~6.7 KiB — an
+   under-measurement of the actual objective by ~12×.
+
+Both defects were fixed before sealing: `write_tree` mirrors the real
+tree structure, and `select_anchor` maximizes savings against member
+incumbents (the strict-cheaper rewrite objective). The sealed tree court:
+EntropyFS per-file writes **2.182× → 2.328× post-GC** after the shared-
+dict pass (102 extents, ~85.2 KiB saved) on the real source tree.

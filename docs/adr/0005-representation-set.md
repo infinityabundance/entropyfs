@@ -71,11 +71,11 @@ depth-capped like base chains, and GC pins them through the reference
 closure so reads stay byte-exact after the owning file is deleted.
 
 The tree-court evidence gate that motivated 0x10 is sealed in
-`campaign-1787679034-ab8d7ec`: on a real tree of separately-written
+`campaign-1787679299-8d6e147`: on a real tree of separately-written
 small files the previous-chunk dictionary gets almost no opportunity
-(271/274 files are single-chunk), and the shared dictionary recovers a
+(279/282 files are single-chunk), and the shared dictionary recovers a
 measured part of the cross-file structure the packed stream exploits
-(2.167× → 2.307× post-GC).
+(2.182× → 2.328× post-GC).
 
 Hard rules:
 
