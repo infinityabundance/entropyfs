@@ -52,7 +52,7 @@ physical storage (RAW fallback) — that is a success condition, not a failure.
 | 7 | Experimental ublk frontend: `src/ublk/` over the same engine — BlockStore adapter (4K blocks, read/write/flush/discard via the entropy engine, device = hidden store file), libublk target glue + `ublk run` CLI (root + `ublk_drv` required), `ublk bench` (kernel-free), unit tests, ADR-0020 | ✅ implemented (adapter live-verified; kernel binding needs root) |
 | 8 (M1) | Concurrency refactor: `Store` interior mutability (root/superblock behind `RwLock`, 64-shard object index, per-inode lock table, short commit coordinator), reads traverse root snapshots without the global writer lock; FUSE writeback-cache negotiation (`FUSE_WRITEBACK_CACHE | ASYNC_READ | PARALLEL_DIROPS | BIG_WRITES`, 1 MiB max_write, background queues) | ✅ implemented (`d90772c`, 264→278 tests) |
 | 8 (M2) | Write aggregation: `write_region_batch` group commit (one transaction + generation per batch, in-batch overlay for overlapping partial chunks), deferred durability, live 4K writes 24.4 → 319 MiB/s (13×), 1M writes 653 MiB/s, reads 2212 MiB/s | ✅ implemented (live court) |
-| 8 (M3) | **SequenceRans** — the general-purpose compression floor: bounded LZ77 hash-chain matcher + three rANS-coded (or raw) streams over `ryg-rans-rs` (tag 0x0D, feature bit 10). Fixes two real defects found by the H2 campaign: encoder tail-remainder bug (`0x7F` corruption for 1–3-byte copy tails) and the flatten-on-write §32 validation gap; also fixed the store GC reachability walk (it under-counted SequenceRans objects — a withdrawn campaign caught it). src corpus density 1.636× → **3.344×** (at parity with direct rANS; zstd -1 3.83× — the deeper matcher is the measured next step); urandom still 0.997× | ✅ implemented (evidence-sealed `campaign-1787665094-a6641d1/`) |
+| 8 (M3) | **SequenceRans** — the general-purpose compression floor: bounded LZ77 hash-chain matcher + three rANS-coded (or raw) streams over `ryg-rans-rs` (tag 0x0D, feature bit 10). Fixes two real defects found by the H2 campaign: encoder tail-remainder bug (`0x7F` corruption for 1–3-byte copy tails) and the flatten-on-write §32 validation gap; also fixed the store GC reachability walk (it under-counted SequenceRans objects — a withdrawn campaign caught it). src corpus: pure byte rANS 1.633× → SequenceRans **3.556×** (zstd -1 per-64KiB 3.739× — the per-extent floor is within 5%, the gap to whole-file zstd is cross-chunk context); urandom still 0.997× | ✅ implemented (evidence-sealed `campaign-1787671040-923df7b/`; the earlier “at parity with direct rANS” description conflated the pre-split gate and is amended in `INDEX.md`) |
 | 8 (M4) | **BaseSequence** — shift-aware copy/literal delta residuals (residual kind 0x04 inside BASE_RESIDUAL): `COPY(base_offset, len)` / `LITERAL(run)` commands, three-stream rANS/raw codec shared with SequenceRans. Inserted/deleted regions cost only their own bytes. H2 flips back to **+35.2%** (sequential 2.752× vs shuffled 1.784×); the shuffled control grows because deltas also capture structural similarity — recorded as the finding | ✅ implemented (evidence-sealed `campaign-1787666036-43bf17e/`) |
 | 8 (M5) | **SparseBlock64** — blockwise-64 enumerative sparse coding (tag 0x0E, feature bit 11): per-word popcount + `C(64,k)` rank (fits u64) + literals, three-stream rANS/raw codec. Removes the plain-SPARSE `u128` cliff (`10 ≤ k ≤ n−10` at 64 KiB). The campaign caught a 3× write-throughput regression from missing dense-input pre-gating; a `k ≥ n/2` density gate fixed it (regression-tested) | ✅ implemented (evidence-sealed `campaign-1787666589-e895fcf/`) |
 | 8 (8A) | Evidence-protocol correction: the strict cumulative ladder A0–A8 (each step adds one mechanism, A8 = +background pass) now runs beside the leave-one-out table (spec §43, methodology §4); both are kept forever. The first campaign's nine-row table is amended as the leave-one-out table (protocol note, never rewritten) | ✅ implemented + evidence-sealed (`campaign-1787668526-d04227f/`) |
@@ -98,21 +98,25 @@ oversized-descriptor fix (Phase 6) eliminated.
   campaign's nine-row table is the leave-one-out table; it predates the
   two-table rule and is amended as such in `evidence/performance/INDEX.md`
   (protocol note, never rewritten).
-- The campaign's DSFB investigation (5+5 repeated runs) found: with DSFB
-  ranking enabled vs disabled, the final physical representation is
-  byte-identical (79,298 B) while write throughput is 765 vs 335 MiB/s and
-  user CPU halves — evidence for DSFB's assigned role as candidate-search
-  budget intelligence, not compression. Single synthetic corpus; under
-  further study.
+- The campaign's DSFB investigation is a sealed three-era series, all
+  with byte-identical physical representations: RANS-era 765.4 vs 334.7
+  MiB/s (2.29×, user CPU halved — `67d977a`), SequenceRans-era 773.9 vs
+  717.1 MiB/s (~8%, `b165d60`), and CAS-era 1,120.8 vs 1,106.1 MiB/s
+  (~1.3%, `923df7b`). DSFB's marginal benefit collapsed as the
+  SequenceRans floor simplified the search landscape — evidence for its
+  assigned role as candidate-search budget intelligence, not compression;
+  its marginal value now is small on this tiny synthetic corpus and its
+  proper counters are deferred. Historical numbers are preserved in
+  `evidence/performance/INDEX.md`; the 2.29× is not a current claim.
 - The campaign's H2 experiment (synthetic drift corpus) is now a sealed
-  **three-campaign controlled series**: `67d977a` +7.2% (RANS-era
-  floor), `a6641d1` −24% (SequenceRans floor, positional residuals
-  only), `43bf17e` **+35.2%** (SequenceRans floor + BASE_SEQUENCE
-  shift-aware deltas — sequential 2.752× vs shuffled 1.784×). The
-  shuffled control grows in the delta campaign because copy/literal
-  deltas also exploit structural similarity between unrelated-history
-  chunks — the control no longer isolates pure temporal causality, and
-  that confounding is itself recorded as the finding.
+  **controlled series**: `67d977a` +7.2% (RANS-era floor), `a6641d1`
+  −24% (SequenceRans floor, positional residuals only), `43bf17e`
+  **+35.2%** (SequenceRans floor + BASE_SEQUENCE shift-aware deltas), and
+  `923df7b` **+40.6%** (marginal costing). The shuffled control grows in
+  the delta campaign because copy/literal deltas also exploit structural
+  similarity between unrelated-history chunks — the control no longer
+  isolates pure temporal causality, and that confounding is itself
+  recorded as the finding.
 - Random/encrypted/already-compressed data falls back toward RAW (urandom
   0.997×, zstd -19 pack 0.993×) — the honest negative control.
 

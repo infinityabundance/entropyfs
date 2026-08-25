@@ -1,27 +1,32 @@
 #!/usr/bin/env bash
-# Competitive filesystem court (Phase 8H, methodology §3/§41, spec §42).
+# Competitive filesystem court v2 (Phase 8H + 9A floor evidence).
 #
-# Measures storage footprint and throughput for the same corpora across:
-#   - ext4            (host directory — no privileges needed)
-#   - XFS             (loop image; requires root + loop devices)
-#   - Btrfs, no comp  (loop image; requires root + loop devices)
-#   - Btrfs + zstd:1  (loop image; requires root + loop devices)
-#   - SquashFS        (mksquashfs; image creation is unprivileged)
-#   - EROFS           (mkfs.erofs; image creation is unprivileged)
-#   - zstd standalone (zstd -1 / -3 / -19 on each corpus)
-#   - EntropyFS       (mkfs + FUSE mount via fusermount3 — unprivileged)
+# Measures the same corpora across:
+#   - ext4 / XFS / Btrfs (raw) / Btrfs (zstd:1)   — writable, loop images
+#     (XFS/Btrfs require root + loop devices; ext4 can be the host dir)
+#   - EROFS / SquashFS                            — read-only images
+#   - zstd standalone (whole + per-64KiB)
+#   - EntropyFS (FUSE mount, unprivileged)
 #
-# The court writes an evidence archive under
-# evidence/performance/fs-court-<ts>-<rev>/ with results.json, report.md,
-# raw-output.txt and environment.json, so the admission rules (§8) apply.
-# Loop-mount filesystems that cannot run in this environment are recorded
-# as EXPLICIT WAIVERS with the exact command a root-capable VM must run —
-# the methodology permits waivers, but the goal (Phase 8H) is to remove
-# them by running this script in a disposable root-capable VM.
+# Measurement rules (symmetric across writable filesystems):
+#   - buffered write  : cp completion time
+#   - durable write   : buffered write + sync (and fsync of the copied
+#                       files where the FS exposes it)
+#   - warm read       : read-back immediately after write (page cache)
+#   - cold read       : after sync + drop_caches (root) or remount (FUSE);
+#                       the cache condition is recorded per measurement
+#   - directory corpora are read via a deterministic tar stream (never
+#     dd on a directory)
+#   - storage: apparent bytes (du -sb) AND allocated blocks (du -sB1),
+#     and for EntropyFS the complete backing store (segments + superblock)
+#   - filesystem/device facts are DISCOVERED from WORKDIR (findmnt), never
+#     hardcoded
+#
+# Evidence: evidence/performance/fs-court-<ts>-<rev>/ with results.json,
+# report.md, raw-output.txt, environment.json (methodology §8 rules apply).
+# Run this in a disposable ROOT-capable VM to clear the loop-mount waivers.
 #
 # Usage: fs-court.sh [WORKDIR] [OUTDIR]
-#   WORKDIR  scratch (default: <repo>/target/fs-court-scratch)
-#   OUTDIR   evidence root (default: <repo>/evidence/performance)
 
 set -euo pipefail
 
@@ -46,17 +51,23 @@ LOG="$OUT/raw-output.txt"
 : > "$LOG"
 log() { echo "$*" | tee -a "$LOG"; }
 
+HAVE_ROOT=0
+[[ "$(id -u)" == "0" ]] && HAVE_ROOT=1
+
 cleanup() {
-    # Never leave a loop mount behind.
     for m in "$WORKDIR"/mnt-*; do
         [[ -d "$m" ]] && umount "$m" 2>/dev/null || true
-    done
-    for f in "$WORKDIR"/img-*; do
-        losetup -d "$f" 2>/dev/null || true
     done
     rm -rf "$WORKDIR"/mnt-* "$WORKDIR"/img-* "$WORKDIR"/efs-store "$WORKDIR"/mnt-efs
 }
 trap cleanup EXIT
+
+# --- discover the scratch filesystem facts (never hardcoded) --------------
+SCRATCH_FSTYPE="$(findmnt -no FSTYPE -T "$WORKDIR" 2>/dev/null | head -1 || true)"
+SCRATCH_SOURCE="$(findmnt -no SOURCE -T "$WORKDIR" 2>/dev/null | head -1 || true)"
+[[ -n "$SCRATCH_FSTYPE" ]] || SCRATCH_FSTYPE="unknown"
+[[ -n "$SCRATCH_SOURCE" ]] || SCRATCH_SOURCE="unknown"
+log "scratch: $WORKDIR on $SCRATCH_FSTYPE ($SCRATCH_SOURCE)"
 
 # --- corpora ---------------------------------------------------------------
 log "== corpus construction =="
@@ -67,9 +78,8 @@ dd if=/dev/urandom of="$WORKDIR/corpora/random.bin" bs=1M count=64 status=none
 dd if=/dev/zero of="$WORKDIR/corpora/zeros.bin" bs=1M count=64 status=none
 (cd "$WORKDIR/corpora" && tar czf compressed.tgz src docs 2>/dev/null || true)
 
+# Directory corpora are traversed deterministically (tar stream to /dev/null).
 CORPORA=(src random.bin zeros.bin compressed.tgz)
-
-bytes_of() { stat -c %s "$1" 2>/dev/null || echo 0; }
 
 results="$OUT/results.json"
 python3 - "$results" <<'EOF'
@@ -77,7 +87,7 @@ import json, sys
 json.dump({"fs": {}, "zstd": {}, "entropyfs": {}}, open(sys.argv[1], "w"))
 EOF
 
-record() {  # record <section> <key> <value>
+record() {
     python3 - "$results" "$1" "$2" "$3" <<'EOF'
 import json, sys
 r = json.load(open(sys.argv[1]))
@@ -86,25 +96,66 @@ json.dump(r, open(sys.argv[1], "w"), indent=1)
 EOF
 }
 
-HAVE_ROOT=0
-[[ "$(id -u)" == "0" ]] && HAVE_ROOT=1
-command -v losetup >/dev/null || HAVE_ROOT=0
+# apparent bytes (du -sb) and allocated blocks (du -sB1) of a path
+du_bytes() { du -sb "$1" 2>/dev/null | cut -f1; }
+du_alloc() { du -sB1 "$1" 2>/dev/null | cut -f1; }
 
-# --- 1. ext4 host directory -------------------------------------------------
-log "== ext4 (host directory) =="
-EXT4_OK=1
-for c in "${CORPORA[@]}"; do
-    mkdir -p "$WORKDIR/mnt-ext4"
-    t0=$(date +%s%N)
-    cp -r "$WORKDIR/corpora/$c" "$WORKDIR/mnt-ext4/$c"
-    t1=$(date +%s%N)
-    apparent=$(du -sb "$WORKDIR/mnt-ext4/$c" | cut -f1)
-    allocated=$(du -sB1 "$WORKDIR/mnt-ext4/$c" | cut -f1)
-    wall_ns=$((t1 - t0))
-    wmbps=$(python3 -c "print(f'{$apparent/1048576/($wall_ns/1e9):.1f}')")
-    log "  $c: apparent $apparent allocated $allocated write ${wmbps} MiB/s"
-    record fs "ext4/$c" "{\"apparent\": $apparent, \"allocated\": $allocated, \"write_mbps\": $wmbps}"
-done
+# --- symmetric measurement on a mounted filesystem -------------------------
+# measure_mounted <section> <name> <dir> [desc]
+measure_mounted() {
+    local section="$1" name="$2" dir="$3"
+    log "== $name (${4:-$dir}) =="
+    for c in "${CORPORA[@]}"; do
+        local src="$WORKDIR/corpora/$c" dst="$dir/$c"
+        # buffered write: cp completion. durable write: cp + sync (the
+        # time until the data is durable on the device).
+        local t0 t1 d1
+        t0=$(date +%s%N)
+        cp -r "$src" "$dst"
+        t1=$(date +%s%N)
+        sync
+        d1=$(date +%s%N)
+        local apparent allocated wmbps dwmbps
+        apparent=$(du_bytes "$dst")
+        allocated=$(du_alloc "$dst")
+        wmbps=$(python3 -c "print(f'{$apparent/1048576/(($t1-$t0)/1e9):.1f}')")
+        dwmbps=$(python3 -c "print(f'{$apparent/1048576/(($d1-$t0)/1e9):.1f}')")
+        # warm read (immediately after write, page cache retained)
+        local r0 r1 rwmbps
+        r0=$(date +%s%N)
+        read_corpus "$dir" "$c"
+        r1=$(date +%s%N)
+        rwmbps=$(python3 -c "print(f'{$apparent/1048576/(($r1-$r0)/1e9):.1f}')")
+        # cold read (root: drop_caches; otherwise recorded as warm-retained)
+        local cold="$rwmbps"
+        if [[ "$HAVE_ROOT" == "1" ]]; then
+            sync
+            echo 3 > /proc/sys/vm/drop_caches
+            local c0 c1
+            c0=$(date +%s%N)
+            read_corpus "$dir" "$c"
+            c1=$(date +%s%N)
+            cold=$(python3 -c "print(f'{$apparent/1048576/(($c1-$c0)/1e9):.1f}')")
+        fi
+        log "  $c: apparent $apparent allocated $allocated buffered-write ${wmbps} MiB/s durable-write ${dwmbps} MiB/s warm-read ${rwmbps} MiB/s cold-read ${cold} MiB/s"
+        record "$section" "$name/$c" "{\"apparent\": $apparent, \"allocated\": $allocated, \"buffered_write_mbps\": $wmbps, \"durable_write_mbps\": $dwmbps, \"warm_read_mbps\": $rwmbps, \"cold_read_mbps\": $cold, \"cache\": \"$( [[ \"$HAVE_ROOT\" == 1 ]] && echo drop-caches || echo warm-retained )\"}"
+    done
+}
+
+# Deterministic corpus read: directories via a tar stream (never dd on a
+# directory), regular files via dd to /dev/null.
+read_corpus() {
+    local dir="$1" c="$2"
+    if [[ -d "$dir/$c" ]]; then
+        tar -cf - -C "$dir" "$c" 2>/dev/null | wc -c >/dev/null
+    else
+        dd if="$dir/$c" of=/dev/null bs=1M status=none
+    fi
+}
+
+# --- 1. ext4 / host scratch dir ----------------------------------------------
+mkdir -p "$WORKDIR/mnt-ext4"
+measure_mounted fs "ext4" "$WORKDIR/mnt-ext4" "host $SCRATCH_FSTYPE on $SCRATCH_SOURCE"
 
 # --- 2/3/4. XFS / Btrfs (±zstd) loop images ---------------------------------
 run_loop_fs() {  # run_loop_fs <name> "<mkfs args>" "<mount opts>"
@@ -117,7 +168,7 @@ run_loop_fs() {  # run_loop_fs <name> "<mkfs args>" "<mount opts>"
         return
     fi
     local img="$WORKDIR/img-$name"
-    truncate -s 256M "$img"
+    truncate -s 1G "$img" # sparse: 1 GiB logical, ~0 allocated until written
     # shellcheck disable=SC2086
     $mkfs_args "$img" >/dev/null 2>&1 || { log "  WAIVER: $mkfs_args failed"; record fs "$name" "{\"waived\": \"mkfs failed\"}"; return; }
     local mnt="$WORKDIR/mnt-$name"
@@ -127,18 +178,16 @@ run_loop_fs() {  # run_loop_fs <name> "<mkfs args>" "<mount opts>"
     else
         mount -o loop "$img" "$mnt" || { log "  WAIVER: mount failed"; record fs "$name" "{\"waived\": \"mount failed\"}"; return; }
     fi
-    for c in "${CORPORA[@]}"; do
-        t0=$(date +%s%N)
-        cp -r "$WORKDIR/corpora/$c" "$mnt/$c"
-        t1=$(date +%s%N)
-        apparent=$(du -sb "$mnt/$c" | cut -f1)
-        allocated=$(du -sB1 "$mnt/$c" | cut -f1)
-        wall_ns=$((t1 - t0))
-        wmbps=$(python3 -c "print(f'{$apparent/1048576/($wall_ns/1e9):.1f}')")
-        log "  $c: apparent $apparent allocated $allocated write ${wmbps} MiB/s"
-        record fs "$name/$c" "{\"apparent\": $apparent, \"allocated\": $allocated, \"write_mbps\": $wmbps}"
-    done
+    measure_mounted fs "$name" "$mnt" "loop image (${mnt_opts:-no compression})"
+    # Durable teardown: unmount flushes; report the image's allocated size
+    # (the true on-disk cost of the filesystem incl. its metadata).
+    sync
     umount "$mnt"
+    local img_alloc img_size
+    img_alloc=$(du_alloc "$img")
+    img_size=$(du_bytes "$img")
+    log "  image: logical $img_size allocated $img_alloc"
+    record fs "$name" "{\"image_logical_bytes\": $img_size, \"image_allocated_bytes\": $img_alloc}"
 }
 
 if command -v mkfs.xfs >/dev/null; then
@@ -163,11 +212,12 @@ if command -v mksquashfs >/dev/null; then
     for c in "${CORPORA[@]}"; do
         img="$WORKDIR/img-squash-$c.sqfs"
         mksquashfs "$WORKDIR/corpora/$c" "$img" -comp zstd >/dev/null 2>&1
-        size=$(bytes_of "$img")
-        apparent=$(du -sb "$WORKDIR/corpora/$c" | cut -f1)
+        size=$(du_bytes "$img")
+        alloc=$(du_alloc "$img")
+        apparent=$(du_bytes "$WORKDIR/corpora/$c")
         ratio=$(python3 -c "print(f'{$apparent/max($size,1):.3f}')")
-        log "  $c: apparent $apparent image $size ratio ${ratio}x"
-        record fs "squashfs-zstd/$c" "{\"apparent\": $apparent, \"image\": $size, \"ratio\": $ratio}"
+        log "  $c: apparent $apparent image $size allocated $alloc ratio ${ratio}x"
+        record fs "squashfs-zstd/$c" "{\"apparent\": $apparent, \"image\": $size, \"allocated\": $alloc, \"ratio\": $ratio}"
     done
 else
     log "== squashfs: WAIVER (mksquashfs not installed) =="
@@ -179,47 +229,63 @@ if command -v mkfs.erofs >/dev/null; then
     for c in "${CORPORA[@]}"; do
         img="$WORKDIR/img-erofs-$c.erofs"
         mkfs.erofs -zlz4hc "$img" "$WORKDIR/corpora/$c" >/dev/null 2>&1
-        size=$(bytes_of "$img")
-        apparent=$(du -sb "$WORKDIR/corpora/$c" | cut -f1)
+        size=$(du_bytes "$img")
+        alloc=$(du_alloc "$img")
+        apparent=$(du_bytes "$WORKDIR/corpora/$c")
         ratio=$(python3 -c "print(f'{$apparent/max($size,1):.3f}')")
-        log "  $c: apparent $apparent image $size ratio ${ratio}x"
-        record fs "erofs-lz4hc/$c" "{\"apparent\": $apparent, \"image\": $size, \"ratio\": $ratio}"
+        log "  $c: apparent $apparent image $size allocated $alloc ratio ${ratio}x"
+        record fs "erofs-lz4hc/$c" "{\"apparent\": $apparent, \"image\": $size, \"allocated\": $alloc, \"ratio\": $ratio}"
     done
 else
     log "== erofs: WAIVER (mkfs.erofs not installed) =="
     record fs "erofs-lz4hc" "{\"waived\": \"mkfs.erofs not installed\"}"
 fi
 
-# --- 7. zstd standalone ------------------------------------------------------
+# --- 7. zstd standalone (whole + per-64KiB) ----------------------------------
 if command -v zstd >/dev/null; then
     log "== zstd standalone =="
-    for level in 1 3 19; do
+    for level in 1 19; do
         for c in "${CORPORA[@]}"; do
             src="$WORKDIR/corpora/$c"
+            t0=$(date +%s%N)
             if [[ -d "$src" ]]; then
-                t0=$(date +%s%N)
                 (cd "$WORKDIR/corpora" && tar c "$c" | zstd -q -"$level" -o "$WORKDIR/zstd-$c-$level.zst")
-                t1=$(date +%s%N)
             else
-                t0=$(date +%s%N)
                 zstd -q -"$level" -f "$src" -o "$WORKDIR/zstd-$c-$level.zst"
-                t1=$(date +%s%N)
             fi
-            size=$(bytes_of "$WORKDIR/zstd-$c-$level.zst")
-            apparent=$(du -sb "$src" | cut -f1)
+            t1=$(date +%s%N)
+            size=$(du_bytes "$WORKDIR/zstd-$c-$level.zst")
+            apparent=$(du_bytes "$src")
             ratio=$(python3 -c "print(f'{$apparent/max($size,1):.3f}')")
-            wall_ns=$((t1 - t0))
-            wmbps=$(python3 -c "print(f'{$apparent/1048576/($wall_ns/1e9):.1f}')")
+            wmbps=$(python3 -c "print(f'{$apparent/1048576/(($t1-$t0)/1e9):.1f}')")
             log "  zstd -$level $c: apparent $apparent image $size ratio ${ratio}x ${wmbps} MiB/s"
             record zstd "-$level/$c" "{\"apparent\": $apparent, \"image\": $size, \"ratio\": $ratio, \"write_mbps\": $wmbps}"
         done
+        # per-64KiB diagnostic (the dictionary-horizon test)
+        t0=$(date +%s%N)
+        (cd "$WORKDIR/corpora" && tar c src | python3 -c "
+import subprocess, sys
+total = 0
+while True:
+    chunk = sys.stdin.buffer.read(65536)
+    if not chunk: break
+    p = subprocess.run(['zstd', '-q', '-$level', '-c'], input=chunk, capture_output=True)
+    total += len(p.stdout)
+print(total)
+" > "$WORKDIR/zstd-src-per64k-$level.size" 2>/dev/null || true)
+        t1=$(date +%s%N)
+        size=$(cat "$WORKDIR/zstd-src-per64k-$level.size" 2>/dev/null || echo 0)
+        apparent=$(du_bytes "$WORKDIR/corpora/src")
+        ratio=$(python3 -c "print(f'{$apparent/max($size,1):.3f}')")
+        log "  zstd -$level src per-64KiB: apparent $apparent image $size ratio ${ratio}x"
+        record zstd "-$level/src-per-64k" "{\"apparent\": $apparent, \"image\": $size, \"ratio\": $ratio}"
     done
 else
     log "== zstd: WAIVER (zstd not installed) =="
     record zstd "waived" "zstd not installed"
 fi
 
-# --- 8. EntropyFS (FUSE, unprivileged) --------------------------------------
+# --- 8. EntropyFS (FUSE, unprivileged; symmetric buffered/durable + reads) --
 log "== entropyfs (FUSE store) =="
 if [[ -e /dev/fuse ]] && command -v fusermount3 >/dev/null; then
     mkdir -p "$WORKDIR/efs-store" "$WORKDIR/mnt-efs"
@@ -230,40 +296,52 @@ if [[ -e /dev/fuse ]] && command -v fusermount3 >/dev/null; then
         mountpoint -q "$WORKDIR/mnt-efs" && break
         sleep 0.1
     done
-    mountpoint -q "$WORKDIR/mnt-efs" || { log "  WAIVER: entropyfs mount failed"; record entropyfs "waived" "mount failed"; }
     if mountpoint -q "$WORKDIR/mnt-efs"; then
-        for c in "${CORPORA[@]}"; do
-            t0=$(date +%s%N)
-            cp -r "$WORKDIR/corpora/$c" "$WORKDIR/mnt-efs/$c"
-            t1=$(date +%s%N)
-            apparent=$(du -sb "$WORKDIR/mnt-efs/$c" | cut -f1)
-            wall_ns=$((t1 - t0))
-            wmbps=$(python3 -c "print(f'{$apparent/1048576/($wall_ns/1e9):.1f}')")
-            # Read-back throughput through the FUSE mount.
-            rt0=$(date +%s%N)
-            dd if="$WORKDIR/mnt-efs/$c" of=/dev/null bs=1M status=none 2>/dev/null || true
-            rt1=$(date +%s%N)
-            rmbps=$(python3 -c "print(f'{$apparent/1048576/(($rt1-$rt0)/1e9):.1f}')")
-            log "  $c: apparent $apparent write ${wmbps} MiB/s read ${rmbps} MiB/s"
-            record entropyfs "$c" "{\"apparent\": $apparent, \"write_mbps\": $wmbps, \"read_mbps\": $rmbps}"
-        done
-        # Density: store physical usage after GC vs total apparent bytes.
+        measure_mounted entropyfs "entropyfs" "$WORKDIR/mnt-efs" "FUSE mount of $WORKDIR/efs-store"
+        # Cold read for FUSE: remount (fresh FUSE daemon page cache; the
+        # backing store page cache is retained — recorded honestly).
         "$ENTROPYFS_BIN" unmount "$WORKDIR/mnt-efs" || fusermount3 -u "$WORKDIR/mnt-efs" || true
         wait "$EFS_PID" 2>/dev/null || true
+        "$ENTROPYFS_BIN" mount "$WORKDIR/efs-store" "$WORKDIR/mnt-efs" &
+        EFS_PID=$!
+        for _ in $(seq 1 50); do
+            mountpoint -q "$WORKDIR/mnt-efs" && break
+            sleep 0.1
+        done
+        if mountpoint -q "$WORKDIR/mnt-efs"; then
+            for c in "${CORPORA[@]}"; do
+                dst="$WORKDIR/mnt-efs/$c"
+                apparent=$(du_bytes "$dst")
+                r0=$(date +%s%N)
+                read_corpus "$WORKDIR/mnt-efs" "$c"
+                r1=$(date +%s%N)
+                rwmbps=$(python3 -c "print(f'{$apparent/1048576/(($r1-$r0)/1e9):.1f}')")
+                log "  $c (FUSE remount cold): read ${rwmbps} MiB/s"
+                record entropyfs "$c/cold_read_mbps" "$rwmbps"
+            done
+        fi
+        "$ENTROPYFS_BIN" unmount "$WORKDIR/mnt-efs" || fusermount3 -u "$WORKDIR/mnt-efs" || true
+        wait "$EFS_PID" 2>/dev/null || true
+        # Post-GC backing footprint: segments + superblock, apparent AND
+        # allocated blocks (the complete store, not just segment lengths).
         "$ENTROPYFS_BIN" fsck "$WORKDIR/efs-store" >/dev/null 2>&1 && log "  fsck: clean"
         "$ENTROPYFS_BIN" gc "$WORKDIR/efs-store" >/dev/null 2>&1 || true
-        used=$("$ENTROPYFS_BIN" status "$WORKDIR/efs-store" 2>/dev/null | grep -o 'physical:[^,]*, [0-9]* used' | grep -o '[0-9]* used' | grep -o '[0-9]*' || echo 0)
+        backing_apparent=$(du_bytes "$WORKDIR/efs-store")
+        backing_alloc=$(du_alloc "$WORKDIR/efs-store")
         total_apparent=$(python3 -c "
 import json
 r = json.load(open('$results'))
 a = sum(v['apparent'] for v in r['entropyfs'].values() if isinstance(v, dict) and 'apparent' in v)
 print(a)")
-        log "  store physical used (post-GC): $used bytes; total apparent: $total_apparent"
-        if [[ "$used" -gt 0 && "$total_apparent" -gt 0 ]]; then
-            ratio=$(python3 -c "print(f'{$total_apparent/$used:.3f}')")
-            log "  entropyfs effective density: ${ratio}x (apparent / store physical)"
-            record entropyfs "density" "{\"apparent\": $total_apparent, \"store_physical\": $used, \"ratio\": $ratio}"
+        log "  backing store (post-GC): apparent $backing_apparent allocated $backing_alloc; total corpus apparent $total_apparent"
+        if [[ "$backing_alloc" -gt 0 && "$total_apparent" -gt 0 ]]; then
+            ratio=$(python3 -c "print(f'{$total_apparent/$backing_alloc:.3f}')")
+            log "  entropyfs effective density (apparent / allocated backing): ${ratio}x"
+            record entropyfs "density" "{\"apparent\": $total_apparent, \"backing_apparent\": $backing_apparent, \"backing_allocated\": $backing_alloc, \"ratio\": $ratio}"
         fi
+    else
+        log "  WAIVER: entropyfs mount failed"
+        record entropyfs "waived" "mount failed"
     fi
 else
     log "== entropyfs: WAIVER (/dev/fuse or fusermount3 missing) =="
@@ -271,30 +349,31 @@ else
 fi
 
 # --- environment + report ----------------------------------------------------
-python3 - "$OUT" "$REV" "$TS" <<'EOF'
+python3 - "$OUT" "$REV" "$TS" "$SCRATCH_FSTYPE" "$SCRATCH_SOURCE" <<'EOF'
 import json, platform, os, sys
-out, rev, ts = sys.argv[1], sys.argv[2], sys.argv[3]
+out, rev, ts, fstype, source = sys.argv[1:6]
 env = {
     "revision": rev,
     "created_unix": int(ts),
     "kernel": platform.release(),
     "cpu": platform.processor() or platform.machine(),
-    "store_device": "/dev/nvme1n1p1",
+    "scratch_fstype": fstype,
+    "scratch_source": source,
     "uname": os.uname().nodename,
+    "root": os.geteuid() == 0,
 }
 json.dump(env, open(f"{out}/environment.json", "w"), indent=1)
 EOF
 
-python3 - "$results" "$LOG" "$OUT" <<'EOF'
+python3 - "$results" "$OUT" <<'EOF'
 import json, sys
-results, log, out = sys.argv[1], sys.argv[2], sys.argv[3]
+results, out = sys.argv[1], sys.argv[2]
 r = json.load(open(results))
 with open(f"{out}/report.md", "w") as f:
-    f.write("# Filesystem court\n\n")
+    f.write("# Filesystem court v2\n\n")
     f.write(f"Archive: {out}\n\n")
-    f.write("Per-corpus apparent bytes / allocated-or-image bytes / ratio.\n")
-    f.write("Corpus artifact: 4 unique chunks per pattern — the structured corpus\n")
-    f.write("artifact is a corpus property, not a claim (methodology §8).\n\n")
+    f.write("Corpus artifact: the structured corpus contains only 4 unique\n")
+    f.write("64 KiB chunks — a corpus property, not a claim (methodology §8).\n\n")
     for section in ("fs", "zstd", "entropyfs"):
         f.write(f"## {section}\n\n")
         for k, v in sorted(r[section].items()):
@@ -305,7 +384,8 @@ with open(f"{out}/report.md", "w") as f:
         for k, v in r[section].items():
             if isinstance(v, dict) and "waived" in v:
                 f.write(f"- {section}/{k}: {v['waived']}\n")
-    f.write("\nRun this court in a root-capable VM to clear the loop-mount waivers.\n")
+    f.write("\nRun this court in a root-capable VM to clear the loop-mount\n")
+    f.write("waivers and enable drop_caches cold reads.\n")
 print(f"court evidence written to {out}")
 EOF
 

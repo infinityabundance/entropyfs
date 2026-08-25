@@ -290,8 +290,9 @@ cumulative:     A1-rans 115,976 B
 - Everything else stable: src 3.514× (new source pack at this revision;
   zstd -1 4.09×, zstd -19 5.92×), urandom 0.997×, compressed 0.994×,
   GC 59.5 MB → 48.0 MB reclaimed in 0.015 s; DSFB physical identical
-  (54,353 B), write 773.9 vs 339.9 MiB/s (DSFB still halves search CPU
-  budget work; bytes unchanged).
+  (54,353 B), write median 773.9 vs 717.1 MiB/s (~8% — the RANS-era
+  2.3× gap collapsed as the SequenceRans floor simplified the search
+  landscape; CPU 0.08 s both modes).
 
 ## Campaign highlights (`campaign-1787671040-923df7b` — attribution + CAS canonicalization)
 
@@ -354,10 +355,14 @@ other families add nothing to unique source text.
 Post-GC the base chain still costs more than no-base (1,265,786 vs
 1,165,681 B): the index artifact is gone, the base-chain cost is real.
 
-**DSFB:** physical identical (50,528 B); write median 1,120.8 MiB/s, CPU
-0.050 s both modes — the search landscape is simpler under the
-SequenceRans floor; DSFB stays out of the spotlight with its counters
-deferred.
+**DSFB:** physical identical (50,528 B); write median 1,120.8 vs 1,106.1
+MiB/s (~1.3%), CPU 0.05 s both modes — the search landscape is simpler
+under the SequenceRans floor; DSFB stays out of the spotlight with its
+counters deferred. The DSFB series across the three eras (RANS-era 765.4
+vs 334.7 = 2.29× → SequenceRans-era 773.9 vs 717.1 = ~8% → CAS-era
+1,120.8 vs 1,106.1 = ~1.3%), all with byte-identical physical
+representations, is the controlled record of a search-budget lever whose
+marginal benefit shrank as the floor improved.
 
 ## Admission status
 

@@ -773,6 +773,25 @@ pub fn unreachable_bytes(store: &Store) -> Result<u64, StoreError> {
     Ok(unreachable)
 }
 
+/// Unreachable record bytes by record tag (Phase-9A floor diagnosis):
+/// which physical record class makes up the reachable → total-backing gap
+/// after GC. B-tree intermediates created inside a transaction (superseded
+/// COW nodes that were never reachable from the final root) show up here
+/// as `BtreeNode`; duplicate payload records from before transaction-local
+/// CAS canonicalization would show up as `Data`/`Model`.
+pub fn unreachable_bytes_by_record_tag(
+    store: &Store,
+) -> Result<std::collections::BTreeMap<String, u64>, StoreError> {
+    let live = mark_live(store)?;
+    let mut by_tag: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for (id, loc) in store.object_index().iter() {
+        if !live.contains(&id) {
+            *by_tag.entry(format!("{:?}", loc.tag)).or_insert(0) += loc.total_size();
+        }
+    }
+    Ok(by_tag)
+}
+
 /// Workaround for unused CodecError import in some configurations.
 #[allow(unused_imports)]
 use CodecError as _CodecError;

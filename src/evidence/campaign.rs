@@ -344,6 +344,10 @@ pub struct GcTraffic {
     pub optimizer_rewritten: u64,
     /// Persisted bytes saved by the optimizer pass.
     pub optimizer_saved_bytes: u64,
+    /// Unreachable record bytes by record tag AFTER the GC pass (Phase-9A
+    /// floor diagnosis: which record class makes up the reachable →
+    /// total-backing gap).
+    pub unreachable_by_tag_after: std::collections::BTreeMap<String, u64>,
 }
 
 /// Baselines (methodology §3) and explicit waivers.
@@ -525,6 +529,7 @@ pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
             optimizer_scanned: 0,
             optimizer_rewritten: 0,
             optimizer_saved_bytes: 0,
+            unreachable_by_tag_after: std::collections::BTreeMap::new(),
         },
         post_gc_footprint: std::collections::BTreeMap::new(),
         baselines: Baselines::default(),
@@ -791,6 +796,13 @@ pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
             gc.optimizer_scanned,
             gc.optimizer_rewritten,
             gc.optimizer_saved_bytes
+        ),
+    );
+    line(
+        &mut log,
+        &format!(
+            "  unreachable by record tag (post-GC): {:?}",
+            gc.unreachable_by_tag_after
         ),
     );
 
@@ -1449,6 +1461,8 @@ fn run_gc_traffic(opts: &CampaignOptions) -> Result<GcTraffic, String> {
     let gc_wall = t0.elapsed().as_secs_f64();
     let after = crate::store::gc::unreachable_bytes(&store).map_err(|e| e.to_string())?;
     let physical_after = store.physical_used();
+    let by_tag_after =
+        crate::store::gc::unreachable_bytes_by_record_tag(&store).map_err(|e| e.to_string())?;
     let opt =
         crate::optimizer::background::optimize_pass(&store, OptimizeOptions::default(), None, None)
             .map_err(|e| e.to_string())?;
@@ -1462,6 +1476,7 @@ fn run_gc_traffic(opts: &CampaignOptions) -> Result<GcTraffic, String> {
         optimizer_scanned: opt.scanned,
         optimizer_rewritten: opt.rewritten,
         optimizer_saved_bytes: opt.saved_bytes,
+        unreachable_by_tag_after: by_tag_after,
     })
 }
 
