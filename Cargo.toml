@@ -15,6 +15,7 @@ license = "MIT OR Apache-2.0"
 keywords = ["filesystem", "fuse", "entropy", "storage", "rans"]
 categories = ["filesystem", "compression"]
 readme = "README.md"
+repository = "https://github.com/infinityabundance/entropyfs"
 
 [lib]
 name = "entropyfs"
