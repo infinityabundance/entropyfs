@@ -1,7 +1,7 @@
 {
-  "timestamp_unix": 1787666485,
-  "revision_short": "470c639",
-  "revision_full": "470c6393350c49724880fe9fccbfcaaffb603d00",
+  "timestamp_unix": 1787666589,
+  "revision_short": "e895fcf",
+  "revision_full": "e895fcf9b4cec93e64165676e3b189b35457b06b",
   "cargo_lock_hash": "732959c1d1c8b8f9f7ff8a4a0dafd1d821d71f06c477ccb0f77d4c94d1acbb9a",
   "cargo_lock_bytes": 51824,
   "kernel_ostype": "Linux",

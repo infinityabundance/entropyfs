@@ -10,6 +10,7 @@ they document are admitted — nothing more.
 | `campaign-1787658658-67d977a/` | `67d977a` | Store-level evidence campaign (methodology §1–§9): repeated runs, exact byte accounting, p50/p95/p99, fsync latency, CPU, device writes, GC traffic, ablation ladder, DSFB investigation, negative controls, baselines. All §8 admission rules OK. |
 | `campaign-1787665094-a6641d1/` | `a6641d1` | Same campaign with the **SequenceRans floor** (Phase 8 §4), the write-batch group-commit path, and a corrected GC reachability walk for SequenceRans objects (an earlier run under-counted reachable bytes and was withdrawn; the admission rule is that withdrawn artifacts are replaced, never kept as claims). All §8 admission rules OK. |
 | `campaign-1787666036-43bf17e/` | `43bf17e` | Same campaign with the **BASE_SEQUENCE shift-aware delta** residuals (Phase 8 §5) active on base channels. H2 flips back to positive: sequential 2.752× vs shuffled 1.784× (+35.2% base savings). The shuffled control grows (1.23 MB → 2.35 MB) because copy/literal deltas exploit structural similarity between unrelated-history chunks (class-2 chunks share a period-7 skeleton), not just temporal adjacency — that confounding is the finding. All §8 admission rules OK. |
+| `campaign-1787666589-e895fcf/` | `e895fcf` | Same campaign with **SPARSE_BLOCK64** (blockwise-64 enumerative sparse coding, Phase-8 §6) in the pipeline. Physical results stable (H2 +35.0%); the campaign caught and the fix sealed a ~3× write-throughput regression from missing dense-input pre-gating (structured 394 → 135 MiB/s with the bug, restored to 360 MiB/s after the k ≥ n/2 density gate). All §8 admission rules OK. |
 | `fuse-court-1787659785-027c959-head/` | `027c959` | FUSE-frontend perf court, **after** Phase 6 (current main). |
 | `fuse-court-1787659914-709a710-before/` | `709a710` | FUSE-frontend perf court, **before** Phase 6 (same workloads, same workload hash `82442892…`). |
 | `fuse-court-1787664579-d90772c/` | `d90772c` | FUSE-frontend perf court, **Phase 8** (concurrency refactor + writeback negotiation + batch group commit + SequenceRans floor; same deterministic shake_128 payload, same bindgen workload `82442892…`). |
@@ -48,6 +49,22 @@ Notes:
 - Environment (identical for both): CachyOS kernel 7.2.0-1-cachyos, AMD
   Ryzen 7 9800X3D (16 threads), governor `performance`, 131 GB RAM, backing
   device `/dev/nvme1n1p1` (ext4).
+
+## Campaign highlights (`campaign-1787666589-e895fcf` — + SPARSE_BLOCK64)
+
+Same methodology, same machine, same corpora; the blockwise-64 sparse
+codec (Phase-8 §6) is in the pipeline. The campaign corpora contain no
+sparse-configuration chunks, so physical results are stable: H2 +35.0%
+(sequential 2.745× vs shuffled 1.784×), structured 845×, src 3.452×,
+urandom 0.997×.
+
+The campaign's engineering value here: it caught a ~3× write-throughput
+regression (structured 394 → 135 MiB/s, urandom 96 → 51 MiB/s) from the
+encoder building doomed streams for near-dense chunks (urandom has
+k ≈ 0.996n). A k ≥ n/2 density pre-gate restores 360 MiB/s structured /
+95 MiB/s urandom. The regression + fix are sealed in this campaign pair
+(the intermediate artifacts were withdrawn; the fix is regression-tested
+in `src/entropy/sparse64.rs`).
 
 ## Campaign highlights (`campaign-1787666036-43bf17e` — + BASE_SEQUENCE deltas)
 
