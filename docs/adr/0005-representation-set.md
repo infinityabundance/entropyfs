@@ -92,6 +92,21 @@ tree court (9D+9E campaign) measures the pair: 2.194× → 2.354× post-GC
 on the real tree, and the standalone deep floor 3.786× vs the fast floor
 3.736× on the src pack.
 
+**Phase-9G — amortized entropy models (NOT a representation; no format
+change).** The sequence families' statistical models are content-addressed
+immutable objects; the descriptor references a model object by ChunkId
+and the store CAS-dedups identical payloads. The 9G0 fix made the
+per-stream RAW/rANS gate include the persisted model bytes. The 9G
+background pass (`model_bundle_pass`) then trains ONE aggregate model per
+stream type per directory cohort on the cohort's summed histograms and
+re-encodes each member's streams against it (per-stream RAW fallback),
+rewriting only when the cohort's total persisted bytes strictly fall. N
+extents reference one persisted model object — no decoding chain, no
+hidden state, every persisted bit accounted. The model-sharing oracle
+falsified sharing one model across an extent's own streams (−125 KB) and
+bundle pools of 2/4 (they lose to the single aggregate); it validated the
+directory aggregate (+49.6 KB). Sealed tree court: 2.813× → 2.881×.
+
 Hard rules:
 
 - **No executable programs.** The descriptor language is not Turing-complete;

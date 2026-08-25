@@ -2,9 +2,46 @@
 
 ## v0.5.1 (2026-08-25)
 
-**Evidence only (no codec change, no format change):** the Phase-9F gap
-decomposition is sealed into the tree court. Measured on the real source
-tree (280 files, per-file writes):
+**9G0 + 9G — amortized entropy models (codec fix + background pass; no
+format change, no new feature bit):**
+
+- **9G0 — model-cost-aware stream selection** (codec fix, sealed
+  `campaign-1787684918-80e36c8/`): the stream-level RAW/rANS gate now
+  includes the persisted model bytes (`enc + model < raw`), so a stream
+  whose rANS gain is smaller than its model is stored RAW. The biggest
+  single measured win since 9F: on the real source tree the sequence
+  families' model objects drop 277.6 KB → 74.3 KB — tree court per-extent
+  overhead 26.5% → 11.1% of footprint; tree court 2.388× → 2.775× post
+  shared-dict; src corpus 4.327×.
+- **Model-sharing oracle** (diagnostic, `tests/model_oracle.rs`):
+  exhaustive intra-extent set-partition model sharing is FALSIFIED
+  (−125 KB); one aggregate model per stream type per directory cohort is
+  validated (+49.6 KB); bundle pools of 2/4 lose to the single aggregate.
+  The oracle initially decoded SequenceRans offsets with `off_per_copy =
+  1` instead of 2 — a diagnostic bug corrected before any implementation
+  decision (sealed campaign numbers do not use the oracle).
+- **9G — `model_bundle_pass`** (sealed `campaign-1787685723-60ecaf2/`):
+  the background pass trains one aggregate model per stream type per
+  directory cohort and re-encodes each member's streams against it
+  (per-stream RAW fallback), rewriting only when the cohort's total
+  persisted bytes strictly fall, through the same CAS + byte-exact (§32)
+  gate as every other background pass. **No format change**: model objects
+  are content-addressed; a descriptor already references them by ChunkId;
+  CAS amortizes one cohort model object across N extents. Tree court:
+  shared-dict 2.813× → **2.881×** (65 rewrites; 7,486 B cohort-accounted;
+  the real post-GC reachable saving is 25.7 KiB because GC reclaims the
+  superseded per-extent models). The win is better-trained aggregate
+  models (enc side); unique model bytes stay flat — recorded as-is.
+  Accounting invariant: a member's incumbent pinned bytes are descriptor +
+  enc object only (models are amortized and never claimed as removable by
+  one member). Correctness battery: byte-exact, idempotent, remount+fsck
+  clean, noise cohort never rewritten.
+- Wired into the tree court (`efs_model_*` fields), `entropyfs optimize`,
+  and the background idle worker.
+
+**Earlier in this release — Phase-9F evidence (no codec change, no format
+change):** the gap decomposition is sealed into the tree court. Measured
+on the real source tree (280 files, per-file writes):
 
 - zstd -1 per-file 3.57×; zstd -1 per-file **with the same per-directory
   anchor** (`-D`, self-matches excluded) 3.91× — a mature coder extracts
