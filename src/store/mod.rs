@@ -9,6 +9,7 @@ pub mod gc;
 pub mod index;
 pub mod inode;
 pub mod object;
+pub mod physical;
 pub mod recovery;
 pub mod root;
 pub mod segment;

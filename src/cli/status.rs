@@ -62,6 +62,21 @@ pub fn run(args: &StatusArgs) -> Result<(), String> {
         "gc reclaimable: {} bytes ({} objects)",
         report.leaked_bytes, report.leaked_objects
     );
+    // Phase-9H: physical reconciliation (independent of the derived index).
+    if let Ok(phys) = crate::store::physical::physical_report(&store) {
+        println!(
+            "physical:       {} B files = {} B live + {} B dead-indexed + {} B index-hidden + {} B unindexed + {} B overhead ({} unexplained)",
+            phys.file_bytes,
+            phys.live_bytes,
+            phys.dead_indexed_bytes,
+            phys.index_hidden_bytes,
+            phys.unindexed_bytes,
+            phys.format_overhead_bytes
+                .saturating_add(phys.torn_bytes)
+                .saturating_add(phys.zero_padding_bytes),
+            phys.unexplained()
+        );
+    }
     let dsfb = store.dsfb_stats();
     println!(
         "dsfb:           {} chunks tracked, {} steps, {} drift, {} slew, {} narrowed",

@@ -432,6 +432,84 @@ pub fn scan_all<P: ObjectProvider>(
     Ok(entries)
 }
 
+/// Bulk-build a B-tree from SORTED entries (Phase-9H), staging each final
+/// node exactly once.
+///
+/// The COW `insert` path stages every intermediate path version on disk;
+/// rebuilding a large tree by repeated inserts therefore physically writes
+/// (and indexes) far more nodes than the final tree contains — the
+/// compaction-pass equivalent of write amplification. This loader builds
+/// the tree bottom-up from sorted entries: leaves hold up to `order`
+/// entries, internal nodes hold up to `order` separator entries (order+1
+/// children), separators are the leftmost key of each right child, and
+/// every node is final — nothing is staged that the final root does not
+/// reference. Empty input yields a ZERO root (empty tree).
+///
+/// The result satisfies the same node-shape invariants the COW path
+/// produces (≤ `order` entries per node, ≤ `order + 1` children), so
+/// later inserts/removes operate on it normally.
+pub fn bulk_load<P: ObjectProvider>(
+    entries: &[(Vec<u8>, Vec<u8>)],
+    order: u16,
+    max_fanout: u32,
+    provider: &mut P,
+) -> Result<ChunkId, BTreeError> {
+    if entries.is_empty() {
+        return Ok(ChunkId::ZERO);
+    }
+    if order == 0 {
+        return Err(BTreeError::Invariant("zero order".into()));
+    }
+    if order as u32 > max_fanout {
+        return Err(BTreeError::Invariant("order exceeds max fanout".into()));
+    }
+    // Level 0: leaves (max `order` entries each; the last may be short).
+    // (node id, leftmost key of the subtree)
+    let mut level: Vec<(ChunkId, Vec<u8>)> = Vec::new();
+    for chunk in entries.chunks(order as usize) {
+        let node = Node::Leaf {
+            entries: chunk
+                .iter()
+                .map(|(k, v)| Entry {
+                    key: k.clone(),
+                    value: v.clone(),
+                })
+                .collect(),
+        };
+        let id = node.id(order);
+        let leftmost = chunk[0].0.clone();
+        provider.put(id, node.encode(order));
+        level.push((id, leftmost));
+    }
+    // Higher levels: group children into internal nodes of `order`
+    // separator entries (order + 1 children); the leftmost key of a child
+    // is the leftmost key of its first_child subtree (propagated).
+    let children_per_node = order as usize + 1;
+    while level.len() > 1 {
+        let mut next: Vec<(ChunkId, Vec<u8>)> = Vec::new();
+        for chunk in level.chunks(children_per_node) {
+            let first_child = chunk[0].0;
+            let entries: Vec<Entry> = chunk[1..]
+                .iter()
+                .map(|(id, leftmost)| Entry {
+                    key: leftmost.clone(),
+                    value: id.as_bytes().to_vec(),
+                })
+                .collect();
+            let node = Node::Internal {
+                first_child,
+                entries,
+            };
+            let id = node.id(order);
+            let leftmost = chunk[0].1.clone();
+            provider.put(id, node.encode(order));
+            next.push((id, leftmost));
+        }
+        level = next;
+    }
+    Ok(level[0].0)
+}
+
 /// Count entries (for fsck/stat).
 pub fn count<P: ObjectProvider>(
     root: ChunkId,

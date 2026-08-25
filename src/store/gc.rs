@@ -449,7 +449,8 @@ fn decode_inode(store: &Store, id: &ChunkId) -> Result<Inode, StoreError> {
     Inode::decode(&payload).map_err(|e| StoreError::Descriptor(e.to_string()))
 }
 
-/// Compute per-segment live ratios.
+/// Compute per-segment live ratios from the DERIVED OBJECT INDEX
+/// (the pre-Phase-9H view, kept for the diagnostic comparison).
 pub fn live_ratios(
     store: &Store,
     live: &HashSet<ChunkId>,
@@ -461,6 +462,29 @@ pub fn live_ratios(
         if live.contains(&id) {
             entry.0 += loc.total_size();
         }
+    }
+    Ok(map)
+}
+
+/// Per-segment PHYSICAL live ratios (Phase-9H): the denominator comes
+/// from scanning the actual segment files — every valid record, including
+/// records the object index no longer represents (duplicates shadowed by
+/// a newer location, and unindexed bytes). A segment whose physical
+/// occupancy is dominated by garbage is selected as a victim even when
+/// the index's one-location view makes it look mostly live.
+pub fn physical_ratios(
+    store: &Store,
+    live: &HashSet<ChunkId>,
+) -> Result<HashMap<u64, (u64, u64)>, StoreError> {
+    let report = crate::store::physical::scan_physical(store, live)?;
+    let mut map: HashMap<u64, (u64, u64)> = HashMap::new();
+    for seg in &report.segments {
+        let total = seg
+            .live_bytes
+            .saturating_add(seg.dead_indexed_bytes)
+            .saturating_add(seg.index_hidden_bytes)
+            .saturating_add(seg.unindexed_bytes);
+        map.insert(seg.seq, (seg.live_bytes, total));
     }
     Ok(map)
 }
@@ -615,17 +639,18 @@ fn rebuild_chunk_index(
         pending: HashMap::new(),
         new_locations,
     };
-    let mut new_root = ChunkId::ZERO;
-    for (key, value) in &kept {
-        new_root = crate::store::index::insert(
-            new_root,
-            key,
-            value,
-            crate::store::BTREE_ORDER,
-            limits.max_fanout,
-            &mut provider,
-        )?;
-    }
+    // Phase-9H: bulk-load the rebuilt tree so each final node is staged
+    // EXACTLY once. The previous repeated-`insert` build staged every COW
+    // intermediate path version (2.66 MB of dead BtreeNode records on the
+    // real-tree court — the compaction was physically writing the tree
+    // several times over). `bulk_load` requires sorted input; `scan_all`
+    // is in key order, so `kept` is already sorted.
+    let new_root = crate::store::index::bulk_load(
+        &kept,
+        crate::store::BTREE_ORDER,
+        limits.max_fanout,
+        &mut provider,
+    )?;
     // Every staged node is part of the new tree (insert only stages nodes
     // on the new root's path).
     let new_nodes: HashSet<ChunkId> = provider.pending.keys().copied().collect();
@@ -645,8 +670,11 @@ pub fn collect(
     hooks: &crate::store::transaction::CrashHooks,
 ) -> Result<u64, StoreError> {
     let mark = mark_live_full(store)?;
-    let live = &mark.live;
-    let ratios = live_ratios(store, live)?;
+    // Phase-9H: victim selection uses the PHYSICAL per-segment occupancy
+    // (scanned from the segment files), so segments full of index-hidden
+    // or unindexed garbage are compacted even when the derived index's
+    // one-location view calls them live.
+    let ratios = physical_ratios(store, &mark.live)?;
     let target = store.config().gc_target_ratio;
     let victims: Vec<u64> = ratios
         .iter()
@@ -656,6 +684,43 @@ pub fn collect(
     if victims.is_empty() {
         return Ok(0);
     }
+    collect_impl(store, hooks, &mark, &victims)
+}
+
+/// Phase-9H: FULL compaction — every segment is a victim. Walks the
+/// reachable object graph, writes every live record once into fresh
+/// compact segments (with the chunk index rebuilt from reachability),
+/// publishes the new root, and deletes every old segment. The physical
+/// backing converges to the reachable persistent state plus bounded
+/// format overhead. Idempotent: a second full compaction reclaims only
+/// the new root/format tail.
+pub fn compact_full(
+    store: &Store,
+    hooks: &crate::store::transaction::CrashHooks,
+) -> Result<u64, StoreError> {
+    let mark = mark_live_full(store)?;
+    let victims: Vec<u64> = segment::list_segments(store.dir())?;
+    if victims.is_empty() {
+        return Ok(0);
+    }
+    collect_impl(store, hooks, &mark, &victims)
+}
+
+/// The shared compaction core: rebuild the derived chunk index from
+/// reachability, copy the live records of the victim segments into a
+/// fresh segment, publish the new root, delete the victims.
+fn collect_impl(
+    store: &Store,
+    hooks: &crate::store::transaction::CrashHooks,
+    mark: &LiveMark,
+    victims: &[u64],
+) -> Result<u64, StoreError> {
+    let live = &mark.live;
+    // Phase-9H: the CURRENT root record is superseded by the fresh root
+    // this pass appends; copying it would leave a permanent 238 B dead
+    // root per compaction. Snapshot roots are Root-tagged records too and
+    // MUST be copied — only the current root id is skipped.
+    let current_root_id = store.current_root().id();
 
     // Phase-8B: rebuild the derived chunk index from reachability BEFORE
     // compacting, so overwritten unsnapshotted content ids stop
@@ -691,6 +756,7 @@ pub fn collect(
             victims.contains(&loc.segment_seq)
                 && live.contains(id)
                 && !rebuilt.old_nodes.contains(id)
+                && *id != current_root_id
         })
         .collect();
     copy_candidates.sort_by_key(|(_, loc)| (loc.segment_seq, loc.offset));
@@ -762,7 +828,7 @@ pub fn collect(
 
     // Delete victims only after the new root is durable.
     hooks.hit(crate::store::transaction::CrashPoint::BeforeOldSegmentDelete)?;
-    for seq in &victims {
+    for seq in victims {
         segment::delete_segment(store.dir(), *seq)?;
     }
     // Drop derived index entries for dead records in deleted segments

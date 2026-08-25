@@ -381,6 +381,25 @@ pub struct TreeCourt {
     /// Phase-9G model pass persisted bytes saved (cohort-accounted, pre-GC:
     /// unique amortized model objects charged once).
     pub model_saved_bytes: u64,
+    /// Phase-9H: post-GC physical reconciliation (dead indexed, index-
+    /// hidden, unindexed, torn, padding, format overhead) — the actual
+    /// bytes on disk versus the derived index's view.
+    pub physical_dead_indexed_bytes: u64,
+    /// Phase-9H: post-GC index-hidden record bytes.
+    pub physical_index_hidden_bytes: u64,
+    /// Phase-9H: post-GC unindexed record bytes.
+    pub physical_unindexed_bytes: u64,
+    /// Phase-9H: post-GC physical backing (segment file bytes).
+    pub physical_backing_bytes: u64,
+    /// Phase-9H: backing after FULL compaction (the settled state).
+    pub compact_backing_bytes: u64,
+    /// Phase-9H: reachable after full compaction (must equal the pre-
+    /// compact reachable).
+    pub compact_reachable_bytes: u64,
+    /// Phase-9H: full-compaction overhead = compact backing − reachable.
+    pub compact_overhead_bytes: u64,
+    /// Phase-9H: bytes reclaimed by full compaction.
+    pub compact_reclaimed_bytes: u64,
     /// Phase-9F gap decomposition: zstd -1 per file with the directory's
     /// largest file as a raw dictionary (self-matches excluded, mirroring
     /// EntropyFS's no-self-reference rule) — the anchor-policy control:
@@ -998,6 +1017,25 @@ pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
             ),
         );
     }
+    line(
+        &mut log,
+        &format!(
+            "  physical post-GC: {:>10} B backing = reachable + {} B dead-indexed + {} B index-hidden + {} B unindexed  [Phase-9H]",
+            tree_court.physical_backing_bytes,
+            tree_court.physical_dead_indexed_bytes,
+            tree_court.physical_index_hidden_bytes,
+            tree_court.physical_unindexed_bytes
+        ),
+    );
+    line(
+        &mut log,
+        &format!(
+            "  + full compact: {:>10} B backing ({} B overhead over reachable; reclaimed {} B)  [Phase-9H]",
+            tree_court.compact_backing_bytes,
+            tree_court.compact_overhead_bytes,
+            tree_court.compact_reclaimed_bytes
+        ),
+    );
     let per_extent = tree_court
         .per_extent_descriptor_bytes
         .saturating_add(tree_court.per_extent_model_bytes);
@@ -2188,6 +2226,15 @@ fn run_tree_court(opts: &CampaignOptions) -> Result<TreeCourt, String> {
     crate::store::gc::collect(&store, &CrashHooks::none()).map_err(|e| e.to_string())?;
     let n3 = store_numbers(&store)?;
     let fam3 = tree_families(&store)?;
+    // Phase-9H: physical reconciliation of the post-GC state (the derived
+    // index's view versus the actual bytes on disk).
+    let physical = crate::store::physical::physical_report(&store).map_err(|e| e.to_string())?;
+    // Phase-9H: full compaction → the settled state.
+    let compact_reclaimed =
+        crate::store::gc::compact_full(&store, &CrashHooks::none()).map_err(|e| e.to_string())?;
+    let n4 = store_numbers(&store)?;
+    let physical_after =
+        crate::store::physical::physical_report(&store).map_err(|e| e.to_string())?;
     // Phase-9F gap decomposition: per-extent persistence overhead after
     // the passes (descriptor + model-object bytes over all extents).
     let (desc_bytes, model_bytes) = per_extent_overhead(&store)?;
@@ -2215,6 +2262,14 @@ fn run_tree_court(opts: &CampaignOptions) -> Result<TreeCourt, String> {
         efs_model_families: fam3,
         model_rewrites: models.rewritten,
         model_saved_bytes: models.saved_bytes,
+        physical_dead_indexed_bytes: physical.dead_indexed_bytes,
+        physical_index_hidden_bytes: physical.index_hidden_bytes,
+        physical_unindexed_bytes: physical.unindexed_bytes,
+        physical_backing_bytes: physical.file_bytes,
+        compact_backing_bytes: physical_after.file_bytes,
+        compact_reachable_bytes: n4.reachable,
+        compact_overhead_bytes: physical_after.file_bytes.saturating_sub(n4.reachable),
+        compact_reclaimed_bytes: compact_reclaimed,
         zstd_dir_anchor_l1: za1,
         per_extent_descriptor_bytes: desc_bytes,
         per_extent_model_bytes: model_bytes,
