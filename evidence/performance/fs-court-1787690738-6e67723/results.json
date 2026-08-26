@@ -1,0 +1,60 @@
+{
+ "fs": {
+  "ext4/src": {
+   "apparent": 3119552,
+   "allocated": 3825664,
+   "buffered_write_mbps": 863.9,
+   "durable_write_mbps": 3.8,
+   "warm_read_mbps": 1021.7,
+   "cold_read_mbps": 1021.7,
+   "cache": "warm-retained"
+  },
+  "ext4/random.bin": {
+   "apparent": 67108864,
+   "allocated": 67112960,
+   "buffered_write_mbps": 6985.1,
+   "durable_write_mbps": 87.7,
+   "warm_read_mbps": 21468.6,
+   "cold_read_mbps": 21468.6,
+   "cache": "warm-retained"
+  },
+  "ext4/zeros.bin": {
+   "apparent": 67108864,
+   "allocated": 67108864,
+   "buffered_write_mbps": 6888.6,
+   "durable_write_mbps": 165.3,
+   "warm_read_mbps": 21990.8,
+   "cold_read_mbps": 21990.8,
+   "cache": "warm-retained"
+  },
+  "ext4/compressed.tgz": {
+   "apparent": 818023,
+   "allocated": 819200,
+   "buffered_write_mbps": 919.5,
+   "durable_write_mbps": 13.1,
+   "warm_read_mbps": 915.5,
+   "cold_read_mbps": 915.5,
+   "cache": "warm-retained"
+  },
+  "xfs": {
+   "waived": "requires root + loop",
+   "command": "mkfs.xfs -f <image> && mount -o loop <image> <mnt>"
+  },
+  "btrfs": {
+   "waived": "requires root + loop",
+   "command": "mkfs.btrfs -f <image> && mount -o loop <image> <mnt>"
+  },
+  "btrfs-zstd": {
+   "waived": "requires root + loop",
+   "command": "mkfs.btrfs -f <image> && mount -o loop,compress=zstd:1 <image> <mnt>"
+  },
+  "squashfs-zstd": {
+   "waived": "mksquashfs not installed"
+  },
+  "erofs-lz4hc": {
+   "waived": "mkfs.erofs not installed"
+  }
+ },
+ "zstd": {},
+ "entropyfs": {}
+}
