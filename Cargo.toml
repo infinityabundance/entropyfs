@@ -7,7 +7,7 @@
 
 [package]
 name = "entropyfs"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 rust-version = "1.87"
 description = "Entropy-native Linux filesystem: persist irreducible state, materialize structure, preserve exact bytes."
@@ -40,7 +40,12 @@ crc32c = "=0.6.8"   # physical record integrity (SSE4.2 crc32c w/ software fallb
 
 # --- Linux / FUSE frontend ---
 fuser = "=0.18.0"   # stable synchronous FUSE binding (pure Rust; no libfuse required)
-rustix = { version = "1", features = ["fs", "param", "std"] } # safe syscall wrappers (fs: flock/statvfs; io::pread for the segment fd cache; param: page_size)
+rustix = { version = "1", features = ["fs", "param", "std"] } # safe syscall wrappers (fs: flock/statvfs; io::pread/pwrite for the segment fd cache; param: page_size)
+# io_uring storage transport (Phase 10F, ADR-0021): the UringIo backend.
+# Already a transitive dependency of libublk, so this adds no new crate to
+# the tree. Safe API surface; the only unsafe in the crate is confined to
+# store/io/uring.rs (SQE submission).
+io-uring = "=0.7.14"
 
 # --- CLI / diagnostics ---
 clap = { version = "4", features = ["derive"] }
