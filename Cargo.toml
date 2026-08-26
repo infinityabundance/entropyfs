@@ -40,7 +40,7 @@ crc32c = "=0.6.8"   # physical record integrity (SSE4.2 crc32c w/ software fallb
 
 # --- Linux / FUSE frontend ---
 fuser = "=0.18.0"   # stable synchronous FUSE binding (pure Rust; no libfuse required)
-rustix = { version = "1", features = ["fs", "param", "std"] } # safe syscall wrappers (fs: flock/statvfs; param: page_size)
+rustix = { version = "1", features = ["fs", "param", "std"] } # safe syscall wrappers (fs: flock/statvfs; io::pread for the segment fd cache; param: page_size)
 
 # --- CLI / diagnostics ---
 clap = { version = "4", features = ["derive"] }

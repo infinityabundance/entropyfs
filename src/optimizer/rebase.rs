@@ -31,6 +31,13 @@ pub const fn depth_of(desc: &Representation) -> u8 {
 /// base/target through the chunk index. Bounded by the store's depth cap.
 /// Phase-9C: SEQUENCE_SHARED_DICT references two dictionary chunks, so the
 /// depth is the deeper of the two chains plus one.
+///
+/// The chain graph is a DAG (a chunk can be reachable through both the
+/// dictionary and the shared branches of a SEQUENCE_SHARED_DICT), so the
+/// walk records the DEEPEST depth at which each node was explored: a node
+/// first reached via a shallow path must not block a deeper path through
+/// it, or the reported depth undercounts and the depth gate would admit a
+/// chain whose true length exceeds `max_reference_depth`.
 pub fn chain_depth(store: &Store, desc: &Representation) -> u8 {
     let limits = *store.limits();
     // Depth of one reference id from the chunk index (capped walk over
@@ -38,10 +45,18 @@ pub fn chain_depth(store: &Store, desc: &Representation) -> u8 {
     fn walk(store: &Store, limits: &crate::core::limits::Limits, id: ChunkId) -> u8 {
         let mut max_depth = 0u8;
         let mut stack: Vec<(ChunkId, u8)> = vec![(id, 0u8)];
-        let mut visited: std::collections::HashSet<ChunkId> = std::collections::HashSet::new();
+        // Node -> deepest depth already explored from it. Re-explore when
+        // the current path reaches it deeper than before; skip otherwise.
+        let mut visited: std::collections::HashMap<ChunkId, u8> = std::collections::HashMap::new();
         while let Some((cur, d)) = stack.pop() {
-            if d >= limits.max_reference_depth || !visited.insert(cur) {
+            if d >= limits.max_reference_depth {
                 continue;
+            }
+            match visited.get(&cur) {
+                Some(&vd) if vd >= d => continue,
+                _ => {
+                    visited.insert(cur, d);
+                }
             }
             let Some(desc_bytes) = store.chunk_descriptor(&cur).ok().flatten() else {
                 continue;
@@ -127,10 +142,19 @@ pub fn chain_depth_uncapped(
         let limits = *store.limits();
         let mut max_depth = 0u8;
         let mut stack: Vec<(ChunkId, u8)> = vec![(id, 0u8)];
-        let mut visited: std::collections::HashSet<ChunkId> = std::collections::HashSet::new();
+        // Node -> deepest depth already explored from it (the chain graph
+        // is a DAG; re-explore when a path reaches the node deeper than
+        // before so the longest path is reported).
+        let mut visited: std::collections::HashMap<ChunkId, u8> = std::collections::HashMap::new();
         while let Some((cur, d)) = stack.pop() {
-            if d >= MAX_CHAIN_WALK || !visited.insert(cur) {
+            if d >= MAX_CHAIN_WALK {
                 continue;
+            }
+            match visited.get(&cur) {
+                Some(&vd) if vd >= d => continue,
+                _ => {
+                    visited.insert(cur, d);
+                }
             }
             let Some(desc_bytes) = store.chunk_descriptor(&cur).ok().flatten() else {
                 continue;

@@ -154,6 +154,11 @@ pub fn optimize_pass(
             *c = PassCursor::default();
         }
     }
+    // Phase-10E convergence: index-entry replacements during this pass may
+    // have deepened previously-committed chains past the decode cap; rebase
+    // any such extent to a depth-0 encoding so no file becomes unreadable.
+    let rebased = store.rebase_overdepth_extents(&crate::store::transaction::CrashHooks::none())?;
+    stats.rewritten = stats.rewritten.saturating_add(rebased);
     Ok(stats)
 }
 
@@ -463,6 +468,11 @@ pub(crate) fn shared_dict_pass_pool(
             evaluate_commit_extent(store, at, start, desc_bytes, pool, options, &mut stats)?;
         }
     }
+    // Phase-10E convergence: rebase any extent whose chain the pass's
+    // index-entry replacements pushed past the decode cap (see
+    // `Store::rebase_overdepth_extents`).
+    let rebased = store.rebase_overdepth_extents(&crate::store::transaction::CrashHooks::none())?;
+    stats.rewritten = stats.rewritten.saturating_add(rebased);
     Ok(stats)
 }
 
@@ -1374,5 +1384,10 @@ pub fn model_bundle_pass(
         }
         stats.saved_bytes = stats.saved_bytes.saturating_add(group_gain);
     }
+    // Phase-10E convergence: rebase any extent whose chain the pass's
+    // index-entry replacements pushed past the decode cap (see
+    // `Store::rebase_overdepth_extents`).
+    let rebased = store.rebase_overdepth_extents(&CrashHooks::none())?;
+    stats.rewritten = stats.rewritten.saturating_add(rebased);
     Ok(stats)
 }

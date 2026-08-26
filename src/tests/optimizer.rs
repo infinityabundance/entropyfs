@@ -322,6 +322,193 @@ fn chain_depth_resolves_through_the_chunk_index() {
 }
 
 #[test]
+fn chain_depth_reports_deepest_path_through_a_diamond() {
+    // Regression (Phase-10E): a reference graph where one chunk is
+    // reachable through BOTH branches of a SEQUENCE_SHARED_DICT (dict + a
+    // shared chain that converges on the dict's chain). A first-reached-
+    // wins visited set undercounts the depth — the deeper path through the
+    // shared branch is blocked — so `chain_depth` must record the DEEPEST
+    // depth at which each node was explored.
+    //
+    //   x = SharedDict { dict: y, shared: z }
+    //   z = BaseResidual { base: y }
+    //   y = BaseResidual { base: w }
+    //   w = Raw (terminal)
+    //
+    // The longest path x -> z -> y -> w is 3 references below x, so
+    // chain_depth(x) = 4 and a chain on top of x is depth 5 (over the
+    // v1 decode cap of 4).
+    let dir = TempDir::new().unwrap();
+    let store = create_store(&dir);
+    let f = ino(&store);
+    use crate::core::representation::RansCodec;
+    let cid_of = |d: &Representation| ChunkId::of(&crate::format::descriptor::encode(d).unwrap());
+
+    // w: terminal chunk (a RAW descriptor; never materialized here).
+    let w = Representation::Raw {
+        obj: ChunkId::of(b"w-object"),
+        len: 64,
+    };
+    let w_cid = cid_of(&w);
+    store
+        .commit_file_extents(
+            f,
+            vec![ExtentUpdate {
+                offset: 0,
+                descriptor: w.clone(),
+                content_id: w_cid,
+                objects: Vec::new(),
+            }],
+            None,
+            &CrashHooks::none(),
+        )
+        .unwrap();
+
+    // y: depth 1 on w.
+    let y = Representation::BaseResidual {
+        base: w_cid,
+        base_len: 64,
+        residual: Residual::XorSparse {
+            len: 64,
+            edits: Vec::new(),
+        },
+        len: 64,
+    };
+    let y_cid = cid_of(&y);
+    store
+        .commit_file_extents(
+            f,
+            vec![ExtentUpdate {
+                offset: 65536,
+                descriptor: y.clone(),
+                content_id: y_cid,
+                objects: Vec::new(),
+            }],
+            None,
+            &CrashHooks::none(),
+        )
+        .unwrap();
+
+    // z: depth 2 on y.
+    let z = Representation::BaseResidual {
+        base: y_cid,
+        base_len: 64,
+        residual: Residual::XorSparse {
+            len: 64,
+            edits: Vec::new(),
+        },
+        len: 64,
+    };
+    let z_cid = cid_of(&z);
+    store
+        .commit_file_extents(
+            f,
+            vec![ExtentUpdate {
+                offset: 131072,
+                descriptor: z.clone(),
+                content_id: z_cid,
+                objects: Vec::new(),
+            }],
+            None,
+            &CrashHooks::none(),
+        )
+        .unwrap();
+
+    // x: the diamond — dict y AND shared z (z chains back to y).
+    let x = Representation::SequenceSharedDict {
+        dictionary: y_cid,
+        dictionary_len: 64,
+        shared: z_cid,
+        shared_len: 64,
+        model: ChunkId::of(b"x-model"),
+        enc_obj: ChunkId::of(b"x-enc"),
+        scale_bits: 12,
+        codec: RansCodec::Single,
+        seq_len: 0,
+        lit_len: 0,
+        off_len: 0,
+        src_len: 0,
+        cmds: 1,
+        lit_out: 1,
+        len: 64,
+    };
+    assert!(x.validate(&store.limits()).is_ok(), "fixture must validate");
+    let x_cid = cid_of(&x);
+    store
+        .commit_file_extents(
+            f,
+            vec![ExtentUpdate {
+                offset: 196608,
+                descriptor: x.clone(),
+                content_id: x_cid,
+                objects: Vec::new(),
+            }],
+            None,
+            &CrashHooks::none(),
+        )
+        .unwrap();
+
+    // x itself: the top level splits the branches (max of separate walks),
+    // so its own depth is 1 + max(1, 2) = 3.
+    assert_eq!(crate::optimizer::rebase::chain_depth(&store, &x), 3);
+
+    // A chain ON TOP of x collapses the branches into ONE walk: the
+    // deepest path x -> z -> y -> w is 3 references below x, so
+    // chain_depth(chain-on-x) = 4. A first-reached-wins visited set would
+    // undercount this to 3 (y reached at depth 1 via the dict branch
+    // blocks the depth-2 path through z).
+    let top = Representation::BaseResidual {
+        base: x_cid,
+        base_len: 64,
+        residual: Residual::XorSparse {
+            len: 64,
+            edits: Vec::new(),
+        },
+        len: 64,
+    };
+    let top_cid = cid_of(&top);
+    store
+        .commit_file_extents(
+            f,
+            vec![ExtentUpdate {
+                offset: 262144,
+                descriptor: top.clone(),
+                content_id: top_cid,
+                objects: Vec::new(),
+            }],
+            None,
+            &CrashHooks::none(),
+        )
+        .unwrap();
+    assert_eq!(
+        crate::optimizer::rebase::chain_depth(&store, &top),
+        4,
+        "a chain on the diamond must follow the longest path"
+    );
+
+    // One more link crosses the v1 decode cap (4): the walk must report 5
+    // so the depth gate refuses the candidate.
+    let top2 = Representation::BaseResidual {
+        base: top_cid,
+        base_len: 64,
+        residual: Residual::XorSparse {
+            len: 64,
+            edits: Vec::new(),
+        },
+        len: 64,
+    };
+    assert_eq!(
+        crate::optimizer::rebase::chain_depth(&store, &top2),
+        5,
+        "over-cap depth must be reported exactly"
+    );
+    assert!(
+        crate::optimizer::rebase::chain_depth(&store, &top2) > store.limits().max_reference_depth,
+        "the fixture must exceed the decode cap"
+    );
+}
+
+#[test]
 fn current_persisted_bytes_counts_objects() {
     let dir = TempDir::new().unwrap();
     let store = create_store(&dir);

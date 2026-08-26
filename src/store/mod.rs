@@ -264,6 +264,13 @@ pub struct Store {
     /// Phase-10D active metadata writeback epoch (pending namespace/write-
     /// back mutations between checkpoints; see `store/epoch.rs`).
     epoch: std::sync::Mutex<crate::store::epoch::Epoch>,
+    /// Phase-10E segment read-fd cache (seq -> open file): the read path
+    /// fetches B-tree nodes, models and streams from segments, and each
+    /// fetch used to open the segment file afresh. While mounted, segments
+    /// are append-only (GC is offline), so the cache is safe and
+    /// unbounded-in-practice; reads use `pread` (offset-based, no shared
+    /// seek position) so the fds are thread-safe.
+    segment_fds: std::sync::Mutex<std::collections::HashMap<u64, std::fs::File>>,
 }
 
 impl std::fmt::Debug for Store {
@@ -328,6 +335,7 @@ impl Store {
             perf: std::sync::Arc::new(crate::perf::Timings::default()),
             foreground: config.foreground,
             epoch: std::sync::Mutex::new(crate::store::epoch::Epoch::default()),
+            segment_fds: std::sync::Mutex::new(std::collections::HashMap::new()),
         };
         store.open_segment(0)?;
         // Create the root directory inode (ino 1) and commit the initial
@@ -403,6 +411,7 @@ impl Store {
             perf: std::sync::Arc::new(crate::perf::Timings::default()),
             foreground: config.foreground,
             epoch: std::sync::Mutex::new(crate::store::epoch::Epoch::default()),
+            segment_fds: std::sync::Mutex::new(std::collections::HashMap::new()),
         };
         // Phase-10D: replay any un-checkpointed mutation log tail left by
         // a process crash (the last checkpoint root is authoritative; the
@@ -657,6 +666,81 @@ impl Store {
         Ok(entry.map(|(_, bytes)| bytes))
     }
 
+    /// Phase-10E convergence: after a background rewrite pass, the derived
+    /// chunk index can resolve a content id to a DEEPER descriptor than the
+    /// one a previously-committed extent validated against (a later rewrite
+    /// of the same content re-encodes it deeper and replaces the index
+    /// entry; references are resolved through the index at materialize
+    /// time). Any extent whose full reference chain now exceeds
+    /// `max_reference_depth` is unreadable (`DepthExceeded`). Rebase those
+    /// extents to a depth-0 encoding. Returns the number of extents
+    /// rebased; a no-op when the cap is respected (the steady state).
+    pub fn rebase_overdepth_extents(
+        &self,
+        hooks: &crate::store::transaction::CrashHooks,
+    ) -> Result<u64, StoreError> {
+        let mut rebased = 0u64;
+        let limits = self.config.limits;
+        // Relaxed decode budget for recovering the bytes of an over-depth
+        // chain: the chain is acyclic and bounded by the write-path gates
+        // and the walk caps, so a generous depth cap recovers the content
+        // without looping.
+        let mut relaxed = limits;
+        relaxed.max_reference_depth = 64;
+        let inos = self.all_inodes()?;
+        for ino in inos {
+            let Some(inode) = self.get_inode(ino)? else {
+                continue;
+            };
+            let extent_root = match inode.data {
+                InodeData::File { extent_root } => extent_root,
+                _ => continue,
+            };
+            if extent_root.is_zero() {
+                continue;
+            }
+            let entries = crate::store::extent_tree::scan_all(
+                extent_root,
+                BTREE_ORDER,
+                limits.max_fanout,
+                self,
+            )?;
+            for (start, desc_bytes) in entries {
+                let desc = match crate::format::descriptor::decode(
+                    &desc_bytes,
+                    limits.max_descriptor_bytes,
+                    limits.max_inline_bytes,
+                    limits.max_palette,
+                    limits.max_period,
+                    limits.max_chunk_size,
+                ) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+                if crate::optimizer::rebase::chain_depth(self, &desc) <= limits.max_reference_depth
+                {
+                    continue;
+                }
+                // Recover the logical bytes under the relaxed budget, then
+                // re-encode at depth 0 (§32-gated like every other write).
+                let bytes = crate::core::materialize::materialize_to_vec(&desc, self, &relaxed)
+                    .map_err(|e| StoreError::Descriptor(e.to_string()))?;
+                let cid = crate::core::extent::ChunkId::of(&bytes);
+                // CAS: skip if the extent changed since the scan.
+                let _lock = self.inode_lock(ino);
+                let current = self.extent_descriptor(ino, start)?;
+                if current.as_deref() != Some(desc_bytes.as_slice()) {
+                    continue;
+                }
+                let flat = Store::encode_chunk(&bytes, start, cid, &limits, &self.config.policy)?;
+                self.validate_update(&flat)?;
+                self.commit_file_extents(ino, vec![flat], None, hooks)?;
+                rebased += 1;
+            }
+        }
+        Ok(rebased)
+    }
+
     // ------------------------------------------------------------------
     // Segments
     // ------------------------------------------------------------------
@@ -795,11 +879,12 @@ impl Store {
         Ok(())
     }
 
-    /// Fetch an object payload by content id.
+    /// Fetch an object payload by content id (Phase-10E: via the cached
+    /// segment read fds + `pread`, so concurrent reads never re-open
+    /// files and never share a seek position).
     pub fn fetch_object(&self, id: &ChunkId) -> Result<Option<Vec<u8>>, StoreError> {
         match self.object_index.get(id) {
-            Some(loc) => Ok(Some(segment::read_payload(
-                &self.dir,
+            Some(loc) => Ok(Some(self.segment_payload(
                 loc.segment_seq,
                 loc.offset,
                 loc.stored_len,
@@ -808,14 +893,42 @@ impl Store {
         }
     }
 
-    /// Fetch a record payload by location (fsck).
+    /// Fetch a record payload by location (fsck; also cached-fd reads).
     pub fn read_payload_at(&self, loc: &Location) -> Result<Vec<u8>, StoreError> {
-        Ok(segment::read_payload(
-            &self.dir,
-            loc.segment_seq,
-            loc.offset,
-            loc.stored_len,
-        )?)
+        self.segment_payload(loc.segment_seq, loc.offset, loc.stored_len)
+    }
+
+    /// Read a record payload from a segment via the cached fd table
+    /// (Phase-10E). The fd is opened once per segment and kept; `pread`
+    /// makes the reads thread-safe (no shared seek offset). Segments are
+    /// append-only while mounted, so a cached fd never goes stale.
+    fn segment_payload(
+        &self,
+        seq: u64,
+        offset: u64,
+        stored_len: u64,
+    ) -> Result<Vec<u8>, StoreError> {
+        let mut fds = self.segment_fds.lock().expect("segment fds poisoned");
+        let file = match fds.entry(seq) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(v) => v.insert(std::fs::File::open(
+                crate::store::segment::segment_path(&self.dir, seq),
+            )?),
+        };
+        let start = offset
+            .checked_add(crate::format::version::RECORD_HEADER_SIZE)
+            .ok_or(StoreError::Limit("payload offset overflow".into()))?;
+        let mut buf = vec![0u8; stored_len as usize];
+        let mut filled = 0usize;
+        while filled < buf.len() {
+            let n = rustix::io::pread(&*file, &mut buf[filled..], start + filled as u64)
+                .map_err(|e| StoreError::Io(e.to_string()))?;
+            if n == 0 {
+                return Err(StoreError::Io("short segment read".into()));
+            }
+            filled += n;
+        }
+        Ok(buf)
     }
 
     // ------------------------------------------------------------------
@@ -1184,39 +1297,38 @@ impl Store {
         // and everything past the last extent) materialize as ZERO and stay
         // in the output buffer — never truncated away.
         let avail = inode.size.saturating_sub(offset).min(len);
-        let mut out = vec![0u8; avail as usize];
-        let mut pos = offset;
         let end = offset.saturating_add(avail);
         let extent_root = match &inode.data {
             InodeData::File { extent_root } => *extent_root,
             _ => unreachable!(),
         };
-        while pos < end {
-            let (start, desc_bytes) = match crate::store::extent_tree::covering(
+        // Phase-10E: one RANGE TRAVERSAL per read: collect the covering
+        // extents in a single B-tree walk instead of a per-chunk descent.
+        // The extent COVERING `offset` may start before it; begin the scan
+        // at its start (a predecessor lookup) so it is included.
+        let scan_start = match crate::store::extent_tree::covering(
+            extent_root,
+            offset,
+            BTREE_ORDER,
+            self.config.limits.max_fanout,
+            self,
+        )? {
+            Some((start, _)) => start,
+            None => offset,
+        };
+        let (extents, _) = self.perf.time("read_scan", || {
+            crate::store::extent_tree::scan_range(
                 extent_root,
-                pos,
+                scan_start,
+                end,
+                usize::MAX,
                 BTREE_ORDER,
                 self.config.limits.max_fanout,
                 self,
-            )? {
-                Some(x) => x,
-                None => {
-                    // Hole before the next extent: advance to its start.
-                    match crate::store::extent_tree::next_extent_start(
-                        extent_root,
-                        pos,
-                        BTREE_ORDER,
-                        self.config.limits.max_fanout,
-                        self,
-                    )? {
-                        Some(next) => {
-                            pos = next;
-                            continue;
-                        }
-                        None => break, // hole to EOF
-                    }
-                }
-            };
+            )
+        })?;
+        let mut out = vec![0u8; avail as usize];
+        for (start, desc_bytes) in extents {
             let desc = crate::format::descriptor::decode(
                 &desc_bytes,
                 self.config.limits.max_descriptor_bytes,
@@ -1226,40 +1338,23 @@ impl Store {
                 self.config.limits.max_chunk_size,
             )?;
             let extent_end = start.saturating_add(desc.len());
-            if extent_end <= pos {
-                // Defensive: this extent makes no progress (zero-length or
-                // malformed); skip past it instead of looping forever.
-                match crate::store::extent_tree::next_extent_start(
-                    extent_root,
-                    pos,
-                    BTREE_ORDER,
-                    self.config.limits.max_fanout,
-                    self,
-                )? {
-                    Some(next) => {
-                        pos = next;
-                        continue;
-                    }
-                    None => break,
-                }
+            let copy_start = start.max(offset);
+            let copy_end = extent_end.min(end);
+            if copy_end <= copy_start {
+                continue;
             }
             let mut chunk = vec![0u8; desc.len() as usize];
             let mut budget = self.config.limits.max_decode_work;
-            materialize(&desc, self, &self.config.limits, 0, &mut budget, &mut chunk)
+            self.perf
+                .time("read_materialize", || {
+                    materialize(&desc, self, &self.config.limits, 0, &mut budget, &mut chunk)
+                })
                 .map_err(|e| StoreError::Descriptor(e.to_string()))?;
-            let take_start = pos.max(start);
-            let take_end = end.min(extent_end);
-            if take_end > take_start {
-                let s = (take_start - start) as usize;
-                let n = (take_end - take_start) as usize;
-                // Output position is absolute (holes precede this extent).
-                let o = (take_start - offset) as usize;
-                // Defensive bounds: never write past the clip length.
-                let n = n.min(avail as usize - o);
-                let d = &mut out[o..o + n];
-                d.copy_from_slice(&chunk[s..s + n]);
-            }
-            pos = extent_end;
+            let s = (copy_start - start) as usize;
+            let n = (copy_end - copy_start) as usize;
+            let o = (copy_start - offset) as usize;
+            let n = n.min(avail as usize - o);
+            out[o..o + n].copy_from_slice(&chunk[s..s + n]);
         }
         Ok(out)
     }
@@ -3656,13 +3751,6 @@ impl Store {
     ) -> Result<Option<Inode>, StoreError> {
         let committed = self.get_inode(ino)?;
         let out = ep.overlay_inode(ino, committed);
-        if out.is_none() {
-            eprintln!(
-                "DBG get_inode_epoch({ino}) none: removed={} pending={}",
-                ep.removed_inodes.contains(&ino),
-                ep.pending_inodes.contains_key(&ino)
-            );
-        }
         Ok(out)
     }
 
@@ -3775,30 +3863,55 @@ impl Store {
             InodeData::File { extent_root } => extent_root,
             _ => unreachable!(),
         };
-        // Merged extent map: committed entries overlaid with pending.
-        let mut extents: std::collections::BTreeMap<u64, Vec<u8>> =
-            std::collections::BTreeMap::new();
-        if !extent_root.is_zero() {
-            for (off, bytes) in crate::store::extent_tree::scan_all(
-                extent_root,
-                BTREE_ORDER,
-                limits.max_fanout,
-                self,
-            )? {
-                extents.insert(off, bytes);
-            }
-        }
-        for ((fino, off), bytes) in ep.pending_extents.iter() {
-            if *fino == ino {
-                extents.insert(*off, bytes.clone());
-            }
-        }
         // Clamp to the final file size (the epoch's pending size).
         let size = inode.size;
         let end = offset.saturating_add(len).min(size);
         if end <= offset {
             return Ok(Vec::new());
         }
+        // Phase-10E: RANGE-LIMITED collection — the committed extents in
+        // [covering(offset), end) via one traversal, overlaid with the
+        // epoch's pending extents in the same window (a full-tree scan
+        // would walk every leaf for a small read).
+        let scan_start = if extent_root.is_zero() {
+            offset
+        } else {
+            match crate::store::extent_tree::covering(
+                extent_root,
+                offset,
+                BTREE_ORDER,
+                limits.max_fanout,
+                self,
+            )? {
+                Some((start, _)) => start,
+                None => offset,
+            }
+        };
+        let mut extents: std::collections::BTreeMap<u64, Vec<u8>> =
+            std::collections::BTreeMap::new();
+        if !extent_root.is_zero() {
+            for (off, bytes) in crate::store::extent_tree::scan_range(
+                extent_root,
+                scan_start,
+                end,
+                usize::MAX,
+                BTREE_ORDER,
+                limits.max_fanout,
+                self,
+            )?
+            .0
+            {
+                extents.insert(off, bytes);
+            }
+        }
+        for ((fino, off), bytes) in ep.pending_extents.range((ino, scan_start)..=(ino, end)) {
+            let _ = fino;
+            extents.insert(*off, bytes.clone());
+        }
+        // A pending extent may COVER `offset` while starting below
+        // `scan_start`'s predecessor logic missed it (pending extents are
+        // always chunk-aligned, so the covering pending extent starts at
+        // scan_start or later; nothing to add here).
         let mut out = vec![0u8; (end - offset) as usize];
         // Materialize through the epoch-aware context (pending chunk
         // descriptors resolve before the committed index).
@@ -4444,10 +4557,6 @@ impl Store {
         }
         let _lock = self.inode_lock(ino);
         let mut ep = self.epoch();
-        eprintln!(
-            "DBG epoch_write ino={ino} pending?={}",
-            ep.pending_inodes.contains_key(&ino)
-        );
         let inode = self
             .get_inode_epoch(&ep, ino)?
             .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
