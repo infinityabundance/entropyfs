@@ -6,7 +6,7 @@
 assurance that the repository did not implement; this release closes the
 gap with the persistent-data adversarial suite (`src/tests/hostile_media/`,
 spec in `docs/security/hostile-media-court.md`, sealed evidence under
-`evidence/hostile-media/court-1787750426-a4e8a7a/`). The backing store is
+`evidence/hostile-media/court-1787750784-a2983dc/`). The backing store is
 treated as untrusted/corrupt input; the oracle is uniform — bounded-valid
 result OR typed rejection, never panic/OOM/unbounded CPU, never bytes
 inconsistent with the authenticated content identity:
