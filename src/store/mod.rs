@@ -983,35 +983,41 @@ impl Store {
         &self,
         hooks: &crate::store::transaction::CrashHooks,
     ) -> Result<(), StoreError> {
+        // Phase-11B: the fsync path gets its own envelope (pass-through
+        // inside an outer request). The checkpoint's cp_* rows and the
+        // barrier rows below partition it.
+        let _req = self.perf.request("durability_barrier");
         // Phase-10D: the barrier also makes the epoch's acknowledged
         // mutations power-durable — checkpoint the epoch first (its own
-        // commit is then covered by this barrier; a no-op when empty).
-        self.perf
-            .time("barrier_checkpoint", || self.epoch_checkpoint(hooks))?;
+        // commit is then covered by this barrier; a no-op when empty). The
+        // cp_* exclusive rows inside `epoch_checkpoint` attach here.
+        self.epoch_checkpoint(hooks)?;
         // Serialize with in-flight commits: an fsync observes every commit
         // that started before it (and every commit that started after
         // waits for the barrier).
-        let _guard = self.commit_lock.lock().expect("commit lock poisoned");
+        let _guard = self.perf.time_request("barrier_commit_lock_wait", || {
+            self.commit_lock.lock().expect("commit lock poisoned")
+        });
         // Records have been appended (by the deferred commit(s)); the
         // segment has not been fdatasync'd yet.
         hooks.hit(crate::store::transaction::CrashPoint::AfterRecordAppend)?;
         // 1. fdatasync the affected segment.
         self.perf
-            .time("barrier_fdatasync", || self.fdatasync_segment())?;
+            .time_request("barrier_fdatasync", || self.fdatasync_segment())?;
         hooks.hit(crate::store::transaction::CrashPoint::AfterSegmentFdatasync)?;
         // 2. new segment directory entries durable.
         self.perf
-            .time("barrier_dir_sync", || self.sync_segments_dir())?;
+            .time_request("barrier_dir_sync", || self.sync_segments_dir())?;
         hooks.hit(crate::store::transaction::CrashPoint::AfterSegmentDirFsync)?;
         // 3. write the inactive superblock slot (idempotent: the deferred
         //    commit already wrote it to the page cache) and fsync it.
         let root = self.current_root();
         let root_id = root.id();
         self.perf
-            .time("barrier_sb_write", || self.write_superblock(root_id, &root))?;
+            .time_request("barrier_sb_write", || self.write_superblock(root_id, &root))?;
         hooks.hit(crate::store::transaction::CrashPoint::AfterSuperblockWrite)?;
         self.perf
-            .time("barrier_sb_fsync", || self.fsync_superblock())?;
+            .time_request("barrier_sb_fsync", || self.fsync_superblock())?;
         hooks.hit(crate::store::transaction::CrashPoint::AfterSuperblockFsync)?;
         Ok(())
     }
@@ -1335,7 +1341,7 @@ impl Store {
         // Phase-10F: LEVEL-ORDER batched scan (one read_many per tree
         // level), then ONE prefetch submission for the materialization
         // dependencies, then parallel decode.
-        let extents = self.perf.time("read_scan", || {
+        let extents = self.perf.time_request("read_scan", || {
             self.scan_extents_batched(extent_root, scan_start, end)
         })?;
         self.materialize_range_batched(None, &extents, offset, end, avail as usize)
@@ -1517,11 +1523,21 @@ impl Store {
         let mut deps: Vec<ChunkId> = Vec::new();
         let mut seen_objects: std::collections::HashSet<ChunkId> = std::collections::HashSet::new();
         let mut seen_nested: std::collections::HashSet<ChunkId> = std::collections::HashSet::new();
-        for (_, bytes) in extents {
-            let desc = crate::format::descriptor::decode(bytes, &limits)?;
-            self.collect_read_deps(ep, &desc, 0, &mut deps, &mut seen_objects, &mut seen_nested)?;
-            descs.push(desc);
-        }
+        self.perf.time_request("read_deps", || {
+            for (_, bytes) in extents {
+                let desc = crate::format::descriptor::decode(bytes, &limits)?;
+                self.collect_read_deps(
+                    ep,
+                    &desc,
+                    0,
+                    &mut deps,
+                    &mut seen_objects,
+                    &mut seen_nested,
+                )?;
+                descs.push(desc);
+            }
+            Ok::<(), StoreError>(())
+        })?;
         // 2. ONE batched fetch (the read_many win; one submission queue
         //    for `UringIo`). Objects staged by in-flight epoch ops are
         //    not in the object index yet — resolve them from the epoch's
@@ -1530,7 +1546,7 @@ impl Store {
         let objects: std::collections::HashMap<ChunkId, Vec<u8>> = {
             let results = self
                 .perf
-                .time("read_prefetch", || self.fetch_objects_many(&deps));
+                .time_request("read_prefetch", || self.fetch_objects_many(&deps));
             let mut map = std::collections::HashMap::with_capacity(deps.len());
             for (id, r) in deps.iter().zip(results) {
                 match r {
@@ -1550,73 +1566,83 @@ impl Store {
         // 3. Decode (parallel for multi-extent reads; the prefetched map
         //    makes decode pure CPU).
         let ctx = crate::store::epoch::PrefetchContext::new(self, &objects, ep);
-        let mut out = vec![0u8; avail];
-        let workers = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-            .min(descs.len());
-        if descs.len() == 1 || workers <= 1 {
-            for (i, desc) in descs.iter().enumerate() {
-                materialize_into_window(&ctx, desc, extents[i].0, offset, end, &limits, &mut out)?;
-            }
-            return Ok(out);
-        }
-        let n = descs.len();
-        let mut runs: Vec<Result<Vec<(u64, Vec<u8>)>, StoreError>> = Vec::new();
-        std::thread::scope(|s| {
-            let mut handles = Vec::with_capacity(workers);
-            for w in 0..workers {
-                let lo = w * n / workers;
-                let hi = ((w + 1) * n / workers).max(lo + 1).min(n);
-                if lo >= hi {
-                    continue;
+        self.perf.time_request("read_decode", || {
+            let mut out = vec![0u8; avail];
+            let workers = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .min(descs.len());
+            if descs.len() == 1 || workers <= 1 {
+                for (i, desc) in descs.iter().enumerate() {
+                    materialize_into_window(
+                        &ctx,
+                        desc,
+                        extents[i].0,
+                        offset,
+                        end,
+                        &limits,
+                        &mut out,
+                    )?;
                 }
-                let descs = &descs;
-                let extents = &extents;
-                let ctx = &ctx;
-                handles.push(s.spawn(move || {
-                    let mut mine = Vec::with_capacity(hi - lo);
-                    for i in lo..hi {
-                        let desc = &descs[i];
-                        let mut chunk = vec![0u8; desc.len() as usize];
-                        let mut budget = limits.max_decode_work;
-                        crate::core::materialize::materialize(
-                            desc,
-                            ctx,
-                            &limits,
-                            0,
-                            &mut budget,
-                            &mut chunk,
-                        )
-                        .map_err(|e| StoreError::Descriptor(e.to_string()))?;
-                        mine.push((extents[i].0, chunk));
+                return Ok(out);
+            }
+            let n = descs.len();
+            let mut runs: Vec<Result<Vec<(u64, Vec<u8>)>, StoreError>> = Vec::new();
+            std::thread::scope(|s| {
+                let mut handles = Vec::with_capacity(workers);
+                for w in 0..workers {
+                    let lo = w * n / workers;
+                    let hi = ((w + 1) * n / workers).max(lo + 1).min(n);
+                    if lo >= hi {
+                        continue;
                     }
-                    Ok(mine)
-                }));
-            }
-            for h in handles {
-                runs.push(match h.join() {
-                    Ok(r) => r,
-                    Err(_) => Err(StoreError::Invariant("read decode thread panicked".into())),
-                });
-            }
-        });
-        // Assemble (extent ranges are disjoint and ordered).
-        for run in runs {
-            for (start, chunk) in run? {
-                let extent_end = start.saturating_add(chunk.len() as u64).min(end);
-                let copy_start = start.max(offset);
-                if copy_start >= extent_end {
-                    continue;
+                    let descs = &descs;
+                    let extents = &extents;
+                    let ctx = &ctx;
+                    handles.push(s.spawn(move || {
+                        let mut mine = Vec::with_capacity(hi - lo);
+                        for i in lo..hi {
+                            let desc = &descs[i];
+                            let mut chunk = vec![0u8; desc.len() as usize];
+                            let mut budget = limits.max_decode_work;
+                            crate::core::materialize::materialize(
+                                desc,
+                                ctx,
+                                &limits,
+                                0,
+                                &mut budget,
+                                &mut chunk,
+                            )
+                            .map_err(|e| StoreError::Descriptor(e.to_string()))?;
+                            mine.push((extents[i].0, chunk));
+                        }
+                        Ok(mine)
+                    }));
                 }
-                let s = (copy_start - start) as usize;
-                let c = (extent_end - copy_start) as usize;
-                let o = (copy_start - offset) as usize;
-                let c = c.min(avail - o);
-                out[o..o + c].copy_from_slice(&chunk[s..s + c]);
+                for h in handles {
+                    runs.push(match h.join() {
+                        Ok(r) => r,
+                        Err(_) => Err(StoreError::Invariant("read decode thread panicked".into())),
+                    });
+                }
+            });
+            // Assemble (extent ranges are disjoint and ordered).
+            for run in runs {
+                for (start, chunk) in run? {
+                    let extent_end = start.saturating_add(chunk.len() as u64).min(end);
+                    let copy_start = start.max(offset);
+                    if copy_start >= extent_end {
+                        continue;
+                    }
+                    let s = (copy_start - start) as usize;
+                    let c = (extent_end - copy_start) as usize;
+                    let o = (copy_start - offset) as usize;
+                    let c = c.min(avail - o);
+                    out[o..o + c].copy_from_slice(&chunk[s..s + c]);
+                }
             }
-        }
-        Ok(out)
+            Ok(out)
+        })
     }
 
     /// Materialized chunk at an aligned offset (zeros for holes).
@@ -1834,9 +1860,11 @@ impl Store {
         new_size: Option<u64>,
         hooks: &crate::store::transaction::CrashHooks,
     ) -> Result<(), StoreError> {
-        let mut tx = self.perf.time("begin_tx_wait", || self.begin_tx())?;
+        let mut tx = self
+            .perf
+            .time_request("begin_tx_wait", || self.begin_tx())?;
         self.perf
-            .time("btree_mutation", || -> Result<(), StoreError> {
+            .time_request("btree_mutation", || -> Result<(), StoreError> {
                 for u in &updates {
                     for obj in &u.objects {
                         let tag = match obj.kind {
@@ -2835,8 +2863,13 @@ impl Store {
         if data.is_empty() {
             return Ok(());
         }
-        let (updates, new_size) =
-            self.prepare_write(ino, offset, data, None, None, options, fg, None)?;
+        // Phase-11B: direct (non-epoch) write envelope; the commit
+        // coordinator rows attach inside `commit_file_extents_deferred`
+        // and `Tx::commit_deferred`.
+        let _req = self.perf.request("write_region");
+        let (updates, new_size) = self.perf.time_request("prepare", || {
+            self.prepare_write(ino, offset, data, None, None, options, fg, None)
+        })?;
         self.commit_file_extents_deferred(ino, updates, Some(new_size), &CrashHooks::none())?;
         Ok(())
     }
@@ -2944,8 +2977,15 @@ impl Store {
                     None => {
                         let read_end = (chunk_off + chunk_class).min(old_size);
                         if read_end > chunk_off {
-                            partial = self.perf.time("rmw_read", || {
-                                self.read_file(ino, chunk_off, read_end - chunk_off)
+                            // Phase-11B: the RMW read is PREPARATION work
+                            // (inside the `prepare` partition row), so its
+                            // read-leaf rows must not attach to the request
+                            // as top-level reads (that would double-count
+                            // them against `prepare`).
+                            partial = self.perf.detach(|| {
+                                self.perf.time("rmw_read", || {
+                                    self.read_file(ino, chunk_off, read_end - chunk_off)
+                                })
                             })?;
                             let n = partial.len().min(chunk_class as usize);
                             chunk_bytes[..n].copy_from_slice(&partial[..n]);
@@ -2977,17 +3017,25 @@ impl Store {
             // instead of re-reading the store (Phase 6 hot path). The
             // batch overlay bytes are *uncommitted*, so they are never a
             // base (the store cannot resolve them).
-            let prev_version = if !from_overlay && old_size > chunk_off {
-                if !full_chunk && old_size >= chunk_off + chunk_len as u64 {
-                    self.base_chunk_from_bytes(&partial[..chunk_len])?
-                } else if full_chunk {
-                    self.base_chunk_at(ino, chunk_off, chunk_len)?
-                } else {
-                    None // old extent shorter than the target chunk
-                }
-            } else {
-                None
-            };
+            // Phase-11B: the prev-version materialization re-reads the
+            // store (`base_chunk_at` -> `read_file`); it is PREPARATION
+            // work inside the `prepare` row, so its read-leaf rows must
+            // not attach to the request.
+            let prev_version = self.perf.detach(|| {
+                let v: Option<crate::core::candidate::BaseChunk> =
+                    if !from_overlay && old_size > chunk_off {
+                        if !full_chunk && old_size >= chunk_off + chunk_len as u64 {
+                            self.base_chunk_from_bytes(&partial[..chunk_len])?
+                        } else if full_chunk {
+                            self.base_chunk_at(ino, chunk_off, chunk_len)?
+                        } else {
+                            None // old extent shorter than the target chunk
+                        }
+                    } else {
+                        None
+                    };
+                Ok::<Option<crate::core::candidate::BaseChunk>, StoreError>(v)
+            })?;
             // Phase-9B: the SequenceDict dictionary is the previous
             // same-file chunk. Sequential writes make its bytes nearly
             // free: the batch overlay holds the uncommitted previous chunk
@@ -3034,8 +3082,12 @@ impl Store {
                     }
                     None => {
                         // Previous chunk not touched in this batch: the
-                        // committed store is authoritative.
-                        dictionary = self.base_chunk_at(ino, prev_off, chunk_len)?;
+                        // committed store is authoritative. The store read
+                        // is preparation work (inside `prepare`), so it
+                        // must not attach to the request (Phase-11B).
+                        dictionary = self
+                            .perf
+                            .detach(|| self.base_chunk_at(ino, prev_off, chunk_len))?;
                     }
                 }
             }
@@ -3976,7 +4028,12 @@ impl Store {
         records: Vec<crate::store::transaction::PendingRecord>,
         hooks: &CrashHooks,
     ) -> Result<(), StoreError> {
-        let _guard = self.commit_lock.lock().expect("commit lock poisoned");
+        // Phase-11B: the commit-coordinator wait is the shared write-side
+        // serialization resource the 4->16-thread plateau points at — it
+        // gets its own exclusive partition row.
+        let _guard = self.perf.time_request("commit_lock_wait", || {
+            self.commit_lock.lock().expect("commit lock poisoned")
+        });
         let needs_bit = {
             self.commit
                 .read()
@@ -3986,12 +4043,11 @@ impl Store {
                 == 0
         };
         let mut recs = records;
-        self.perf().time("epoch_append", || {
-            self.append_records(&mut recs)?;
-            // Process-crash durable (page cache); the durability barrier
-            // makes it power-durable, exactly like every other commit.
-            self.flush_segment()
-        })?;
+        self.perf
+            .time_request("append", || self.append_records(&mut recs))?;
+        // Process-crash durable (page cache); the durability barrier makes
+        // it power-durable, exactly like every other commit.
+        self.perf.time_request("flush", || self.flush_segment())?;
         if needs_bit {
             // Persist the incompat bit so an implementation that cannot
             // replay the log refuses the store.
@@ -4190,7 +4246,10 @@ impl Store {
         let mut extents: std::collections::BTreeMap<u64, Vec<u8>> =
             std::collections::BTreeMap::new();
         if !extent_root.is_zero() {
-            for (off, bytes) in self.scan_extents_batched(extent_root, scan_start, end)? {
+            let scanned = self.perf.time_request("read_scan", || {
+                self.scan_extents_batched(extent_root, scan_start, end)
+            })?;
+            for (off, bytes) in scanned {
                 extents.insert(off, bytes);
             }
         }
@@ -4223,7 +4282,7 @@ impl Store {
         }
         let limits = self.config.limits;
         let fanout = limits.max_fanout;
-        let mut tx = self.begin_tx()?;
+        let mut tx = self.perf.time_request("cp_lock_wait", || self.begin_tx())?;
         // SNAPSHOT the pending overlay; the live epoch KEEPS its state.
         // The merge runs on the snapshot, and the snapshot's entries are
         // compare-and-removed only after the commit SUCCEEDS. Two
@@ -4302,83 +4361,89 @@ impl Store {
         for (parent, _) in frozen.removed_entries.iter() {
             affected_dirs.insert(*parent);
         }
-        for parent in &affected_dirs {
-            // The base directory tree is the COMMITTED parent's tree (the
-            // epoch never rebuilt it); an epoch-created directory has no
-            // committed tree (empty base).
-            let committed_parent = Store::inode_for_tx(&tx, *parent).ok();
-            let dir_root = match committed_parent.as_ref().map(|i| &i.data) {
-                Some(InodeData::Directory { dir_root }) => *dir_root,
-                _ => crate::core::extent::ChunkId::ZERO,
-            };
-            let mut merged: std::collections::BTreeMap<Vec<u8>, directory::DirEntry> =
-                std::collections::BTreeMap::new();
-            if !dir_root.is_zero() {
-                for (name, e) in
-                    directory::scan(dir_root, None, usize::MAX, BTREE_ORDER, fanout, &tx)?.0
-                {
-                    merged.insert(name, e);
+        self.perf.time_request("cp_dir_build", || {
+            for parent in &affected_dirs {
+                // The base directory tree is the COMMITTED parent's tree (the
+                // epoch never rebuilt it); an epoch-created directory has no
+                // committed tree (empty base).
+                let committed_parent = Store::inode_for_tx(&tx, *parent).ok();
+                let dir_root = match committed_parent.as_ref().map(|i| &i.data) {
+                    Some(InodeData::Directory { dir_root }) => *dir_root,
+                    _ => crate::core::extent::ChunkId::ZERO,
+                };
+                let mut merged: std::collections::BTreeMap<Vec<u8>, directory::DirEntry> =
+                    std::collections::BTreeMap::new();
+                if !dir_root.is_zero() {
+                    for (name, e) in
+                        directory::scan(dir_root, None, usize::MAX, BTREE_ORDER, fanout, &tx)?.0
+                    {
+                        merged.insert(name, e);
+                    }
                 }
-            }
-            for ((p, name), e) in frozen.pending_entries.iter() {
-                if *p == *parent {
-                    merged.insert(name.clone(), *e);
+                for ((p, name), e) in frozen.pending_entries.iter() {
+                    if *p == *parent {
+                        merged.insert(name.clone(), *e);
+                    }
                 }
-            }
-            for (p, name) in frozen.removed_entries.iter() {
-                if *p == *parent {
-                    merged.remove(name);
+                for (p, name) in frozen.removed_entries.iter() {
+                    if *p == *parent {
+                        merged.remove(name);
+                    }
                 }
+                let entries: Vec<(Vec<u8>, Vec<u8>)> =
+                    merged.into_iter().map(|(n, e)| (n, e.encode())).collect();
+                let new_dir_root =
+                    crate::store::index::bulk_load(&entries, BTREE_ORDER, fanout, &mut tx)?;
+                let pin = final_inodes.entry(*parent).or_insert_with(|| {
+                    committed_parent
+                        .clone()
+                        .expect("affected parent inode must exist (committed or pending)")
+                });
+                pin.data = InodeData::Directory {
+                    dir_root: new_dir_root,
+                };
             }
-            let entries: Vec<(Vec<u8>, Vec<u8>)> =
-                merged.into_iter().map(|(n, e)| (n, e.encode())).collect();
-            let new_dir_root =
-                crate::store::index::bulk_load(&entries, BTREE_ORDER, fanout, &mut tx)?;
-            let pin = final_inodes.entry(*parent).or_insert_with(|| {
-                committed_parent
-                    .clone()
-                    .expect("affected parent inode must exist (committed or pending)")
-            });
-            pin.data = InodeData::Directory {
-                dir_root: new_dir_root,
-            };
-        }
+            Ok::<(), StoreError>(())
+        })?;
 
         // 3. Rebuild every affected extent tree ONCE (bulk COW patch).
         let mut affected_files: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
         for (ino, _) in frozen.pending_extents.keys() {
             affected_files.insert(*ino);
         }
-        for ino in &affected_files {
-            // The base extent tree is the COMMITTED file's tree; an
-            // epoch-created file has no committed tree (empty base).
-            let committed_file = Store::inode_for_tx(&tx, *ino).ok();
-            let extent_root = match committed_file.as_ref().map(|i| &i.data) {
-                Some(InodeData::File { extent_root }) => *extent_root,
-                _ => crate::core::extent::ChunkId::ZERO,
-            };
-            let mut batch: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
-            for ((fino, off), bytes) in frozen.pending_extents.iter() {
-                if *fino == *ino {
-                    batch.push((off.to_be_bytes().to_vec(), Some(bytes.clone())));
+        self.perf.time_request("cp_extent_build", || {
+            for ino in &affected_files {
+                // The base extent tree is the COMMITTED file's tree; an
+                // epoch-created file has no committed tree (empty base).
+                let committed_file = Store::inode_for_tx(&tx, *ino).ok();
+                let extent_root = match committed_file.as_ref().map(|i| &i.data) {
+                    Some(InodeData::File { extent_root }) => *extent_root,
+                    _ => crate::core::extent::ChunkId::ZERO,
+                };
+                let mut batch: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
+                for ((fino, off), bytes) in frozen.pending_extents.iter() {
+                    if *fino == *ino {
+                        batch.push((off.to_be_bytes().to_vec(), Some(bytes.clone())));
+                    }
                 }
+                let new_extent_root = crate::store::index::apply_sorted_batch(
+                    extent_root,
+                    &batch,
+                    BTREE_ORDER,
+                    fanout,
+                    &mut tx,
+                )?;
+                let fin = final_inodes.entry(*ino).or_insert_with(|| {
+                    committed_file
+                        .clone()
+                        .expect("affected file inode must exist (committed or pending)")
+                });
+                fin.data = InodeData::File {
+                    extent_root: new_extent_root,
+                };
             }
-            let new_extent_root = crate::store::index::apply_sorted_batch(
-                extent_root,
-                &batch,
-                BTREE_ORDER,
-                fanout,
-                &mut tx,
-            )?;
-            let fin = final_inodes.entry(*ino).or_insert_with(|| {
-                committed_file
-                    .clone()
-                    .expect("affected file inode must exist (committed or pending)")
-            });
-            fin.data = InodeData::File {
-                extent_root: new_extent_root,
-            };
-        }
+            Ok::<(), StoreError>(())
+        })?;
 
         // 4. Stage every final inode object (dedup against the log-staged
         //    records and the committed CAS) and build the inode-index
@@ -4386,21 +4451,24 @@ impl Store {
         //    their entries.
         let mut inode_batch_map: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>> =
             std::collections::BTreeMap::new();
-        for ino in frozen.removed_inodes.iter() {
-            inode_batch_map.insert(ino.to_be_bytes().to_vec(), None);
-        }
-        for (ino, inode) in &final_inodes {
-            if frozen.removed_inodes.contains(ino) {
-                continue; // removed in this epoch: drop, do not re-add
+        self.perf.time_request("cp_stage_inodes", || {
+            for ino in frozen.removed_inodes.iter() {
+                inode_batch_map.insert(ino.to_be_bytes().to_vec(), None);
             }
-            let id = crate::store::transaction::put_object(
-                &mut tx,
-                RecordTag::Inode,
-                inode.encode(),
-                None,
-            );
-            inode_batch_map.insert(ino.to_be_bytes().to_vec(), Some(id.as_bytes().to_vec()));
-        }
+            for (ino, inode) in &final_inodes {
+                if frozen.removed_inodes.contains(ino) {
+                    continue; // removed in this epoch: drop, do not re-add
+                }
+                let id = crate::store::transaction::put_object(
+                    &mut tx,
+                    RecordTag::Inode,
+                    inode.encode(),
+                    None,
+                );
+                inode_batch_map.insert(ino.to_be_bytes().to_vec(), Some(id.as_bytes().to_vec()));
+            }
+            Ok::<(), StoreError>(())
+        })?;
         let inode_batch: Vec<(Vec<u8>, Option<Vec<u8>>)> = inode_batch_map.into_iter().collect();
 
         // 5. Chunk index: the pending descriptors (bulk COW patch).
@@ -4408,7 +4476,7 @@ impl Store {
         for (cid, desc) in frozen.pending_chunks.iter() {
             chunk_batch.push((cid.as_bytes().to_vec(), Some(desc.clone())));
         }
-        tx.root_mut().chunk_index_root = self.perf.time("cp_chunk_apply", || {
+        tx.root_mut().chunk_index_root = self.perf.time_request("cp_chunk_apply", || {
             crate::store::index::apply_sorted_batch(
                 committed_root.chunk_index_root,
                 &chunk_batch,
@@ -4419,7 +4487,7 @@ impl Store {
         })?;
 
         // 6. Apply the inode index batch once.
-        tx.root_mut().inode_index_root = self.perf.time("cp_inode_apply", || {
+        tx.root_mut().inode_index_root = self.perf.time_request("cp_inode_apply", || {
             crate::store::index::apply_sorted_batch(
                 committed_root.inode_index_root,
                 &inode_batch,
@@ -4443,42 +4511,45 @@ impl Store {
         //    log_seq). For the removal SETS, the snapshot's merge already
         //    made the removal effective in the trees, so a re-added key is
         //    redundant and safe to drop.
-        {
-            let mut ep = self.epoch();
-            for (ino, inode) in &frozen.pending_inodes {
-                if ep.pending_inodes.get(ino) == Some(inode) {
-                    ep.pending_inodes.remove(ino);
+        self.perf.time_request("cp_overlay_remove", || {
+            {
+                let mut ep = self.epoch();
+                for (ino, inode) in &frozen.pending_inodes {
+                    if ep.pending_inodes.get(ino) == Some(inode) {
+                        ep.pending_inodes.remove(ino);
+                    }
                 }
-            }
-            for ino in &frozen.removed_inodes {
-                ep.removed_inodes.remove(ino);
-            }
-            for ((parent, name), entry) in &frozen.pending_entries {
-                if ep.pending_entries.get(&(*parent, name.clone())) == Some(entry) {
-                    ep.pending_entries.remove(&(*parent, name.clone()));
+                for ino in &frozen.removed_inodes {
+                    ep.removed_inodes.remove(ino);
                 }
-            }
-            for key in &frozen.removed_entries {
-                ep.removed_entries.remove(key);
-            }
-            for ((ino, off), bytes) in &frozen.pending_extents {
-                if ep.pending_extents.get(&(*ino, *off)) == Some(bytes) {
-                    ep.pending_extents.remove(&(*ino, *off));
+                for ((parent, name), entry) in &frozen.pending_entries {
+                    if ep.pending_entries.get(&(*parent, name.clone())) == Some(entry) {
+                        ep.pending_entries.remove(&(*parent, name.clone()));
+                    }
                 }
-            }
-            for (cid, bytes) in &frozen.pending_chunks {
-                if ep.pending_chunks.get(cid) == Some(bytes) {
-                    ep.pending_chunks.remove(cid);
+                for key in &frozen.removed_entries {
+                    ep.removed_entries.remove(key);
                 }
+                for ((ino, off), bytes) in &frozen.pending_extents {
+                    if ep.pending_extents.get(&(*ino, *off)) == Some(bytes) {
+                        ep.pending_extents.remove(&(*ino, *off));
+                    }
+                }
+                for (cid, bytes) in &frozen.pending_chunks {
+                    if ep.pending_chunks.get(cid) == Some(bytes) {
+                        ep.pending_chunks.remove(cid);
+                    }
+                }
+                // The staged-object dedup set restarts empty: every object it
+                // named is now committed (this merge) or was already appended
+                // and indexed, so `epoch_stage` still dedups through the
+                // object index. The staged PAYLOADS (for in-flight overlay
+                // reads) are dropped with it.
+                ep.staged_objects.clear();
+                ep.staged_payloads.clear();
             }
-            // The staged-object dedup set restarts empty: every object it
-            // named is now committed (this merge) or was already appended
-            // and indexed, so `epoch_stage` still dedups through the
-            // object index. The staged PAYLOADS (for in-flight overlay
-            // reads) are dropped with it.
-            ep.staged_objects.clear();
-            ep.staged_payloads.clear();
-        }
+            Ok::<(), StoreError>(())
+        })?;
         Ok(())
     }
 
@@ -4926,6 +4997,19 @@ impl Store {
     /// Phase-10D epoch write: the 10C parallel chunk preparation against
     /// the epoch's file view, staged as log records + a MutationLog
     /// envelope. The extent/chunk trees are built at the checkpoint.
+    ///
+    /// Phase-11B: the epoch guard is held ONLY for the overlay reads
+    /// (inode + prefill) and the staging — NOT for candidate preparation.
+    /// `prepare_write` is pure CPU + committed reads (its inputs are the
+    /// pre-filled overlay bytes), so holding the guard across it would
+    /// convoy every writer on the single epoch mutex (the measured
+    /// 4→16-thread write plateau: 94% of request time waiting on
+    /// `epoch_lock_wait`/`epoch_wait`). Same-inode writers are already
+    /// serialized by the per-inode mutation lock, and a checkpoint can
+    /// only grow this inode's size (it merges this thread's own earlier
+    /// pending writes, which the block-A read already includes), so the
+    /// size re-read at staging is a monotonicity guard, not a correctness
+    /// dependency.
     pub fn epoch_write(
         &self,
         ino: u64,
@@ -4938,111 +5022,144 @@ impl Store {
         if data.is_empty() {
             return Ok(());
         }
-        let _lock = self.inode_lock(ino);
-        let mut ep = self.epoch();
-        let inode = self
-            .get_inode_epoch(&ep, ino)?
-            .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
+        // Phase-11B: the request envelope. Inside a FUSE request this is a
+        // pass-through (the handler already opened the envelope); direct
+        // callers get their own. The exclusive phases below partition the
+        // request so the reconciliation identity (total == sum + residual)
+        // can be checked.
+        let _req = self.perf.request("epoch_write");
+        let _lock = self
+            .perf
+            .time_request("inode_lock_wait", || self.inode_lock(ino));
         let limits = self.config.limits;
         let chunk_class = limits.chunk_class;
         let end = offset.saturating_add(data.len() as u64);
-        let old_size = inode.size;
-        let new_size = old_size.max(end);
-        // Pre-materialize the affected chunks from the epoch's file view
-        // into the in-batch overlay, so prepare_write's RMW sees pending
-        // writes (they are uncommitted; the committed read would be
-        // stale).
         let first_chunk = offset / chunk_class;
         let last_chunk = end.div_ceil(chunk_class);
-        let mut overlay: std::collections::BTreeMap<u64, Vec<u8>> =
-            std::collections::BTreeMap::new();
-        // Prefill from the PREVIOUS chunk: prepare_write's in-batch
-        // dictionary lookup (the previous same-file chunk) falls back to
-        // the committed store on an overlay miss, which would fail for
-        // epoch-pending chunks.
         let prefill_first = first_chunk.saturating_sub(1);
-        for c in prefill_first..last_chunk {
-            let off = c * chunk_class;
-            let read_end = (off + chunk_class).min(old_size);
-            let bytes = if read_end > off {
-                self.read_file_epoch(&ep, ino, off, read_end - off)?
-            } else {
-                Vec::new()
-            };
-            overlay.insert(off, bytes);
-        }
+
+        // Block A (epoch guard held): the overlay view of the file and the
+        // prefill of the affected chunks. The prefill's read work attaches
+        // to this request through the read-leaf rows
+        // (`read_scan`/`read_deps`/`read_prefetch`/`read_decode`) — the
+        // prefill IS a read, so wrapping it again would double-count.
+        let (old_size, mut overlay): (u64, std::collections::BTreeMap<u64, Vec<u8>>) = {
+            let ep = self.perf.time_request("epoch_lock_wait", || self.epoch());
+            let inode = self
+                .get_inode_epoch(&ep, ino)?
+                .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
+            let old_size = inode.size;
+            let mut overlay: std::collections::BTreeMap<u64, Vec<u8>> =
+                std::collections::BTreeMap::new();
+            // Prefill from the PREVIOUS chunk: prepare_write's in-batch
+            // dictionary lookup (the previous same-file chunk) falls back
+            // to the committed store on an overlay miss, which would fail
+            // for epoch-pending chunks.
+            for c in prefill_first..last_chunk {
+                let off = c * chunk_class;
+                let read_end = (off + chunk_class).min(old_size);
+                let bytes = if read_end > off {
+                    self.read_file_epoch(&ep, ino, off, read_end - off)?
+                } else {
+                    Vec::new()
+                };
+                overlay.insert(off, bytes);
+            }
+            (old_size, overlay)
+        }; // the epoch guard drops here — prepare runs WITHOUT it
+        let new_size = old_size.max(end);
+
         let mut pending_batch = crate::optimizer::search::PendingBatch::default();
-        let (updates, _) = self.prepare_write(
-            ino,
-            offset,
-            data,
-            Some(&mut overlay),
-            Some(&mut pending_batch),
-            options,
-            fg,
-            Some(old_size),
-        )?;
-        // Stage the descriptors + objects + envelope.
+        let (updates, _) = self.perf.time_request("prepare", || {
+            self.prepare_write(
+                ino,
+                offset,
+                data,
+                Some(&mut overlay),
+                Some(&mut pending_batch),
+                options,
+                fg,
+                Some(old_size),
+            )
+        })?;
+
+        // Block B (guard re-acquired): stage the descriptors + objects +
+        // the inode + the mutation-log envelope.
         let mut records: Vec<crate::store::transaction::PendingRecord> = Vec::new();
         let mut chunks: Vec<(u64, crate::core::extent::ChunkId, Vec<u8>)> = Vec::new();
-        for u in &updates {
-            let desc_bytes = crate::format::descriptor::encode(&u.descriptor)?;
-            for o in &u.objects {
-                let tag = match o.kind {
-                    crate::core::candidate::ObjectKind::Data => RecordTag::Data,
-                    crate::core::candidate::ObjectKind::Model => RecordTag::Model,
-                };
-                let ml = if tag == RecordTag::Data {
-                    Some(u.descriptor.len())
-                } else {
-                    None
-                };
-                Self::epoch_stage(&mut ep, self, &mut records, tag, o.payload.clone(), ml);
+        let mut ep = self.perf.time_request("epoch_lock_wait", || self.epoch());
+        // The size is monotone across the guard release: same-inode
+        // writers are serialized by `inode_lock`, and a checkpoint only
+        // merges this thread's own earlier pending writes (already in the
+        // block-A view). Re-read anyway so the invariant is explicit.
+        let inode = self
+            .get_inode_epoch(&ep, ino)?
+            .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
+        let new_size = inode.size.max(new_size);
+        self.perf.time_request("stage", || {
+            for u in &updates {
+                let desc_bytes = crate::format::descriptor::encode(&u.descriptor)?;
+                for o in &u.objects {
+                    let tag = match o.kind {
+                        crate::core::candidate::ObjectKind::Data => RecordTag::Data,
+                        crate::core::candidate::ObjectKind::Model => RecordTag::Model,
+                    };
+                    let ml = if tag == RecordTag::Data {
+                        Some(u.descriptor.len())
+                    } else {
+                        None
+                    };
+                    Self::epoch_stage(&mut ep, self, &mut records, tag, o.payload.clone(), ml);
+                }
+                chunks.push((u.offset, u.content_id, desc_bytes.clone()));
+                ep.pending_extents
+                    .insert((ino, u.offset), desc_bytes.clone());
+                // The chunk index must never resolve a content id to a
+                // descriptor that references the same content id: the dedup
+                // path emits EXACT_REF{target: cid} for an already-committed
+                // chunk, and registering it in the pending map would let the
+                // checkpoint clobber the retained terminal entry with a
+                // self-loop (materialize(cid) -> EXACT_REF{cid} forever; the
+                // depth cap turns it into DepthExceeded). The self-aliasing
+                // extent stays valid — it resolves through the committed
+                // terminal. Mirrors `put_chunk_in_tx` and the PendingBatch
+                // contract (Phase-10G regression: parallel identical-content
+                // writes, e.g. cp -P of duplicated files, hit this).
+                let self_aliasing = matches!(
+                    u.descriptor,
+                    Representation::ExactRef { target, .. } if target == u.content_id
+                );
+                if !self_aliasing {
+                    ep.pending_chunks.entry(u.content_id).or_insert(desc_bytes);
+                }
             }
-            chunks.push((u.offset, u.content_id, desc_bytes.clone()));
-            ep.pending_extents
-                .insert((ino, u.offset), desc_bytes.clone());
-            // The chunk index must never resolve a content id to a
-            // descriptor that references the same content id: the dedup
-            // path emits EXACT_REF{target: cid} for an already-committed
-            // chunk, and registering it in the pending map would let the
-            // checkpoint clobber the retained terminal entry with a
-            // self-loop (materialize(cid) -> EXACT_REF{cid} forever; the
-            // depth cap turns it into DepthExceeded). The self-aliasing
-            // extent stays valid — it resolves through the committed
-            // terminal. Mirrors `put_chunk_in_tx` and the PendingBatch
-            // contract (Phase-10G regression: parallel identical-content
-            // writes, e.g. cp -P of duplicated files, hit this).
-            let self_aliasing = matches!(
-                u.descriptor,
-                Representation::ExactRef { target, .. } if target == u.content_id
+            // The inode + mutation-log envelope are part of the staging
+            // work (descriptor/object encoding); keeping them inside this
+            // row keeps the reconciliation residual tight.
+            let mut fin = inode;
+            fin.size = new_size;
+            let inode_id = Self::epoch_stage(
+                &mut ep,
+                self,
+                &mut records,
+                RecordTag::Inode,
+                fin.encode(),
+                None,
             );
-            if !self_aliasing {
-                ep.pending_chunks.entry(u.content_id).or_insert(desc_bytes);
-            }
-        }
-        let mut fin = inode;
-        fin.size = new_size;
-        let inode_id = Self::epoch_stage(
-            &mut ep,
-            self,
-            &mut records,
-            RecordTag::Inode,
-            fin.encode(),
-            None,
-        );
-        ep.pending_inodes.insert(ino, fin);
-        let env = ep.envelope(&crate::store::epoch::MutationOp::Write {
-            ino,
-            size: new_size,
-            chunks,
-            inode_id,
-        });
-        records.push(crate::store::transaction::PendingRecord {
-            tag: RecordTag::MutationLog,
-            payload: env,
-            materialized_len: None,
-        });
+            ep.pending_inodes.insert(ino, fin);
+            let env = ep.envelope(&crate::store::epoch::MutationOp::Write {
+                ino,
+                size: new_size,
+                chunks,
+                inode_id,
+            });
+            records.push(crate::store::transaction::PendingRecord {
+                tag: RecordTag::MutationLog,
+                payload: env,
+                materialized_len: None,
+            });
+            Ok::<(), StoreError>(())
+        })?;
         drop(ep);
         self.epoch_append(records, hooks)?;
         self.maybe_checkpoint_epoch()?;
@@ -5344,10 +5461,18 @@ impl Store {
     fn maybe_checkpoint_epoch(&self) -> Result<(), StoreError> {
         /// Pending ops per epoch before an automatic close.
         const EPOCH_MAX_OPS: u64 = 1024;
-        // The epoch sequence is globally monotonic (it continues from the
-        // consumed log_seq across checkpoints), so the pending-op count is
-        // the difference from the committed log sequence.
-        let pending = self.epoch().seq.saturating_sub(self.current_root().log_seq);
+        // Phase-11B: the epoch-mutex wait HERE is a real shared-resource
+        // wait — `epoch_write` holds the epoch guard through its whole
+        // body (prepare dominates), so a concurrent writer's checkpoint
+        // check blocks on the guard. Measure the acquisition as a leaf row
+        // (`epoch_wait`); the checkpoint itself, when it fires, reports
+        // through its own cp_* rows. The temporary guard drops before the
+        // `if`, so `epoch_checkpoint` cannot deadlock on the same mutex.
+        let pending = self
+            .perf
+            .time_request("epoch_wait", || self.epoch())
+            .seq
+            .saturating_sub(self.current_root().log_seq);
         if pending >= EPOCH_MAX_OPS {
             self.epoch_checkpoint(&CrashHooks::none())?;
         }

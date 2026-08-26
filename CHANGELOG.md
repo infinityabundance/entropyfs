@@ -1,5 +1,51 @@
 # EntropyFS changelog
 
+## v0.7.1 (2026-08-26)
+
+**11B — write-path request reconciliation.** The performance equivalent of
+Phase 9H's physical byte reconciliation, applied to latency: every write
+and fsync request is partitioned into exclusive phases and the identity
+`request latency == Σ phases + residual` is asserted per thread count
+(spec in `docs/performance/reconciliation.md`, court in
+`src/tests/perf_reconciled.rs`, sealed mounted court under
+`evidence/performance/recon-court-1787756758-3075a77/` via
+`tools/recon-court.sh`).
+
+**The finding:** the 4→16-thread write plateau is the EPOCH MUTEX convoy,
+not the commit coordinator. `commit_lock_wait` is ~zero at every thread
+count; `epoch_lock_wait + epoch_wait` reached 94% of request time at 16
+threads, because `epoch_write` held the epoch guard across candidate
+preparation. This is the measured answer to the 10G question (parallel
+writes flatten 375.8 → 543.1 → 558.1 MB/s) — the write-side
+serialization resource is the epoch mutex, found by accounting, not
+inferred.
+
+**The fix:** `epoch_write` releases the epoch guard across `prepare`
+(candidate search is pure CPU + committed reads; its inputs are the
+pre-filled overlay bytes) and re-acquires it only for the overlay prefill
+and the staging, with the file size re-read at staging as a monotonicity
+guard. Same-inode writers were already serialized by the per-inode
+mutation lock, and a checkpoint can only merge this thread's own earlier
+pending writes. Direct-store A/B (release, 256×1 MiB epoch writes): the
+guard convoy collapses from ~50–75% of request time at 2–4 threads to
+~1–29%; wall 4T 1.28 → 0.94 s. The full 415-test suite — crash courts,
+hostile-media court, concurrency suites — stays green.
+
+**Instrumentation:** `src/perf/mod.rs` gains the request ledger
+(`Timings::request` envelope, `Timings::time_request` exclusive leaf
+rows, `Timings::detach` for internal helper reads, `reconcile`/
+`render_reconciled` stacked table with the explicit residual and an
+OVERLAP flag when a row double-counts). The daemon's `--stats-file` dump
+carries the table automatically. The reconciliation holds at every thread
+count: residual ≤ 2.4% direct-store, ≤ 4.0% mounted.
+
+**Next terms (11C levers), named by the accounting:** the remaining
+eventual guard holds at 8–16 threads (60–81% `epoch_lock_wait` +
+`epoch_wait`); per-request `available_parallelism()` worker oversub-
+scription (`read_decode` 5–22%, inflating exactly where the plateau
+flattens); and the mounted durability-path fsync convoy (`commit_lock_wait`
+29.8% at 16 threads, `cp`'s trailing fsyncs queueing on the commit lock).
+
 ## v0.7.0 (2026-08-26)
 
 **11A — hostile-media court.** The security documentation claimed fuzz

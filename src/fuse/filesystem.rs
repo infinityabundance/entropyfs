@@ -317,6 +317,8 @@ impl Drop for EntropyFs {
             out.push_str(&self.stats.render());
             out.push_str("\n");
             out.push_str(&self.store.perf().render());
+            out.push_str("\n");
+            out.push_str(&self.store.perf().render_reconciled());
             let _ = std::fs::write(path, out);
         }
     }
@@ -681,6 +683,8 @@ impl Filesystem for EntropyFs {
     ) {
         let _g = ReqGuard::begin(&self.stats, "read");
         let store = self.store();
+        // Phase-11B: the request envelope (the read phases partition it).
+        let _req = store.perf().request("fuse_read");
         // Serialize with the file's in-flight epoch writes: the kernel can
         // interleave read requests between a file's write-back requests,
         // and the overlay is only complete once every write is staged. The
@@ -711,6 +715,10 @@ impl Filesystem for EntropyFs {
         let _g = ReqGuard::begin(&self.stats, "write");
         self.stats.record_write_size(data.len());
         let store = self.store();
+        // Phase-11B: the request envelope. The exclusive partition rows
+        // inside `epoch_write` (inode_lock_wait … checkpoint) attach here;
+        // the residual row is the FUSE/scheduler/other overhead.
+        let _req = store.perf().request("fuse_write");
         // Phase-10D: the write goes through the ACTIVE EPOCH (log append
         // + ack; the trees merge at the checkpoint). The store's configured
         // foreground policy applies.
@@ -774,6 +782,8 @@ impl Filesystem for EntropyFs {
         // flip → fsync). v1 applies the full barrier for both FSYNC and
         // FDATASYNC (data and metadata are interleaved in the segments).
         let store = self.store();
+        // Phase-11B: the barrier's exclusive rows partition this request.
+        let _req = store.perf().request("fuse_fsync");
         match store.durability_barrier(&CrashHooks::none()) {
             Ok(()) => reply.ok(),
             Err(e) => reply.error(Self::errno(&e)),

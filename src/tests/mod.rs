@@ -27,6 +27,7 @@ pub mod namespace_repro;
 pub mod optimizer;
 pub mod partial_window_read;
 pub mod perf_diag;
+pub mod perf_reconciled;
 pub mod persistent_store;
 pub mod physical_convergence;
 pub mod rank_roundtrip;
