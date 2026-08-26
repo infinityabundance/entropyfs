@@ -269,8 +269,10 @@ pub struct Store {
     /// fetch used to open the segment file afresh. While mounted, segments
     /// are append-only (GC is offline), so the cache is safe and
     /// unbounded-in-practice; reads use `pread` (offset-based, no shared
-    /// seek position) so the fds are thread-safe.
-    segment_fds: std::sync::Mutex<std::collections::HashMap<u64, std::fs::File>>,
+    /// seek position) so the fds are thread-safe. `Arc<File>` (10E1): the
+    /// map mutex is only held to clone the handle, never across the
+    /// `pread` itself, so concurrent object reads do not serialize.
+    segment_fds: std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<std::fs::File>>>,
 }
 
 impl std::fmt::Debug for Store {
@@ -899,21 +901,28 @@ impl Store {
     }
 
     /// Read a record payload from a segment via the cached fd table
-    /// (Phase-10E). The fd is opened once per segment and kept; `pread`
-    /// makes the reads thread-safe (no shared seek offset). Segments are
-    /// append-only while mounted, so a cached fd never goes stale.
+    /// (Phase-10E/10E1). The fd is opened once per segment and kept;
+    /// `pread` makes the reads thread-safe (no shared seek offset).
+    /// Segments are append-only while mounted, so a cached fd never goes
+    /// stale. The map mutex is released before the `pread` loop (the
+    /// handle is an `Arc<File>` clone), so concurrent object reads never
+    /// serialize on the cache.
     fn segment_payload(
         &self,
         seq: u64,
         offset: u64,
         stored_len: u64,
     ) -> Result<Vec<u8>, StoreError> {
-        let mut fds = self.segment_fds.lock().expect("segment fds poisoned");
-        let file = match fds.entry(seq) {
-            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-            std::collections::hash_map::Entry::Vacant(v) => v.insert(std::fs::File::open(
-                crate::store::segment::segment_path(&self.dir, seq),
-            )?),
+        let file = {
+            let mut fds = self.segment_fds.lock().expect("segment fds poisoned");
+            match fds.entry(seq) {
+                std::collections::hash_map::Entry::Occupied(e) => e.get().clone(),
+                std::collections::hash_map::Entry::Vacant(v) => v
+                    .insert(std::sync::Arc::new(std::fs::File::open(
+                        crate::store::segment::segment_path(&self.dir, seq),
+                    )?))
+                    .clone(),
+            }
         };
         let start = offset
             .checked_add(crate::format::version::RECORD_HEADER_SIZE)

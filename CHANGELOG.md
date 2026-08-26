@@ -1,6 +1,60 @@
 # EntropyFS changelog
 
+## v0.6.1 (2026-08-26)
+
+**10E1 — lock-free fd-cache reads:** the 10E `segment_payload` held the
+`segment_fds` map mutex across the whole `pread` loop, so concurrent
+object reads serialized on the map lock even though `pread` has no shared
+file position. The cache now stores `Arc<File>`: acquire the map lock,
+clone the `Arc`, drop the lock, then `pread` — object reads execute
+concurrently. Sealed by the 10E1 mounted-court A/B pair
+(`evidence/performance/fuse-court-*-10e1-before` / `fuse-court-*-10e1-after`,
+tmpfs-backed): the court did not move — 1M-read latency p50/p95/p99
+1062/1197/1277 → 1085/1200/1301 µs, warm seq read 2238 → 2226 MiB/s,
+both within noise — falsifying a serial-workload win cheaply, exactly as
+predicted. The lock removal is retained regardless: it takes a real
+serialization point out of the read hot path with no measured regression,
+and the `Arc<File>` shape is the one 10F's `read_many` parallel decode
+needs, where concurrent `pread`s are the entire point.
+
 ## v0.6.0 (2026-08-26)
+
+**10A — performance instrumentation + court thread sweep:** `src/perf`
+phase timings (`Timings`, FUSE op stats, write-size buckets, in-flight
+counters) and a mountable court thread sweep (`--threads 1/2/4/8/16`
+runs with full context capture). Finding: `cp` exposed a maximum
+request concurrency of ~1, so additional FUSE worker threads were
+useless then — the measurement predates the 10D namespace-latency
+collapse and is being re-run with parallel workloads (make -j, parallel
+untar, Git checkout) after 10E/10F.
+
+**10B — ruthless foreground selection:** `ForegroundPolicy` (full/cheap/raw-
+only) + `--foreground` mount flag. The high-entropy probe (anti-aliased
+min-over-three-strides sampled entropy) skips the LZ/entropy families for
+obviously-incompressible chunks. Direct store: random 64 MiB 39.8 → 852
+MiB/s (21×), daemon CPU −37% through FUSE, settled density unchanged at
+1.994× (the background optimizer recovers everything the cheap foreground
+defers).
+
+**10C — parallel chunk preparation:** a multi-chunk write's candidate
+search runs concurrently (scoped threads; single-chunk writes inline),
+with byte-identical results to the serial path (synthetic in-batch
+dictionary validation + a serial real-state backstop). Mounted court:
+random full 66.5 → 148.8 MiB/s buffered (2.2×), compressed.tgz durable
+4.7 → 26.9 (5.7×); settled density byte-for-byte 1.994× in all four runs.
+
+**10D — metadata writeback epochs:** namespace/writeback ops accumulate in
+an ACTIVE EPOCH — each op appends its staged objects + a `MUTATION_LOG`
+envelope (the recoverable dirty state) and acks after the page-cache
+flush; checkpoints merge the frozen overlay into the trees ONCE
+(bulk-load for per-directory trees, `apply_sorted_batch` bulk COW for the
+global indexes) with one root publication. Recovery replays envelopes
+with `seq > root.log_seq`. Mounted src-workload: create p50 2.5 ms →
+8.5 µs, setattr 2.4 ms → 4.1 µs (~300× per namespace op); the 135-file
+source-tree copy drops from ~0.7 s to 0.045 s. On-disk: format v1
+retained; a new incompat feature bit (15, MUTATION_LOG), a new record
+tag (0x07), and a trailing `root.log_seq` field (absent in pre-epoch
+roots) are additive extensions an old implementation must refuse.
 
 **10E — segment read-fd cache + range-traversal read paths (no format
 change, no new feature bit):** the read path used to open the segment
@@ -32,38 +86,10 @@ encoding, §32-gated (relaxed decode budget recovers the bytes).
 
 Regression-tested (`chain_depth_reports_deepest_path_through_a_diamond`);
 full suite 365 lib + 1 bin tests green; real-tree convergence, remount,
-fsck and crash courts all green. 10E is implemented with the read-path
-changes in place; the mounted FUSE court for 10E is pending.
+fsck and crash courts all green. The mounted FUSE court for 10E was
+pending at release and is sealed as 10E1 in v0.6.1.
 
-## Unreleased (Phase 10: writeback-native persistence)
-
-**10B — ruthless foreground selection:** `ForegroundPolicy` (full/cheap/raw-
-only) + `--foreground` mount flag. The high-entropy probe (anti-aliased
-min-over-three-strides sampled entropy) skips the LZ/entropy families for
-obviously-incompressible chunks. Direct store: random 64 MiB 39.8 → 852
-MiB/s (21×), daemon CPU −37% through FUSE, settled density unchanged at
-1.994× (the background optimizer recovers everything the cheap foreground
-defers).
-
-**10C — parallel chunk preparation:** a multi-chunk write's candidate
-search runs concurrently (scoped threads; single-chunk writes inline),
-with byte-identical results to the serial path (synthetic in-batch
-dictionary validation + a serial real-state backstop). Mounted court:
-random full 66.5 → 148.8 MiB/s buffered (2.2×), compressed.tgz durable
-4.7 → 26.9 (5.7×); settled density byte-for-byte 1.994× in all four runs.
-
-**10D — metadata writeback epochs:** namespace/writeback ops accumulate in
-an ACTIVE EPOCH — each op appends its staged objects + a `MUTATION_LOG`
-envelope (the recoverable dirty state) and acks after the page-cache
-flush; checkpoints merge the frozen overlay into the trees ONCE
-(bulk-load for per-directory trees, `apply_sorted_batch` bulk COW for the
-global indexes) with one root publication. Recovery replays envelopes
-with `seq > root.log_seq`. Mounted src-workload: create p50 2.5 ms →
-8.5 µs, setattr 2.4 ms → 4.1 µs (~300× per namespace op); the 135-file
-source-tree copy drops from ~0.7 s to 0.045 s. On-disk: format v1
-retained; a new incompat feature bit (15, MUTATION_LOG), a new record
-tag (0x07), and a trailing `root.log_seq` field (absent in pre-epoch
-roots) are additive extensions an old implementation must refuse.
+## Unreleased
 
 ## v0.5.2 (2026-08-25)
 
