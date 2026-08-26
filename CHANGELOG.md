@@ -8,7 +8,7 @@ and fsync request is partitioned into exclusive phases and the identity
 `request latency == Σ phases + residual` is asserted per thread count
 (spec in `docs/performance/reconciliation.md`, court in
 `src/tests/perf_reconciled.rs`, sealed mounted court under
-`evidence/performance/recon-court-1787756758-3075a77/` via
+`evidence/performance/recon-court-1787757073-e5b0592/` via
 `tools/recon-court.sh`).
 
 **The finding:** the 4→16-thread write plateau is the EPOCH MUTEX convoy,

@@ -1,6 +1,6 @@
 # Write-path request reconciliation (Phase 11B)
 
-Status: implemented and sealed (`evidence/performance/recon-court-1787756758-3075a77/`;
+Status: implemented and sealed (`evidence/performance/recon-court-1787757073-e5b0592/`;
 run `tools/recon-court.sh` to reproduce).
 
 Phase 11B is the performance equivalent of Phase 9H's physical byte
@@ -153,7 +153,7 @@ commit lock in `durability_barrier` (the fsync convoy).
 
 ## 4. Evidence
 
-- `evidence/performance/recon-court-1787756758-3075a77/` — the sealed
+- `evidence/performance/recon-court-1787757073-e5b0592/` — the sealed
   mounted court: identity holds (no overlap, residual ≤ 4.0%) at
   1/2/4/8/16 threads; stacked tables, per-thread stats dumps, machine-
   readable results.
