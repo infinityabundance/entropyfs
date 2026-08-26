@@ -1,0 +1,42 @@
+{
+  "probe": "phase-11e-worker-pool",
+  "rev": "8fdea62",
+  "machine": "AMD Ryzen 7 9800X3D 8-Core Processor (16 threads, SMT)",
+  "kernel": "7.2.0-1-cachyos",
+  "workload": "epoch_write 256 x 1 MiB per sweep, fresh store + per-write-distinct content; byte-exact read-back per run",
+  "decision": "KEPT pool-16",
+  "gates_16t": {
+    "adopted": "pool-16",
+    "p99_ratio_vs_semaphore": 0.34,
+    "gate": "<= 0.60",
+    "p50_ratio_vs_semaphore": 0.80,
+    "gate": "<= 1.20",
+    "wall_ratio_vs_semaphore": 0.63,
+    "gate": "<= 1.03",
+    "useful_cpu_delta_pct": 3.0,
+    "report": "the +3% gate is straddled (2.6-3.7% across runs); the +5% reject bar is the hard assert",
+    "p99_p50_ratio": 1.63,
+    "semaphore_p99_p50_ratio": 3.88,
+    "max_slowdown_x": 18.3,
+    "semaphore_max_slowdown_x": 46.7
+  },
+  "gates_8t": {
+    "p99_ratio_vs_semaphore": 0.34,
+    "gate": "<= 0.60",
+    "wall_ratio_vs_semaphore": 0.81,
+    "gate": "<= 1.10",
+    "useful_cpu_delta_pct": 4.9,
+    "gate": "<= +7% (approximately unchanged)"
+  },
+  "pool8_alternative": {
+    "note": "same wall as the semaphore at 16T with -20% useful CPU and -59% p99 (the lower-power option); fails the absolute p50/p99 gates at 16 writers",
+    "useful_cpu_delta_pct_16t": -0.7,
+    "note2": "run-to-run 7980-10145 ms vs semaphore 9970-9988; p99 98-358 ms vs 152-311 ms"
+  },
+  "probe_found_defects": [
+    "shared round-robin cursor pins each request to one worker when workers == active requests (per-worker cursors fix it)",
+    "naive backpressure wait deadlocks when an oversized request meets an idle pool (admit when in_flight == 0)"
+  ],
+  "follow_up": "11F: shard the DSFB observer mutex (the +2.6-3.7% useful-CPU delta is its visibility under fair interleaving; the brief predicted this)",
+  "byte_exact": true
+}

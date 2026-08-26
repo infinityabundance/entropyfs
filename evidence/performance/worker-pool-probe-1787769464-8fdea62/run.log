@@ -1,0 +1,79 @@
+== machine ==
+7.2.0-1-cachyos
+16
+model name	: AMD Ryzen 7 9800X3D 8-Core Processor
+8fdea6278b6b249c25abe404c29690d4381c586c
+
+warning: unused variable: `prepared`
+   --> src/tests/perf_reconciled.rs:311:13
+    |
+311 |         let prepared = store
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_prepared`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: type `Composed` is more private than the item `workers::WorkerTask::EncodeChunk::composed`
+    --> src/store/workers.rs:373:9
+     |
+ 373 |         composed: super::Composed,
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^ field `workers::WorkerTask::EncodeChunk::composed` is reachable at visibility `pub`
+     |
+note: but type `Composed` is only usable at visibility `pub(crate)`
+    --> src/store/mod.rs:2910:1
+     |
+2910 | pub(crate) struct Composed {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: struct `NoProvider` is never constructed
+   --> src/tests/io_backend_parity.rs:171:24
+    |
+171 |                 struct NoProvider;
+    |                        ^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: missing documentation for a module
+    --> src/store/workers.rs:1024:1
+     |
+1024 | pub mod tests {
+     | ^^^^^^^^^^^^^
+     |
+note: the lint level is defined here
+    --> src/lib.rs:19:9
+     |
+  19 | #![warn(missing_docs)]
+     |         ^^^^^^^^^^^^
+
+warning: `entropyfs` (lib test) generated 4 warnings (run `cargo fix --lib -p entropyfs --tests` to apply 1 suggestion)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (target/release/deps/entropyfs-f08c7cb679adb5cf)
+
+running 1 test
+
+==== Phase-11E fair-pool probe (release gates; 64 files) ====
+path           w  wall_ms    p50_us    p99_us   mean_us    cpu_ms queue%   maxC    pkQ   med/x   p99/x   max/x
+semaphore      1     1811      6198      8222      6262      9952   0.0%      0      0    0.0x    0.0x    0.0x ok
+pool-16        1     1492      4976      5964      5018     10133   0.1%     13     64    0.0x    0.0x    0.0x ok
+pool-8         1     1960      6787      8282      6848      9183   0.1%     16     64    0.0x    0.0x    0.0x ok
+semaphore     16     1284     59965    232614     71034      9970  91.8%      0      0    9.6x   37.1x   46.7x ok
+pool-16       16      804     48195     78696     46351     10265   2.4%     64    128    9.6x   15.7x   18.3x ok
+pool-8        16     3048    176533    358378    179419     10145   1.1%     64     64   25.8x   52.3x   57.3x ok
+pool-4        16     3210    166550    503563    189796      8896   0.5%     25     64   33.2x  100.3x  126.4x ok
+semaphore      8     1181     26887    115479     33769      9853  84.1%      0      0    4.3x   18.4x   30.8x ok
+pool-16        8      959     27402     39081     27141     10333   4.5%     17    126    5.5x    7.8x    8.4x ok
+pool-8         8     1233     36482     58453     36768      9076   3.3%     17     64    5.3x    8.5x    8.8x ok
+
+-- gate check: best 16-writer configuration = pool-16 --
+   p99 78.7 ms (semaphore 232.6; ratio 0.34, gate <= 0.60)
+   p50 48.2 ms (semaphore 60.0; ratio 0.80, gate <= 1.20)
+   wall 804.0 ms (semaphore 1284.1; ratio 0.63, gate <= 1.03)
+   useful CPU 10265 ms = 3.0% (report: the +3% gate; hard assert: the +5% reject bar -> 10469 ms; semaphore 9970)
+   p99/p50 ratio 1.63 (semaphore 3.88)
+   max slowdown 18.3x (semaphore 46.7x); p99 slowdown 9.6x (semaphore 37.1x)
+   8T: p99 39.1 ms (semaphore 115.5; ratio 0.34, gate <= 0.60) wall 958.7 ms (semaphore 1180.6) useful CPU 4.9% (gate <= +7%; semaphore 9853)
+-- 11D adoption gates PASSED for pool-16 --
+test tests::worker_pool_probe::pool_probe_gates ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 420 filtered out; finished in 20.16s
+
