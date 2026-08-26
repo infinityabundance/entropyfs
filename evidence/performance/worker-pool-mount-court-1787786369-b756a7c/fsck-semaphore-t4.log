@@ -1,0 +1,10 @@
+superblock slots valid: 2/2
+segments scanned: 1
+records scanned: 26760
+live objects: 7314
+leaked objects: 19393 (6826344 bytes)
+inodes verified: 2053
+extents verified: 7070
+chunk descriptors verified: 2460
+warning [reachability] 19393 unreachable objects (6826344 bytes) — GC reclaimable
+fsck: OK

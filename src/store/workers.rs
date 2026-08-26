@@ -50,9 +50,17 @@
 //!
 //! The 11E probe (`src/tests/worker_pool_probe.rs`, sealed evidence
 //! `evidence/performance/worker-pool-probe-<run>/`) measured it against the
-//! semaphore on the same workload and the pool was KEPT (config-gated via
-//! `--worker-pool N`; the semaphore remains the default until the mounted-
-//! FUSE court validates the pool end-to-end):
+//! semaphore on the same workload and the pool was KEPT. The mounted-FUSE
+//! 11E court (`tools/court-worker-pool-mount.sh`, sealed
+//! `evidence/performance/worker-pool-mount-court-<run>/`) then validated it
+//! END-TO-END over real FUSE workloads (1/4/8/16 session threads;
+//! parallel writes/reads, namespace ops, tree copies, untar, make -j,
+//! cargo build, mixed R/W, fsync-heavy, serial controls) and sealed the
+//! pool as the MOUNT DEFAULT — pool-16 at 16 FUSE threads: parallel write
+//! +14%, latency-battery wall −26%, p95 −39%, p99 −48%, CPU +2.8%,
+//! crash/fsck/readback clean. The mount now runs the pool by default with
+//! `available_parallelism()` workers; `--no-worker-pool` forces the 11C
+//! semaphore (the fallback):
 //!
 //! ```text
 //! 16 writers, pool-16 vs semaphore (sealed release run):
@@ -341,11 +349,14 @@ pub fn grant(want: usize) -> WorkerGrant {
 //
 // LIFECYCLE
 //
-//   POOL defaults to disabled; the FUSE daemon opts in per mount
-//   (`--worker-pool N`; the semaphore remains the default pending the
-//   mounted-FUSE court), and the probe test enables it, binds a store,
-//   runs a sweep, and disables it. The 11E probe sealed the adoption
-//   decision: pool-16 was KEPT (the gates below; the semaphore stays as
+//   LIFECYCLE
+//
+//   POOL defaults to ON for the FUSE daemon (the mounted-FUSE 11E court
+//   sealed it as the mount default; the daemon sizes it at
+//   available_parallelism() and `--no-worker-pool` restores the 11C
+//   semaphore), and the probe test enables it, binds a store, runs a
+//   sweep, and disables it. The 11E probe sealed the adoption decision:
+//   pool-16 was KEPT (the gates below; the semaphore stays as
 //   the fallback).
 // =========================================================================
 
@@ -768,8 +779,9 @@ impl PoolShared {
 /// # Lifecycle
 ///
 /// `POOL` defaults to disabled. The FUSE daemon opts in per mount
-/// (`--worker-pool N`; the semaphore remains the default until the
-/// mounted-FUSE court validates the pool end-to-end), and the probe test
+/// (`--worker-pool N`; the pool is the mount default since the mounted-
+/// FUSE 11E court sealed it, and `--no-worker-pool` restores the
+/// semaphore), and the probe test
 /// enables it, binds a store, runs a sweep, and disables it. The workers
 /// park on their condvar while idle and are joined at disable/unmount.
 pub struct SearchPool {

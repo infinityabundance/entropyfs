@@ -65,8 +65,10 @@ pub struct MountParams {
     /// Phase-10A: dump FUSE/phase instrumentation to this path on drop.
     pub stats_file: Option<PathBuf>,
     /// Phase-11E worker pool: `Some(N)` routes the search/decode work
-    /// through the persistent fair pool with N workers (see the CLI flag
-    /// docs in `cli/mount.rs`). `None` keeps the 11C semaphore.
+    /// through the persistent fair pool with N workers (the mount default
+    /// since the mounted-FUSE court sealed it; see the CLI flag docs in
+    /// `cli/mount.rs`). `None` keeps the 11C semaphore (forced with
+    /// `--no-worker-pool`).
     pub worker_pool_threads: Option<usize>,
 }
 

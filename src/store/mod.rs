@@ -4016,18 +4016,37 @@ impl Store {
             && !name.contains(&b'/')
     }
 
-    /// Get an xattr value (raw bytes; `None` when absent). Flushes the
-    /// active epoch first (xattrs live in committed inode trees).
+    /// Get an xattr value (raw bytes; `None` when absent). Reads the
+    /// committed inode's xattr tree WITHOUT flushing the epoch.
+    ///
+    /// # Why no flush
+    ///
+    /// xattrs are committed immediately (`set_xattr`/`remove_xattr` take
+    /// the transactional path), so the committed inode's `xattr_root` is
+    /// always the freshest; the epoch overlay is consulted only for inode
+    /// EXISTENCE (a pending inode shadows the committed one wholesale —
+    /// `Epoch::overlay_inode` — so a file created in this epoch must not
+    /// report "missing"). The old unconditional flush was the Phase-11E
+    /// checkpoint storm: the kernel probes security.capability / ACL xattrs
+    /// on every file creation, and each probe forced a FULL epoch
+    /// checkpoint (hundreds per parallel untar, each merging + rebuilding
+    /// trees) — which is also what widened the stale-root race window the
+    /// checkpoint's step 3.5 fix closes.
     pub fn get_xattr(&self, ino: u64, name: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
-        self.ensure_epoch_flushed(&crate::store::transaction::CrashHooks::none())?;
-        let inode = self
-            .get_inode(ino)?
+        let ep = self.epoch();
+        let _ = self
+            .get_inode_epoch(&ep, ino)?
             .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
-        if inode.xattr_root.is_zero() {
+        drop(ep);
+        let xattr_root = self
+            .get_inode(ino)?
+            .map(|i| i.xattr_root)
+            .unwrap_or(crate::core::extent::ChunkId::ZERO);
+        if xattr_root.is_zero() {
             return Ok(None);
         }
         Ok(index::get(
-            inode.xattr_root,
+            xattr_root,
             name,
             BTREE_ORDER,
             self.config.limits.max_fanout,
@@ -4094,21 +4113,27 @@ impl Store {
         Ok(true)
     }
 
-    /// List xattr names. Flushes the active epoch first.
+    /// List xattr names. Reads the committed inode's xattr tree WITHOUT
+    /// flushing the epoch (the `get_xattr` no-flush contract; xattrs are
+    /// committed immediately).
     pub fn list_xattr(&self, ino: u64) -> Result<Vec<Vec<u8>>, StoreError> {
-        self.ensure_epoch_flushed(&crate::store::transaction::CrashHooks::none())?;
-        let inode = self
-            .get_inode(ino)?
+        // Same no-flush contract as `get_xattr`: xattrs are committed
+        // immediately, so the committed inode's tree is authoritative; the
+        // overlay is checked for existence only.
+        let ep = self.epoch();
+        let _ = self
+            .get_inode_epoch(&ep, ino)?
             .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
-        if inode.xattr_root.is_zero() {
+        drop(ep);
+        let xattr_root = self
+            .get_inode(ino)?
+            .map(|i| i.xattr_root)
+            .unwrap_or(crate::core::extent::ChunkId::ZERO);
+        if xattr_root.is_zero() {
             return Ok(Vec::new());
         }
-        let entries = index::scan_all(
-            inode.xattr_root,
-            BTREE_ORDER,
-            self.config.limits.max_fanout,
-            self,
-        )?;
+        let entries =
+            index::scan_all(xattr_root, BTREE_ORDER, self.config.limits.max_fanout, self)?;
         Ok(entries.into_iter().map(|(k, _)| k).collect())
     }
 }
@@ -4839,6 +4864,57 @@ impl Store {
             }
             Ok::<(), StoreError>(())
         })?;
+
+        // 3.5. NEVER commit a stale data root from a pending inode.
+        //
+        // The epoch never rebuilds extent/directory trees — the checkpoint
+        // does (steps 2/3), and only for the files/dirs whose extents /
+        // entries are in THIS frozen snapshot. Every OTHER pending inode
+        // carries whatever root it copied at re-stage time — usually ZERO
+        // for an epoch-created file (the write/setattr re-reads the pending
+        // inode, which never has a tree). A re-staged inode can SURVIVE the
+        // checkpoint's compare-and-remove (its value no longer equals the
+        // frozen one when a concurrent op replaced it between the snapshot
+        // and the removal), and the NEXT checkpoint would then commit the
+        // stale root — orphaning the committed tree: the file keeps its
+        // size but its extents vanish (silent zero reads). The Phase-11E
+        // mount court found exactly this: parallel tar extractions lost
+        // ~10-16% of small files to "0 extents" while the getxattr storm
+        // fired a checkpoint every few ops. For every inode this checkpoint
+        // did NOT rebuild, the root must come from the COMMITTED inode (the
+        // tx's current view), falling back to ZERO when the committed inode
+        // is absent (an epoch-created file whose tree was never built).
+        for (ino, fin) in final_inodes.iter_mut() {
+            let rebuilt = match &fin.data {
+                InodeData::File { .. } => affected_files.contains(ino),
+                InodeData::Directory { .. } => affected_dirs.contains(ino),
+                _ => true, // symlinks/devices carry no tree root
+            };
+            if rebuilt {
+                continue;
+            }
+            if let Some(cur) = Store::inode_for_tx(&tx, *ino).ok() {
+                match (&mut fin.data, &cur.data) {
+                    (
+                        InodeData::File { extent_root },
+                        InodeData::File {
+                            extent_root: committed_root,
+                        },
+                    ) => {
+                        *extent_root = *committed_root;
+                    }
+                    (
+                        InodeData::Directory { dir_root },
+                        InodeData::Directory {
+                            dir_root: committed_root,
+                        },
+                    ) => {
+                        *dir_root = *committed_root;
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         // 4. Stage every final inode object (dedup against the log-staged
         //    records and the committed CAS) and build the inode-index
@@ -5707,8 +5783,27 @@ impl Store {
                 Store::put_inode_in_tx(tx, *parent, &pin)?;
             }
             crate::store::epoch::MutationOp::Setattr { ino, inode_id } => {
-                let inode = fetch_inode(tx, inode_id)?;
-                Store::put_inode_in_tx(tx, *ino, &inode)?;
+                // The log-staged inode carries the NEW attribute fields but
+                // its data ROOT is stale (the epoch never rebuilds
+                // extent/directory trees — the same invariant the Write arm
+                // below documents). Apply the attributes to the tx's CURRENT
+                // inode so the committed root survives. Applying the staged
+                // inode wholesale here was the Phase-11E corruption's SECOND
+                // vector: a setattr (tar's fchmod/futimens, or any
+                // mode/times update) replayed AFTER a write had rebuilt the
+                // tree overwrote the extent_root with ZERO, orphaning every
+                // extent — silent zero reads post-reopen. Regression-pinned
+                // by `tests::write_race`.
+                let staged = fetch_inode(tx, inode_id)?;
+                let mut cur = Store::inode_for_tx(tx, *ino)?;
+                cur.mode = staged.mode;
+                cur.uid = staged.uid;
+                cur.gid = staged.gid;
+                cur.size = staged.size;
+                cur.atime = staged.atime;
+                cur.mtime = staged.mtime;
+                cur.ctime = staged.ctime;
+                Store::put_inode_in_tx(tx, *ino, &cur)?;
             }
             crate::store::epoch::MutationOp::Unlink {
                 parent,
@@ -5732,7 +5827,17 @@ impl Store {
                 match child_inode_id {
                     Some(id) => {
                         let child_inode = fetch_inode(tx, id)?;
-                        Store::put_inode_in_tx(tx, *child, &child_inode)?;
+                        // Same stale-root rule as the Setattr arm: the
+                        // log-staged child inode's data root is unbuilt
+                        // (the epoch never rebuilds trees). The inode
+                        // survives this unlink (nlink > 0 — hard links),
+                        // so its committed root must be preserved or the
+                        // linked file's extents are orphaned (silent zero
+                        // reads after reopen).
+                        let mut cur = Store::inode_for_tx(tx, *child)?;
+                        let mut staged = child_inode;
+                        staged.data = cur.data;
+                        Store::put_inode_in_tx(tx, *child, &staged)?;
                     }
                     None => Store::remove_inode_in_tx(tx, *child)?,
                 }

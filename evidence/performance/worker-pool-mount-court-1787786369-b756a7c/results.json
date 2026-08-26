@@ -1,0 +1,95 @@
+{
+  "court": "phase-11e-mount-validation",
+  "rev": "b756a7c",
+  "machine": ": AMD Ryzen 7 9800X3D 8-Core Processor",
+  "threads": [
+    1,
+    4,
+    8,
+    16
+  ],
+  "decided_at_fuse_threads": 16,
+  "cleanliness": {
+    "semaphore@1": {
+      "readback": "OK",
+      "fsck": "OK"
+    },
+    "semaphore@4": {
+      "readback": "OK",
+      "fsck": "OK"
+    },
+    "semaphore@8": {
+      "readback": "OK",
+      "fsck": "OK"
+    },
+    "semaphore@16": {
+      "readback": "OK",
+      "fsck": "OK"
+    },
+    "pool-8@1": {
+      "readback": "OK",
+      "fsck": "OK"
+    },
+    "pool-8@4": {
+      "readback": "OK",
+      "fsck": "OK"
+    },
+    "pool-8@8": {
+      "readback": "OK",
+      "fsck": "OK"
+    },
+    "pool-8@16": {
+      "readback": "OK",
+      "fsck": "OK"
+    },
+    "pool-16@1": {
+      "readback": "OK",
+      "fsck": "OK"
+    },
+    "pool-16@4": {
+      "readback": "OK",
+      "fsck": "OK"
+    },
+    "pool-16@8": {
+      "readback": "OK",
+      "fsck": "OK"
+    },
+    "pool-16@16": {
+      "readback": "OK",
+      "fsck": "OK"
+    }
+  },
+  "gates": {
+    "pool-8": {
+      "parallel_write_tp_ratio": 0.979,
+      "parallel_read_tp_ratio": 1.031,
+      "serial_cp_tp_ratio": 1.054,
+      "serial_dd_tp_ratio": 0.968,
+      "latency_write_p95_ratio": 0.69,
+      "latency_write_p99_ratio": 0.552,
+      "battery_daemon_cpu_delta_pct": -10.8,
+      "clean": true,
+      "parallel_neutral_or_better": true,
+      "tail_improved": true,
+      "serial_no_regression": true,
+      "cpu_bounded": true,
+      "pass": true
+    },
+    "pool-16": {
+      "parallel_write_tp_ratio": 1.138,
+      "parallel_read_tp_ratio": 0.991,
+      "serial_cp_tp_ratio": 1.036,
+      "serial_dd_tp_ratio": 0.954,
+      "latency_write_p95_ratio": 0.61,
+      "latency_write_p99_ratio": 0.515,
+      "battery_daemon_cpu_delta_pct": 2.8,
+      "clean": true,
+      "parallel_neutral_or_better": true,
+      "tail_improved": true,
+      "serial_no_regression": true,
+      "cpu_bounded": true,
+      "pass": true
+    }
+  },
+  "decision": "POOL-16 BECOMES THE MOUNT DEFAULT"
+}

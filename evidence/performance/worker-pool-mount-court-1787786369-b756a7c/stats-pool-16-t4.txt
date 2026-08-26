@@ -1,0 +1,108 @@
+fuse requests: max concurrency 4
+  write        n=    3699 total=   8851.23 ms   p50=    167.3 p95=  11312.4 p99=  21218.6 us
+  readdir      n=     191 total=   1515.07 ms   p50=    160.1 p95=  18268.8 p99=  18618.0 us
+  create       n=    2180 total=    746.53 ms   p50=    105.5 p95=   1731.2 p99=   5078.4 us
+  lookup       n=    4818 total=    580.39 ms   p50=     23.4 p95=     87.5 p99=    372.0 us
+  fsync        n=      96 total=    534.66 ms   p50=   5082.2 p95=   7980.8 p99=  11019.2 us
+  read         n=    2317 total=    522.94 ms   p50=     46.7 p95=    599.5 p99=   2284.9 us
+  getattr      n=    3802 total=    462.32 ms   p50=     14.5 p95=     72.8 p99=    146.7 us
+  setattr      n=     841 total=    343.99 ms   p50=     54.4 p95=     85.7 p99=  14374.2 us
+  getxattr     n=    3008 total=    320.84 ms   p50=     29.2 p95=     95.5 p99=    195.1 us
+  link         n=       6 total=    120.81 ms   p50=  11017.1 p95=  42134.2 p99=  42134.2 us
+  rmdir        n=     186 total=     59.83 ms   p50=     14.1 p95=    258.8 p99=   7322.6 us
+  unlink       n=     216 total=     59.74 ms   p50=     12.1 p95=    146.2 p99=   4108.1 us
+  mkdir        n=     273 total=     47.96 ms   p50=     30.3 p95=    139.5 p99=   3795.6 us
+  open         n=     964 total=     31.07 ms   p50=      9.2 p95=     32.3 p99=     76.5 us
+  rename       n=     158 total=     13.12 ms   p50=     14.9 p95=     88.5 p99=    134.6 us
+  opendir      n=      98 total=      6.36 ms   p50=     17.3 p95=     94.4 p99=   1146.0 us
+  flush        n=    3218 total=      4.13 ms   p50=      0.5 p95=      1.0 p99=      2.0 us
+  release      n=    3144 total=      1.84 ms   p50=      0.4 p95=      1.3 p99=      2.3 us
+  releasedir   n=      98 total=      0.13 ms   p50=      1.0 p95=      2.4 p99=     11.5 us
+  statfs       n=       8 total=      0.06 ms   p50=      4.6 p95=     19.6 p99=     19.6 us
+  init         n=       1 total=      0.00 ms   p50=      0.1 p95=      0.1 p99=      0.1 us
+write request size histogram:
+         <4K: 2522
+       4-16K: 163
+      16-64K: 423
+     64-256K: 170
+     256K-1M: 156
+         =1M: 265
+         >1M: 0
+
+phase timings (cumulative ms, per-sample us p50/p95/p99):
+  search                       n=    9000 total=  10480.50 ms   p50=    250.2 p95=   3147.8 p99=   4545.3 us
+  worker_useful_cpu            n=    1951 total=   8311.27 ms   p50=    395.7 p95=  41272.6 p99=  42050.5 us
+  search_sequence_dict         n=    4129 total=   5852.25 ms   p50=   1651.4 p95=   2328.7 p99=   3532.4 us
+  prepare                      n=    3699 total=   4963.12 ms   p50=     41.7 p95=   6258.0 p99=  11623.9 us
+  search_sequence_rans         n=    5353 total=   2711.07 ms   p50=    570.3 p95=    991.0 p99=   1227.6 us
+  epoch_lock_wait              n=    7398 total=   2496.77 ms   p50=      0.0 p95=     74.5 p99=  17241.1 us
+  worker_scope_wall            n=    1951 total=   2371.35 ms   p50=    115.0 p95=   7943.1 p99=  12019.8 us
+  commit_lock_wait             n=    7540 total=   1127.76 ms   p50=      0.0 p95=   2136.6 p99=   5144.6 us
+  read_decode                  n=    4702 total=    632.75 ms   p50=     27.2 p95=    613.6 p99=   1742.0 us
+  search_configurational       n=    6468 total=    619.78 ms   p50=     36.5 p95=    363.5 p99=    710.0 us
+  search_byte_rans             n=    6252 total=    455.24 ms   p50=     22.2 p95=    280.6 p99=    321.3 us
+  validation                   n=    9000 total=    426.48 ms   p50=     17.5 p95=    268.5 p99=    758.0 us
+  prune                        n=     147 total=    221.03 ms   p50=   1606.6 p95=   1807.3 p99=   2197.8 us
+  barrier_sb_fsync             n=     127 total=    147.86 ms   p50=   1115.9 p95=   1675.1 p99=   1682.7 us
+  barrier_fdatasync            n=     127 total=    143.79 ms   p50=   1153.9 p95=   1736.1 p99=   4972.4 us
+  cp_lock_wait                 n=     119 total=    108.12 ms   p50=      0.3 p95=   3384.7 p99=   9069.2 us
+  search_zero_fill             n=    9000 total=    102.13 ms   p50=      0.0 p95=      1.3 p99=     28.8 us
+  barrier_commit_lock_wait     n=     127 total=    101.17 ms   p50=     16.5 p95=   3406.9 p99=   5083.1 us
+  cp_overlay_remove            n=     117 total=     67.70 ms   p50=      2.0 p95=    324.8 p99=  16429.8 us
+  worker_queue_wait            n=    1951 total=     59.40 ms   p50=      2.7 p95=     65.5 p99=    911.0 us
+  barrier_dir_sync             n=     127 total=     57.64 ms   p50=      3.1 p95=   1218.7 p99=   1774.7 us
+  append                       n=    7540 total=     40.57 ms   p50=      2.2 p95=     26.8 p99=     52.8 us
+  stage                        n=    3699 total=     40.28 ms   p50=      2.7 p95=     28.9 p99=    123.2 us
+  hash                         n=    8539 total=     38.05 ms   p50=      1.4 p95=      8.7 p99=     10.0 us
+  search_p0_bases              n=      45 total=     36.74 ms   p50=    841.8 p95=    989.5 p99=   1025.3 us
+  search_dedup                 n=    9000 total=     35.77 ms   p50=      4.6 p95=     15.2 p99=     23.5 us
+  inode_lock_wait              n=    3699 total=     34.33 ms   p50=      0.1 p95=      0.1 p99=      0.2 us
+  cp_extent_build              n=     117 total=     21.63 ms   p50=      9.3 p95=    506.3 p99=   4630.4 us
+  read_prefetch                n=    4702 total=     20.59 ms   p50=      1.5 p95=     16.3 p99=     32.7 us
+  flush                        n=    7540 total=     19.19 ms   p50=      0.9 p95=     13.3 p99=     21.4 us
+  append_flush                 n=     147 total=      8.28 ms   p50=     24.5 p95=    238.3 p99=    475.7 us
+  cp_dir_build                 n=     117 total=      6.83 ms   p50=     31.3 p95=    145.2 p99=    547.9 us
+  read_deps                    n=    4702 total=      4.98 ms   p50=      0.3 p95=      6.8 p99=     14.4 us
+  cp_chunk_apply               n=     117 total=      4.44 ms   p50=     12.4 p95=    189.6 p99=    242.0 us
+  cp_inode_apply               n=     117 total=      2.95 ms   p50=     19.6 p95=     51.5 p99=    104.9 us
+  cp_stage_inodes              n=     117 total=      1.48 ms   p50=      2.4 p95=     42.2 p99=    226.7 us
+  read_scan                    n=    1577 total=      1.25 ms   p50=      0.7 p95=      1.5 p99=      2.3 us
+  superblock                   n=     147 total=      0.43 ms   p50=      2.3 p95=      6.0 p99=      8.2 us
+  barrier_sb_write             n=     127 total=      0.43 ms   p50=      2.6 p95=      6.9 p99=     11.0 us
+  epoch_wait                   n=    7540 total=      0.15 ms   p50=      0.0 p95=      0.0 p99=      0.1 us
+  probe_pre_rans_cands         n=    9000 total=      0.01 ms   p50=      0.0 p95=      0.0 p99=      0.0 us
+  probe_decisive1              n=    9000 total=      0.00 ms   p50=      0.0 p95=      0.0 p99=      0.0 us
+  probe_dedup_hit              n=    9000 total=      0.00 ms   p50=      0.0 p95=      0.0 p99=      0.0 us
+  worker_tasks                 n=   10999 total=      0.00 ms   p50=      0.0 p95=      0.0 p99=      0.0 us
+
+request reconciliation (n=6143 requests, 10159.58 ms total):
+  phase                          total ms     share
+  prepare                         4963.12     48.9%
+  epoch_lock_wait                 2496.77     24.6%
+  read_decode                      632.73      6.2%
+  commit_lock_wait                 624.88      6.2%
+  prune                            150.58      1.5%
+  barrier_sb_fsync                 147.86      1.5%
+  barrier_fdatasync                143.79      1.4%
+  barrier_commit_lock_wait         101.17      1.0%
+  cp_lock_wait                      95.68      0.9%
+  barrier_dir_sync                  57.64      0.6%
+  stage                             40.28      0.4%
+  inode_lock_wait                   34.33      0.3%
+  cp_overlay_remove                 34.12      0.3%
+  append                            33.51      0.3%
+  read_prefetch                     20.59      0.2%
+  flush                             15.72      0.2%
+  cp_extent_build                    6.34      0.1%
+  read_deps                          4.98      0.0%
+  append_flush                       4.02      0.0%
+  cp_dir_build                       2.98      0.0%
+  cp_inode_apply                     2.08      0.0%
+  cp_chunk_apply                     1.98      0.0%
+  read_scan                          1.25      0.0%
+  cp_stage_inodes                    0.65      0.0%
+  barrier_sb_write                   0.43      0.0%
+  superblock                         0.23      0.0%
+  epoch_wait                         0.07      0.0%
+  unaccounted                      541.80      5.3%   <- residual (fuse/scheduler/other)
+  total                          10159.58    100.0%   <- sum(phases) + residual == total OK

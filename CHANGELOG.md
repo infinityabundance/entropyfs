@@ -1,5 +1,63 @@
 # EntropyFS changelog
 
+## v0.7.6 (2026-08-27)
+
+**11E1 — the mounted-FUSE court sealed the worker pool as the MOUNT
+DEFAULT, and the court exposed a real write-path data-loss bug that is
+now fixed.**
+
+- **The mounted-FUSE 11E court** (`tools/court-worker-pool-mount.sh`,
+  sealed `evidence/performance/worker-pool-mount-court-1787786369-*`):
+  semaphore / pool-8 / pool-16 at FUSE session threads 1/4/8/16 against a
+  13-workload battery (serial cp/dd controls, parallel writes/reads,
+  per-op latency drivers, namespace ops, tree copies, untar, make -j,
+  the bindgen cargo build, mixed readers+writers, fsync-heavy), with
+  byte-exact readback + fsck per cell. At 16 FUSE threads, pool-16 vs
+  the semaphore: parallel write +14%, latency-battery wall −26%, p95
+  −39%, p99 −48%, CPU +2.8%, serial controls neutral — and crash/fsck/
+  readback CLEAN at every cell. The brief's five gates all pass
+  (parallel neutral-or-better, p95/p99 materially improved, serial not
+  materially regressed, CPU bounded, cleanliness clean). **The FUSE
+  mount now enables the pool by default** (`available_parallelism()`
+  workers; `--worker-pool N` sizes it explicitly; `--no-worker-pool`
+  restores the 11C semaphore as the fallback).
+- **The data-loss bug the court found (and why the court exists).** The
+  untar workload's readback failed: parallel tar extractions lost
+  ~10-45% of small files' EXTENTS — the inode size survived but the
+  committed extent tree was empty (silent zero reads; fsck-clean
+  because the binding was internally consistent). Root cause, in three
+  parts, each fixed and regression-pinned in
+  `src/tests/write_race.rs` (new, +2 lib tests):
+  1. **Stale-root checkpoint commit.** The epoch never rebuilds
+     extent/directory trees — the checkpoint does, and only for the
+     files/dirs whose extents/entries are in ITS frozen snapshot. A
+     pending inode re-staged by a concurrent op (a write's block-B
+     re-read, a setattr) carries a stale (usually ZERO) root and could
+     survive the compare-and-remove; the next checkpoint committed it,
+     orphaning the committed tree. Fixed in `epoch_checkpoint` step
+     3.5: never commit a data root this checkpoint did not rebuild —
+     resolve it from the committed inode.
+  2. **Replay applied log-staged inodes wholesale.** The recovery
+     replay's `Setattr` arm (and the `Unlink` child path) put the
+     log-staged inode into the tree verbatim — including its stale
+     ZERO root — wiping the tree a preceding write-replay had just
+     built (tar's fchmod/futimens after each write made this nearly
+     deterministic). Fixed: replay applies the attribute fields to the
+     tx's current inode, preserving the committed data root, exactly
+     like the `Write` arm already did.
+  3. **The getxattr checkpoint storm (the amplifier).** `get_xattr` /
+     `list_xattr` flushed the epoch on every call; the kernel probes
+     security.capability / ACL xattrs on every file creation, so a
+     parallel untar fired hundreds of full checkpoints, each widening
+     the race window (and costing real throughput). Fixed: xattr reads
+     are committed-side reads (xattrs are committed immediately) with
+     an overlay existence check only.
+- The store-level write path was already correct: a direct concurrent
+  `epoch_write` + reopen+replay round-trip is byte-exact (the corruption
+  required the checkpoint/replay interplay the court's untar workload
+  exercises). 423 lib tests green; the mount court's readback+fsck
+  cleanliness now passes at every cell.
+
 ## v0.7.5 (2026-08-26)
 
 **Ultra-verbose commentary doctrine — applied repository-wide.** The

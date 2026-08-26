@@ -24,7 +24,8 @@
 //! One process, one mount session. `run` blocks until the session's
 //! guard finishes (unmount elsewhere) or a signal flips the `AtomicBool`
 //! stop flag, polling every 100 ms; then `umount_and_join` performs the
-//! clean teardown. The worker pool (Phase-11E, off by default) is
+//! clean teardown. The worker pool (Phase-11E, the mount default since
+//! the mounted-FUSE court sealed it) is
 //! disabled only after the session ends so no worker outlives the store.
 //!
 //! # KEY INVARIANTS
@@ -92,12 +93,20 @@ pub struct MountArgs {
     pub io_uring_entries: u32,
     /// Phase-11E worker pool: route the search/decode work through the
     /// persistent FAIR worker pool with N threads (capacity 8x N) instead
-    /// of the 11C batch semaphore. Probe-sealed (pool-16 cuts 16-writer
-    /// p99 178 -> ~80 ms and wall ~1.14 -> ~0.79 s at +2.6-3.7% useful
-    /// CPU). Default: off (the semaphore), pending the mounted-FUSE
-    /// validation.
+    /// of the 11C batch semaphore. The mounted-FUSE 11E court sealed the
+    /// pool as the MOUNT DEFAULT (pool-16: parallel write +14%, latency-
+    /// battery wall −26%, p95 −39%, p99 −48%, CPU +2.8%, crash/fsck/
+    /// readback clean at 1/4/8/16 FUSE threads —
+    /// `evidence/performance/worker-pool-mount-court-*/`). Without the
+    /// flag the pool runs with `available_parallelism()` workers (the
+    /// adopted pool-16 config on this machine); `--no-worker-pool` forces
+    /// the 11C semaphore (the fallback).
     #[arg(long, value_name = "N")]
     pub worker_pool: Option<usize>,
+    /// Force the Phase-11C batch semaphore (disable the Phase-11E worker
+    /// pool, the mount default since the mounted-FUSE court sealed it).
+    #[arg(long)]
+    pub no_worker_pool: bool,
 }
 
 /// Run the mount daemon.
@@ -116,6 +125,19 @@ pub fn run(args: &MountArgs) -> Result<(), String> {
     config.io_backend = crate::store::io::IoBackendKind::parse(&args.io_backend)?;
     config.io_uring_entries = args.io_uring_entries;
     let store = Store::open(&args.store, &config).map_err(|e| e.to_string())?;
+    // Phase-11E default flip (sealed by the mounted-FUSE court): the pool
+    // is ON by default with available_parallelism() workers; the semaphore
+    // remains reachable via --no-worker-pool (the fallback) and via
+    // --worker-pool N for an explicit size.
+    let pool_threads = if args.no_worker_pool {
+        None
+    } else {
+        Some(args.worker_pool.unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(4)
+        }))
+    };
     let params = MountParams {
         store_dir: args.store.clone(),
         mountpoint: args.mountpoint.clone(),
@@ -125,7 +147,7 @@ pub fn run(args: &MountArgs) -> Result<(), String> {
         fs_name: args.fs_name.clone(),
         background_optimize: !args.no_background_optimize,
         stats_file: args.stats_file.clone(),
-        worker_pool_threads: args.worker_pool,
+        worker_pool_threads: pool_threads,
     };
     let session = do_mount(&params, store).map_err(|e| e.to_string())?;
     println!(

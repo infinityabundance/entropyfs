@@ -51,14 +51,19 @@ For sealed performance and experimental evidence, see
 
 ### Current development focus
 
-- Latest completed phase: **11E — the persistent fair worker pool**
-  (probe-sealed, KEPT: at 16 writers, wall −29%, p99 −68% (78 vs 241 ms),
-  max request slowdown 18× vs 47×, at +2.6–3.7% useful CPU; see
+- Latest completed phase: **11E/11E1 — the persistent fair worker pool**
+  (probe-sealed, KEPT; then the mounted-FUSE court sealed it as the
+  MOUNT DEFAULT: at 16 FUSE threads, parallel write +14%, p95 −39%, p99
+  −48%, CPU +2.8%, crash/fsck/readback clean; see
   `docs/performance/worker-pool-probe.md` and
-  `evidence/performance/worker-pool-probe-1787769464-8fdea62/`).
-- Current decision: the 11C semaphore remains the mount default until the
-  mounted-FUSE court validates the pool end-to-end (`--worker-pool N`
-  opts in now); the DSFB observer shard (11F) is the identified follow-up.
+  `evidence/performance/worker-pool-mount-court-1787786369-b756a7c/`).
+  The court also exposed and fixed a real write-path data-loss bug (the
+  checkpoint committed stale pending data roots; replay applied
+  log-staged inodes wholesale) amplified by a getxattr checkpoint storm.
+- Current decision: the pool is the mount default
+  (`available_parallelism()` workers; `--no-worker-pool` restores the 11C
+  semaphore as the fallback); the DSFB observer shard (11F) is the
+  identified follow-up.
 - Persistent format: explicit, versioned, incompat-feature-gated.
 - Correctness: crash courts + hostile-media court + fsck, byte-exact
   read-back under every scheduler.

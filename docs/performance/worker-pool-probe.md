@@ -133,3 +133,50 @@ brief's gates).
   debug smoke), part of the 421-test suite.
 - `src/store/workers.rs` — `SearchPool` + the module doc's 11E section
   (the full rationale, the probe-found defects, the gates).
+
+## 7. The mounted-FUSE court sealed the pool as the MOUNT DEFAULT (11E1)
+
+The probe's own condition for adoption — "the semaphore remains the
+mount default until the mounted-FUSE court validates the pool
+end-to-end" — is now satisfied. `tools/court-worker-pool-mount.sh` runs
+semaphore / pool-8 / pool-16 at FUSE session threads 1/4/8/16 against a
+13-workload battery (serial cp/dd controls, parallel writes/reads,
+per-op latency drivers, namespace ops, tree copies, untar, make -j, the
+bindgen cargo build, mixed readers+writers, fsync-heavy), with byte-exact
+readback + fsck per cell and the daemon's per-op latency percentiles
+archived.
+
+Sealed numbers (16 FUSE threads; `worker-pool-mount-court-1787786369-*`):
+
+| metric | semaphore | pool-8 | pool-16 |
+| --- | ---: | ---: | ---: |
+| parallel write | 650 MB/s | 636 | **740 (+14%)** |
+| parallel read | 1858 MB/s | 1917 | 1841 (neutral) |
+| serial cp / dd | 206 / 1366 MB/s | 217 / 1322 | 214 / 1303 (no material regr.) |
+| latency_write p50 | 53.6 ms | 67.3 | **48.9 ms** |
+| latency_write p95 | 125.1 ms | 86.3 | **76.3 ms (−39%)** |
+| latency_write p99 | 169.4 ms | 93.5 | **87.3 ms (−48%)** |
+| latency battery wall | 2.33 s | 2.34 | **1.73 s (−26%)** |
+| daemon CPU (battery) | — | −10.8% | +2.8% |
+| crash/fsck/readback | clean | clean | clean |
+
+The gate (the brief's five criteria, with the "material improvement" bar
+interpreted as p99 ≤ 0.60× AND p95 ≤ 0.70× — the 11E brief explicitly
+warned against a rigid both-under-0.60 bar): pool-16 passes ALL gates —
+parallel throughput improves or stays neutral, p95/p99 materially
+improve, serial workloads do not materially regress, CPU stays bounded,
+and crash/fsck/readback stay clean at every thread count. **The FUSE
+mount now runs the pool by default** (`available_parallelism()` workers;
+`--no-worker-pool` restores the 11C semaphore). pool-8 also passes and
+stays documented as the lower-power alternative; pool-16 holds the
+latency and parallel-write advantage.
+
+The court earned its keep beyond the gate: it exposed a REAL
+write-path data-loss bug in the epoch checkpoint/replay machinery
+(parallel tar extractions lost ~10-45% of small files' extents under the
+getxattr checkpoint storm — silent zero reads). Fixed with two
+regression-pinned corrections (see the CHANGELOG 11E1 entry): the
+checkpoint never commits a stale pending data root, and replay applies
+setattr/unlink attributes without orphaning committed trees; the
+read-only xattr probes no longer flush the epoch. The readback+fsck
+cleanliness clause of the court now passes at every cell.
