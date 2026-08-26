@@ -274,6 +274,12 @@ impl<'a> Tx<'a> {
     /// incompressible backing floor). Walk the final root's graph over the
     /// pending+committed state and keep only reachable records.
     ///
+    /// Phase-10F: the walk is LEVEL-ORDER with ONE `read_many` per tree
+    /// level (committed node fetches of a whole level batch into a single
+    /// backend submission), plus one batched inode fetch per level — the
+    /// reachability SET is order-independent, so the result is identical
+    /// to the per-node fetch walk; only the fetch pattern changed.
+    ///
     /// Correctness: records are immutable and content-addressed; a record
     /// dropped here was never referenced by the final root, and if a later
     /// transaction needs it, it stages it fresh (it is not in the object
@@ -291,14 +297,49 @@ impl<'a> Tx<'a> {
             work.push((self.root.model_index_root, TreeKind::ChunkIndex));
         }
         let limits = *self.store.limits();
-        while let Some((id, kind)) = work.pop() {
-            if id.is_zero() || !reachable.insert(id) {
-                continue;
+        while !work.is_empty() {
+            // One tree level at a time: the whole level's committed
+            // fetches batch into a single read_many.
+            let level: Vec<(ChunkId, TreeKind)> = std::mem::take(&mut work);
+            let mut entries: Vec<(ChunkId, TreeKind, Vec<u8>)> = Vec::with_capacity(level.len());
+            let mut to_fetch: Vec<ChunkId> = Vec::new();
+            let mut fetch_idx: Vec<usize> = Vec::new();
+            for (id, kind) in level {
+                if id.is_zero() || !reachable.insert(id) {
+                    continue;
+                }
+                match self.pending.get(&id) {
+                    Some(bytes) => entries.push((id, kind, bytes.clone())),
+                    None => {
+                        fetch_idx.push(entries.len());
+                        entries.push((id, kind, Vec::new()));
+                        to_fetch.push(id);
+                    }
+                }
             }
-            if kind == TreeKind::Root {
-                // A filesystem ROOT object, not a tree node.
-                if let Some(bytes) = self.fetch_pending_or_store(&id)? {
-                    if let Ok(root) = Root::decode(&bytes) {
+            let fetched = self.store.fetch_objects_many(&to_fetch);
+            for (i, r) in fetched.into_iter().enumerate() {
+                match r {
+                    Ok(Some(bytes)) => {
+                        let ei = fetch_idx[i];
+                        entries[ei].2 = bytes;
+                    }
+                    Ok(None) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            // Process the level: roots and tree nodes, collecting inode
+            // ids for one batched inode fetch per level.
+            let mut inode_ids: Vec<ChunkId> = Vec::new();
+            let mut inode_slots: Vec<(usize, ChunkId)> = Vec::new();
+            let mut inode_pending: Vec<(usize, ChunkId, Vec<u8>)> = Vec::new();
+            for (i, (_id, kind, bytes)) in entries.iter_mut().enumerate() {
+                if *kind == TreeKind::Root {
+                    // A filesystem ROOT object, not a tree node.
+                    if bytes.is_empty() {
+                        continue;
+                    }
+                    if let Ok(root) = Root::decode(bytes) {
                         work.push((root.inode_index_root, TreeKind::InodeIndex));
                         work.push((root.chunk_index_root, TreeKind::ChunkIndex));
                         if !root.snapshot_tree_root.is_zero() {
@@ -308,79 +349,102 @@ impl<'a> Tx<'a> {
                             work.push((root.model_index_root, TreeKind::ChunkIndex));
                         }
                     }
+                    continue;
                 }
-                continue;
-            }
-            let Some(payload) = self.fetch_pending_or_store(&id)? else {
-                continue;
-            };
-            let node = crate::store::index::Node::decode(
-                &payload,
-                crate::store::BTREE_ORDER,
-                limits.max_fanout,
-            )
-            .map_err(|e| StoreError::Index(e.to_string()))?;
-            match node {
-                crate::store::index::Node::Internal {
-                    first_child,
-                    entries,
-                } => {
-                    work.push((first_child, kind));
-                    for e in entries {
-                        let child =
-                            ChunkId::new(e.value.as_slice().try_into().expect("32-byte child id"));
-                        work.push((child, kind));
+                if bytes.is_empty() {
+                    continue; // committed node missing: unreachable in practice
+                }
+                let node = crate::store::index::Node::decode(
+                    bytes,
+                    crate::store::BTREE_ORDER,
+                    limits.max_fanout,
+                )
+                .map_err(|e| StoreError::Index(e.to_string()))?;
+                match node {
+                    crate::store::index::Node::Internal {
+                        first_child,
+                        entries: node_entries,
+                    } => {
+                        work.push((first_child, *kind));
+                        for e in node_entries {
+                            let child = ChunkId::new(
+                                e.value.as_slice().try_into().expect("32-byte child id"),
+                            );
+                            work.push((child, *kind));
+                        }
                     }
-                }
-                crate::store::index::Node::Leaf { entries } => {
-                    for e in entries {
-                        match kind {
-                            TreeKind::InodeIndex => {
-                                let inode_id =
-                                    ChunkId::new(e.value.as_slice().try_into().map_err(|_| {
-                                        StoreError::Invariant("inode value not 32 bytes".into())
-                                    })?);
-                                if reachable.insert(inode_id) {
-                                    if let Some(bytes) = self.fetch_pending_or_store(&inode_id)? {
-                                        if let Ok(inode) = Inode::decode(&bytes) {
-                                            if !inode.xattr_root.is_zero() {
-                                                work.push((inode.xattr_root, TreeKind::Xattr));
-                                            }
-                                            match inode.data {
-                                                InodeData::Directory { dir_root }
-                                                    if !dir_root.is_zero() =>
-                                                {
-                                                    work.push((dir_root, TreeKind::Directory));
-                                                }
-                                                InodeData::File { extent_root }
-                                                    if !extent_root.is_zero() =>
-                                                {
-                                                    work.push((extent_root, TreeKind::Extent));
-                                                }
-                                                _ => {}
+                    crate::store::index::Node::Leaf {
+                        entries: leaf_entries,
+                    } => {
+                        for e in leaf_entries {
+                            match kind {
+                                TreeKind::InodeIndex => {
+                                    let inode_id = ChunkId::new(
+                                        e.value.as_slice().try_into().map_err(|_| {
+                                            StoreError::Invariant("inode value not 32 bytes".into())
+                                        })?,
+                                    );
+                                    if reachable.insert(inode_id) {
+                                        match self.pending.get(&inode_id) {
+                                            Some(b) => inode_pending.push((i, inode_id, b.clone())),
+                                            None => {
+                                                inode_slots.push((i, inode_id));
+                                                inode_ids.push(inode_id);
                                             }
                                         }
                                     }
                                 }
-                            }
-                            TreeKind::Extent | TreeKind::ChunkIndex => {
-                                // Descriptor values: the objects they
-                                // reference must stay (their records may be
-                                // staged in this transaction).
-                                for oid in descriptor_object_ids(&e.value, &limits) {
-                                    reachable.insert(oid);
+                                TreeKind::Extent | TreeKind::ChunkIndex => {
+                                    // Descriptor values: the objects they
+                                    // reference must stay (their records
+                                    // may be staged in this transaction).
+                                    for oid in descriptor_object_ids(&e.value, &limits) {
+                                        reachable.insert(oid);
+                                    }
                                 }
-                            }
-                            TreeKind::Directory | TreeKind::Xattr => {}
-                            TreeKind::Snapshot => {
-                                if let Ok(entry) =
-                                    crate::store::snapshot::SnapshotEntry::decode(&e.value)
-                                {
-                                    work.push((entry.root_id, TreeKind::Root));
+                                TreeKind::Directory | TreeKind::Xattr => {}
+                                TreeKind::Snapshot => {
+                                    if let Ok(entry) =
+                                        crate::store::snapshot::SnapshotEntry::decode(&e.value)
+                                    {
+                                        work.push((entry.root_id, TreeKind::Root));
+                                    }
                                 }
+                                TreeKind::Root => {}
                             }
-                            TreeKind::Root => {}
                         }
+                    }
+                }
+            }
+            // One batched inode fetch for this level's inode-index leaves.
+            let inode_fetched = self.store.fetch_objects_many(&inode_ids);
+            let mut inode_results: Vec<(usize, Vec<u8>)> = inode_pending
+                .into_iter()
+                .map(|(_ei, _id, bytes)| (_ei, bytes))
+                .collect();
+            for (i, r) in inode_fetched.into_iter().enumerate() {
+                match r {
+                    Ok(Some(bytes)) => {
+                        let (ei, _id) = inode_slots[i];
+                        inode_results.push((ei, bytes));
+                    }
+                    Ok(None) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            for (_ei, bytes) in inode_results {
+                if let Ok(inode) = Inode::decode(&bytes) {
+                    if !inode.xattr_root.is_zero() {
+                        work.push((inode.xattr_root, TreeKind::Xattr));
+                    }
+                    match inode.data {
+                        InodeData::Directory { dir_root } if !dir_root.is_zero() => {
+                            work.push((dir_root, TreeKind::Directory));
+                        }
+                        InodeData::File { extent_root } if !extent_root.is_zero() => {
+                            work.push((extent_root, TreeKind::Extent));
+                        }
+                        _ => {}
                     }
                 }
             }

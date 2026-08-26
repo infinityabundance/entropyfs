@@ -357,41 +357,52 @@ fn read_id(r: &mut Reader<'_>) -> Result<ChunkId, CodecError> {
     Ok(ChunkId::new(r.take(32)?.try_into().unwrap()))
 }
 
-/// A `DecoderContext` that resolves chunk descriptors through the ACTIVE
-/// EPOCH first (the committed chunk index second): the overlay read path
-/// materializes pending extents whose descriptors reference pending chunks
-/// (in-batch SequenceDict chains, EXACT_REF aliases) that the committed
-/// index does not know yet. Objects resolve through the store (the epoch's
-/// log append registered every staged object in the object index
-/// immediately).
-pub struct EpochContext<'a> {
+/// A `DecoderContext` that serves PREFETCHED objects (Phase-10F
+/// `read_many`: one submission queue for a materialization's model/stream/
+/// dictionary/descriptor dependencies) and resolves chunk descriptors
+/// through the ACTIVE EPOCH first (the committed chunk index second).
+///
+/// Objects not in the prefetch map fall back to the store — the batch is
+/// an optimization, never a correctness dependency. The epoch overlay is
+/// optional: the committed read path passes `None`; the FUSE read path
+/// passes the active epoch so pending descriptors (in-batch SequenceDict
+/// chains, EXACT_REF aliases) resolve before the committed index.
+pub struct PrefetchContext<'a> {
     store: &'a crate::store::Store,
-    ep: &'a Epoch,
+    objects: &'a std::collections::HashMap<crate::core::extent::ChunkId, Vec<u8>>,
+    ep: Option<&'a Epoch>,
 }
 
-impl<'a> EpochContext<'a> {
-    /// Build the epoch-aware decoder context.
-    pub fn new(store: &'a crate::store::Store, ep: &'a Epoch) -> Self {
-        Self { store, ep }
+impl<'a> PrefetchContext<'a> {
+    /// Build the prefetch context.
+    pub fn new(
+        store: &'a crate::store::Store,
+        objects: &'a std::collections::HashMap<crate::core::extent::ChunkId, Vec<u8>>,
+        ep: Option<&'a Epoch>,
+    ) -> Self {
+        Self { store, objects, ep }
     }
 }
 
-impl crate::core::materialize::DecoderContext for EpochContext<'_> {
+impl crate::core::materialize::DecoderContext for PrefetchContext<'_> {
     fn fetch_object(
         &self,
-        id: &ChunkId,
+        id: &crate::core::extent::ChunkId,
     ) -> Result<Vec<u8>, crate::core::materialize::MaterializeError> {
+        if let Some(b) = self.objects.get(id) {
+            return Ok(b.clone());
+        }
         self.store.fetch_object_impl(id)
     }
 
     fn fetch_descriptor(
         &self,
-        id: &ChunkId,
+        id: &crate::core::extent::ChunkId,
     ) -> Result<
         crate::core::representation::Representation,
         crate::core::materialize::MaterializeError,
     > {
-        if let Some(bytes) = self.ep.overlay_chunk(id) {
+        if let Some(bytes) = self.ep.and_then(|e| e.overlay_chunk(id)) {
             let limits = *self.store.limits();
             return crate::format::descriptor::decode(
                 &bytes,

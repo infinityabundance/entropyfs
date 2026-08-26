@@ -29,7 +29,12 @@ pub fn run() -> Result<(), String> {
     );
     println!("rANS backends: ryg-rans-rs 0.5.1 (byte, interleaved2; scalar authority)");
     println!("DSFB observer: dsfb 0.1.2 (zero decoding authority)");
-    println!("unsafe code: none (#![forbid(unsafe_code)])");
+    println!(
+        "storage transport (Phase 10F): SyncIo (reference path, default) | UringIo (io_uring)"
+    );
+    println!(
+        "safety ledger: 1 confined file (platform/io_uring.rs; see docs/security/unsafe-ledger.md)"
+    );
     println!();
     println!(
         "/dev/fuse: {}",
@@ -59,6 +64,12 @@ pub fn run() -> Result<(), String> {
             "disabled (informational)"
         }
     );
+    // Phase 10F: probe the io_uring transport (the UringIo backend).
+    match crate::platform::io_uring::Uring::new(8) {
+        Ok(_) => println!("io_uring transport: available"),
+        Err(e) => println!("io_uring transport: UNAVAILABLE ({e})"),
+    }
+    println!("io_uring ops: READ/WRITE (kernel 5.6+), FSYNC (5.1+), UNLINKAT (5.11+)");
     if !avail.ready() {
         for d in avail.diagnose() {
             println!("  note: {d}");

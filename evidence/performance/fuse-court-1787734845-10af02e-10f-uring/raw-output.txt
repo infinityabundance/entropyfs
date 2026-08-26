@@ -1,0 +1,40 @@
+=== EntropyFS FUSE perf court ===
+revision: 10af02e
+binary: target/release/entropyfs
+timestamp: 1787734845
+store: /tmp/efs10f-final-uring-store
+mountpoint: /tmp/efs10f-final-uring-mnt
+size: 64 MiB
+label: 10f-uring
+io backend: uring
+
+kernel: 7.2.0-1-cachyos
+governor: performance
+cpu: AMD Ryzen 7 9800X3D 8-Core Processor (16 threads)
+memory: 131533140 KiB
+backing device: tmpfs (tmpfs, st_dev 48)
+
+created entropyfs store at /tmp/efs10f-final-uring-store (uuid 88e4b8eb4c5d43a731741ccd47767046)
+entropyfs mounted: /tmp/efs10f-final-uring-store -> /tmp/efs10f-final-uring-mnt (pid 295990)
+mounted (daemon pid 295990)
+
+payload: 67108864 bytes shake_128 (deterministic, incompressible)
+--- 4K sync writes (write-through path, dsync) ---
+4K dsync writes: 1.8 MiB/s (35500028319ns wall, 16384 ops, 2167 µs/op incl. per-op fsync)
+--- 4K buffered writes (single trailing fsync) ---
+4K buffered writes: 139.0 MiB/s (460588643ns wall + trailing fsync)
+--- 1M writes ---
+1M writes: 244.4 MiB/s (261851106ns wall + fsync)
+--- fsync latency (10 fsyncs of the 1M file) ---
+fsync latency µs p50/p95/p99: 21 42 42
+--- sequential read (warm) ×3 ---
+warm sequential read: 1959.7 MiB/s (best of 3)
+--- cold read ---
+cold read skipped: not root or drop_caches unavailable (cache state: warm (retained page cache))
+--- read-latency percentiles (64× 1M reads) ---
+1M read latency µs p50/p95/p99: 1190 1354 1487
+
+unmounted cleanly
+device delta: writes=0 sectors, reads=0 sectors (tmpfs)
+evidence written: /mnt/1tb_kingston/entropyfs/evidence/performance/fuse-court-1787734845-10af02e-10f-uring/
+=== court complete ===

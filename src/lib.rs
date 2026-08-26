@@ -8,9 +8,13 @@
 //!
 //! # Safety
 //!
-//! `#![forbid(unsafe_code)]` is crate-wide. Any future exception is confined
-//! to `platform` and must be recorded in `docs/security/unsafe-ledger.md`.
-#![forbid(unsafe_code)]
+//! `#![forbid(unsafe_code)]` applies to every module in the crate, with
+//! ONE designated exception: `platform::io_uring` (the io_uring submission
+//! ring is kernel-shared memory; pushing an SQE is inherently `unsafe`).
+//! The crate root carries `#![deny(unsafe_code)]` as the backstop, and a
+//! test walks `src/` asserting the set of files containing `unsafe` equals
+//! the ledger's file list (`docs/security/unsafe-ledger.md`).
+#![deny(unsafe_code)]
 #![deny(rust_2018_idioms)]
 #![warn(missing_docs)]
 

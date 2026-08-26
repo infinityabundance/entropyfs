@@ -4,16 +4,25 @@
 //! `fdatasync` before a superblock flip. Recovery scans segments forward;
 //! a torn tail (partial write) is detected by envelope validation and
 //! ignored.
+//!
+//! Phase 10F (ADR-0021): the writer is transport-agnostic — it buffers
+//! encoded records and issues the file operations through the store's
+//! [`crate::store::io::IoBackend`] (`SyncIo` reference path / `UringIo`
+//! performance path). The buffering and durability semantics are exactly
+//! the pre-10F engine's.
 
 #![forbid(unsafe_code)]
 
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::format::codec::CodecError;
 use crate::format::record;
 use crate::format::version::SEGMENT_MAGIC;
+use crate::store::StoreError;
+use crate::store::io::IoBackend;
 
 /// Store error type (typed; never panics on corrupt input).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +53,12 @@ impl From<std::io::Error> for SegmentError {
     }
 }
 
+impl From<StoreError> for SegmentError {
+    fn from(e: StoreError) -> Self {
+        SegmentError::Io(e.to_string())
+    }
+}
+
 /// Segment file name for a sequence number.
 pub fn segment_file_name(seq: u64) -> String {
     format!("{seq:016}.seg")
@@ -55,10 +70,11 @@ pub fn segment_path(dir: &Path, seq: u64) -> PathBuf {
 }
 
 /// The current segment: appends records, tracks the write position, and
-/// flushes durably on commit.
+/// flushes durably on commit. The backing file operations go through the
+/// store's [`IoBackend`] (Phase 10F).
 pub struct SegmentWriter {
     seq: u64,
-    file: File,
+    io: Arc<dyn IoBackend>,
     /// Buffered bytes not yet written to the file.
     buffer: Vec<u8>,
     /// The durable end of the file (== file length).
@@ -72,40 +88,16 @@ impl SegmentWriter {
     ///
     /// On an existing file, any torn tail (records that do not validate to
     /// a clean boundary) is truncated so new appends never follow garbage
-    /// (`docs/recovery/crash-consistency.md` §6).
-    pub fn open(dir: &Path, seq: u64) -> Result<Self, SegmentError> {
-        let path = segment_path(dir, seq);
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&path)?;
-        let file_len = file.metadata()?.len();
-        if file_len == 0 {
-            // New segment: write the 4-byte magic header.
-            file.write_all(&SEGMENT_MAGIC)?;
-            file.sync_all()?;
-        } else {
-            let mut magic = [0u8; 4];
-            file.seek(SeekFrom::Start(0))?;
-            file.read_exact(&mut magic)?;
-            if magic != SEGMENT_MAGIC {
-                return Err(SegmentError::Malformed);
-            }
-            // Truncate a torn tail: find the last clean record boundary.
-            let clean_end = find_clean_end(&mut file)?;
-            if clean_end < file_len {
-                file.set_len(clean_end)?;
-                file.sync_data()?;
-            }
-        }
-        let file_len = file.metadata()?.len();
+    /// (`docs/recovery/crash-consistency.md` §6). The backend performs the
+    /// magic write / torn-tail truncation with the exact pre-10F
+    /// durability semantics.
+    pub fn open(io: &Arc<dyn IoBackend>, seq: u64) -> Result<Self, SegmentError> {
+        let durable_end = io.open_segment(seq)?;
         Ok(Self {
             seq,
-            file,
+            io: io.clone(),
             buffer: Vec::new(),
-            durable_end: file_len.max(4),
+            durable_end: durable_end.max(4),
             record_count: 0,
         })
     }
@@ -126,28 +118,22 @@ impl SegmentWriter {
         self.buffer.len() as u64
     }
 
-    /// Flush buffered bytes to the file (not yet durable).
+    /// Flush buffered bytes to the file (not yet durable): one offset-based
+    /// write at the durable end (pwrite through the backend; the pre-10F
+    /// `seek → write_all` equivalent).
     pub fn flush(&mut self) -> Result<(), SegmentError> {
         if self.buffer.is_empty() {
             return Ok(());
         }
         let buf = std::mem::take(&mut self.buffer);
-        self.file.seek(SeekFrom::Start(self.durable_end))?;
-        self.file.write_all(&buf)?;
+        self.io.write_at(self.seq, self.durable_end, &buf)?;
         self.durable_end += buf.len() as u64;
         Ok(())
     }
 
     /// Make all flushed data durable (`fdatasync`).
     pub fn fdatasync(&self) -> Result<(), SegmentError> {
-        self.file.sync_data()?;
-        Ok(())
-    }
-
-    /// Durability barrier for a new segment file's directory entry.
-    pub fn sync_dir(dir: &Path) -> Result<(), SegmentError> {
-        let dir_file = File::open(dir.join("segments"))?;
-        dir_file.sync_all()?;
+        self.io.fdatasync_segment(self.seq)?;
         Ok(())
     }
 
@@ -183,28 +169,17 @@ impl ScanRecord {
     }
 }
 
-/// Find the last clean record boundary in a segment file (the offset at
-/// which sequential record validation first fails, or EOF).
-fn find_clean_end(file: &mut File) -> Result<u64, SegmentError> {
+/// Find the last clean record boundary in segment bytes (the offset at
+/// which sequential record validation first fails, or EOF). The pure
+/// form lives in `store::io` (shared by both backends); this file-based
+/// reader is retained for compatibility with path-based scans.
+#[allow(dead_code)]
+fn find_clean_end(file: &mut std::fs::File) -> Result<u64, SegmentError> {
     use std::io::Read;
     file.seek(SeekFrom::Start(0))?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
-    if bytes.len() < 4 {
-        return Ok(bytes.len() as u64);
-    }
-    let mut offset = 4u64;
-    while offset < bytes.len() as u64 {
-        match record::decode(&bytes, offset) {
-            Ok(Some(rec)) => {
-                offset = offset
-                    .checked_add(rec.total_size())
-                    .ok_or(SegmentError::Overflow)?;
-            }
-            Ok(None) | Err(_) => break,
-        }
-    }
-    Ok(offset)
+    crate::store::io::find_clean_end_bytes(&bytes)
 }
 
 /// Scan a segment file sequentially, validating every record envelope.
@@ -359,7 +334,16 @@ mod tests {
     use super::*;
     use crate::format::record::{FLAG_HAS_MATERIALIZED_LEN, encode};
     use crate::format::version::RecordTag;
+    use crate::store::io::sync::SyncIo;
+    use std::io::Write;
     use tempfile::TempDir;
+
+    /// Test helper: a backend-driven writer over a temp store dir.
+    fn writer_for(tmp: &TempDir, seq: u64) -> SegmentWriter {
+        std::fs::create_dir_all(tmp.path().join("segments")).unwrap();
+        let io: Arc<dyn IoBackend> = Arc::new(SyncIo::new(tmp.path()));
+        SegmentWriter::open(&io, seq).unwrap()
+    }
 
     fn make_records() -> Vec<Vec<u8>> {
         (0..8u32)
@@ -378,8 +362,7 @@ mod tests {
     #[test]
     fn append_flush_sync_scan() {
         let tmp = TempDir::new().unwrap();
-        std::fs::create_dir_all(tmp.path().join("segments")).unwrap();
-        let mut w = SegmentWriter::open(tmp.path(), 0).unwrap();
+        let mut w = writer_for(&tmp, 0);
         for bytes in make_records() {
             w.append(bytes);
         }
@@ -398,8 +381,7 @@ mod tests {
     #[test]
     fn torn_tail_ignored() {
         let tmp = TempDir::new().unwrap();
-        std::fs::create_dir_all(tmp.path().join("segments")).unwrap();
-        let mut w = SegmentWriter::open(tmp.path(), 0).unwrap();
+        let mut w = writer_for(&tmp, 0);
         for bytes in make_records() {
             w.append(bytes);
         }
@@ -409,7 +391,7 @@ mod tests {
         let path = segment_path(tmp.path(), 0);
         let full_len = std::fs::metadata(&path).unwrap().len();
         let torn = full_len - 7;
-        let f = OpenOptions::new().write(true).open(&path).unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         f.set_len(torn).unwrap();
         drop(f);
         let (records, _end) = scan_segment(&path, 1000).unwrap();
@@ -417,7 +399,7 @@ mod tests {
         assert!(records.len() < 8);
         // Reopening truncates the torn tail so new appends follow clean
         // records.
-        let mut w2 = SegmentWriter::open(tmp.path(), 0).unwrap();
+        let mut w2 = writer_for(&tmp, 0);
         assert_eq!(w2.durable_end(), scan_segment(&path, 1000).unwrap().1);
         // Appending after the torn tail must yield a fully valid segment.
         let extra = encode(RecordTag::Data, 0, None, b"post-torn record");
@@ -432,8 +414,7 @@ mod tests {
     #[test]
     fn corrupt_middle_detected() {
         let tmp = TempDir::new().unwrap();
-        std::fs::create_dir_all(tmp.path().join("segments")).unwrap();
-        let mut w = SegmentWriter::open(tmp.path(), 0).unwrap();
+        let mut w = writer_for(&tmp, 0);
         for bytes in make_records() {
             w.append(bytes);
         }
@@ -441,7 +422,7 @@ mod tests {
         w.fdatasync().unwrap();
         // Flip a byte inside the first record's payload.
         let path = segment_path(tmp.path(), 0);
-        let mut f = OpenOptions::new()
+        let mut f = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(&path)
@@ -460,11 +441,10 @@ mod tests {
     #[test]
     fn list_and_delete() {
         let tmp = TempDir::new().unwrap();
-        std::fs::create_dir_all(tmp.path().join("segments")).unwrap();
-        let mut w0 = SegmentWriter::open(tmp.path(), 0).unwrap();
+        let mut w0 = writer_for(&tmp, 0);
         w0.flush().unwrap();
         drop(w0);
-        let mut w1 = SegmentWriter::open(tmp.path(), 1).unwrap();
+        let mut w1 = writer_for(&tmp, 1);
         w1.flush().unwrap();
         drop(w1);
         assert_eq!(list_segments(tmp.path()).unwrap(), vec![0, 1]);

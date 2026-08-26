@@ -18,6 +18,12 @@ pub struct MkfsArgs {
     /// Explicit filesystem UUID (16 hex bytes; default: random).
     #[arg(long)]
     pub uuid: Option<String>,
+    /// Phase-10F storage transport (sync reference path | uring).
+    #[arg(long, value_name = "BACKEND", default_value = "sync")]
+    pub io_backend: String,
+    /// io_uring submission queue capacity (UringIo only).
+    #[arg(long, default_value_t = 256)]
+    pub io_uring_entries: u32,
 }
 
 /// Run mkfs.
@@ -41,6 +47,8 @@ pub fn run(args: &MkfsArgs) -> Result<(), String> {
     };
     let config = StoreConfig {
         segment_size: args.segment_size,
+        io_backend: crate::store::io::IoBackendKind::parse(&args.io_backend)?,
+        io_uring_entries: args.io_uring_entries,
         ..Default::default()
     };
     Store::create(&args.store, &config, uuid).map_err(|e| e.to_string())?;

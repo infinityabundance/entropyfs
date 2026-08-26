@@ -598,6 +598,14 @@ fn patch_rec<P: ObjectProvider>(
     if depth > 128 {
         return Err(BTreeError::Invariant("tree depth exceeded".into()));
     }
+    // Phase-10F: an empty batch leaves this subtree untouched — return its
+    // id WITHOUT fetching the node. Without this, a tiny batch (the epoch
+    // checkpoint applies 1-2 entries per commit) still fetched (and the
+    // internal loop recursed into) EVERY node of the tree: O(tree) per
+    // apply, the dominant write-path floor.
+    if batch.is_empty() {
+        return Ok((Some(node_id), None));
+    }
     let node = fetch(node_id, order, max_fanout, provider)?;
     match node {
         Node::Leaf { entries } => {
@@ -720,6 +728,12 @@ fn patch_rec<P: ObjectProvider>(
                 };
                 let slice = &batch[lo..hi];
                 lo = hi;
+                if slice.is_empty() {
+                    // Phase-10F: no batch keys fall in this child's range;
+                    // the child is unchanged — no fetch, no recursion.
+                    out_slots.push((sep.clone(), Some(*child)));
+                    continue;
+                }
                 let (new_child, promote) =
                     patch_rec(*child, slice, depth + 1, order, max_fanout, provider)?;
                 changed = changed || new_child != Some(*child);

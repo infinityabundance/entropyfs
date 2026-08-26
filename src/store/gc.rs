@@ -733,7 +733,7 @@ fn collect_impl(
     // The rebuilt tree is staged in the same segment as the copied live
     // records and the new root, so it commits atomically with them.
     let new_seq = store.current_segment_seq() + 1;
-    let mut writer = SegmentWriter::open(store.dir(), new_seq)?;
+    let mut writer = SegmentWriter::open(store.io(), new_seq)?;
     let mut new_locations: Vec<(ChunkId, Location)> = Vec::new();
     let rebuilt = rebuild_chunk_index(store, &mut writer, new_seq, &mark, &mut new_locations)?;
 
@@ -789,7 +789,7 @@ fn collect_impl(
     }
     writer.flush()?;
     writer.fdatasync()?;
-    SegmentWriter::sync_dir(store.dir())?;
+    store.io().sync_segments_dir()?;
 
     // Build the new root and commit it (durability barrier). The rebuilt
     // chunk index becomes part of the published root.
@@ -834,7 +834,7 @@ fn collect_impl(
     // Delete victims only after the new root is durable.
     hooks.hit(crate::store::transaction::CrashPoint::BeforeOldSegmentDelete)?;
     for seq in victims {
-        segment::delete_segment(store.dir(), *seq)?;
+        store.io().delete_segment(*seq)?;
     }
     // Drop derived index entries for dead records in deleted segments
     // (unreachable objects and the replaced chunk-index nodes) so

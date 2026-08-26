@@ -1,5 +1,82 @@
 # EntropyFS changelog
 
+## v0.6.2 (2026-08-26)
+
+**10F — io_uring storage transport (`IoBackend`, ADR-0021):** all file
+mutations and payload reads now go through a transport seam below
+`Store` / transactions / epoch checkpoint:
+
+```text
+Store / transactions / epoch checkpoint
+                 │
+                 ▼
+              IoBackend
+             /         \
+        SyncIo           UringIo
+     reference path    performance path
+```
+
+- **`SyncIo`** is the pre-10F synchronous engine, preserved byte-for-byte
+  as the crash-consistency oracle (the default; `--io-backend sync`).
+- **`UringIo`** implements the exact same record format and durability
+  ordering with the syscalls issued through one io_uring ring
+  (`--io-backend uring`, `--io-uring-entries N`; the `io-uring` crate was
+  already a transitive dependency — no new dependency tree). It is the
+  crate's ONE `unsafe` file-adjacent module: the SQE push lives in
+  `platform/io_uring.rs` with a ledger entry
+  (`docs/security/unsafe-ledger.md`) and a walk-the-src enforcement test;
+  every other module keeps `#![forbid(unsafe_code)]`.
+
+**Crash-court parity is the acceptance test:** the full crash matrix and a
+full-workload sequence run against BOTH backends, and the parity harness
+(`tests/io_backend_parity.rs`) asserts the store directories are
+canonically byte-identical at every injection point (inode wall-clock
+times are canonicalized; every other byte — record structure, order,
+lengths, superblock, layout — is compared verbatim). The crash and
+durability courts are parameterized over both backends. A `UringIo`
+implementation that produced a different recoverable state at any crash
+point would fail the suite.
+
+**`read_many`** — the architectural payoff: a materialization's
+model/stream/dictionary dependencies are enumerated statically from the
+extent descriptors (nested base/target/dictionary refs resolved through
+the chunk index, depth-capped) and fetched in ONE submission queue, then
+decoded in parallel (scoped threads). The extent scan became a LEVEL-ORDER
+batched walk (one `read_many` per tree level, sibling node fetches batch)
+and the transaction prune walk batches per level too — the tree-node
+fetches the ring would otherwise do one at a time.
+
+The write-path hunt surfaced a real algorithmic bug (both backends):
+`apply_sorted_batch` recursed into every child slot and fetched every
+node even for a tiny batch, so the epoch checkpoint's 1-2-entry chunk
+patch walked the ENTIRE chunk index — O(tree) per commit, the dominant
+write-path floor. Fixed with an empty-batch short-circuit + empty-slice
+skip: `cp_chunk_apply` p50 1262 → 22 µs (sync) and 2281 → 30 µs (uring),
+and the mounted 4K-dsync court improved on both backends.
+
+**Sealed 10F court pair (tmpfs-backed; relative comparison):**
+
+| metric | 10F-sync | 10F-uring |
+|---|---|---|
+| 4K dsync writes | 1.9 MiB/s | 1.8 MiB/s (−5%) |
+| 4K buffered writes | 189.5 MiB/s | 139.0 MiB/s (−27%) |
+| 1M writes | 301.1 MiB/s | 244.4 MiB/s (−19%) |
+| warm sequential read | 2219.8 MiB/s | 1959.7 MiB/s (−12%) |
+| 1M read latency p50 | 1108 µs | 1190 µs (−7%) |
+
+Measured ring economics: ~2.3 µs per submit-and-wait cycle (the kernel's
+submit+wait+wake floor on this system) vs ~0.1 µs per `pread` on tmpfs,
+amortizing to ~0.34 µs/op at a 32-op batch. The batching closes most of
+the read gap; the residual write gap is the ring floor on sub-µs tmpfs
+I/O. The default stays `sync` (the oracle) until real-device (NVMe,
+queue-depth) evidence flips it; the seam is where that evidence will
+land.
+
+Also: `tools/perf-court.sh` gained `--io-backend`; `capabilities` probes
+and reports the io_uring transport; the durability barrier and the epoch
+checkpoint gained sub-phase timings (`barrier_*`, `cp_*`) for the
+write-path diagnostics.
+
 ## v0.6.1 (2026-08-26)
 
 **10E1 — lock-free fd-cache reads:** the 10E `segment_payload` held the

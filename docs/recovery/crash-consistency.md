@@ -71,6 +71,16 @@ mixture of records from two different committed roots.
   development host (ADR-0016).
 - **Latency-journal courts** (fsync-order torture): random commit-order
   perturbations within the protocol to catch ordering regressions.
+- **Transport-parity courts** (Phase 10F, ADR-0021): every crash point and
+  a full-workload sequence run against BOTH storage transports
+  (`SyncIo` reference path and `UringIo` io_uring path), and the harness
+  (`src/tests/io_backend_parity.rs`) asserts the store directories are
+  canonically byte-identical per point — inode wall-clock times are
+  canonicalized (the only legitimate cross-run difference), every other
+  byte is compared verbatim. A `UringIo` implementation that produced a
+  different recoverable state at any crash point is wrong by definition.
+  The in-crate crash and durability courts are parameterized over both
+  backends.
 
 ## 6. Torn-write handling
 

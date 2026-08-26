@@ -9,6 +9,7 @@ pub mod extent_tree;
 pub mod gc;
 pub mod index;
 pub mod inode;
+pub mod io;
 pub mod object;
 pub mod physical;
 pub mod recovery;
@@ -17,7 +18,6 @@ pub mod segment;
 pub mod snapshot;
 pub mod transaction;
 
-use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::ops::Range;
@@ -135,6 +135,13 @@ pub struct StoreConfig {
     /// `OptimizeOptions` and run with the full policy; the mounted
     /// filesystem carries this one.
     pub foreground: crate::optimizer::foreground::ForegroundPolicy,
+    /// Phase-10F storage transport (ADR-0021): `Sync` (reference engine,
+    /// default) or `Uring` (io_uring performance path). A transport choice,
+    /// not an on-disk format: a store is equally mountable with either.
+    pub io_backend: crate::store::io::IoBackendKind,
+    /// Phase-10F io_uring submission queue capacity (ops per submit
+    /// batch; `UringIo` only).
+    pub io_uring_entries: u32,
 }
 
 impl Default for StoreConfig {
@@ -151,6 +158,8 @@ impl Default for StoreConfig {
             root_uid: current_uid(),
             root_gid: current_gid(),
             foreground: crate::optimizer::foreground::ForegroundPolicy::default(),
+            io_backend: crate::store::io::IoBackendKind::Sync,
+            io_uring_entries: 256,
         }
     }
 }
@@ -247,8 +256,6 @@ pub struct Store {
     stats: std::sync::Mutex<StoreStats>,
     /// Advisory lock file.
     _lock: File,
-    /// Superblock file path.
-    superblock_path: PathBuf,
     /// Bounded decoded-model cache (performance only).
     model_cache: std::sync::Mutex<crate::cache::model::ModelCache>,
     /// DSFB storage observer (performance-only; zero decoding authority).
@@ -264,15 +271,12 @@ pub struct Store {
     /// Phase-10D active metadata writeback epoch (pending namespace/write-
     /// back mutations between checkpoints; see `store/epoch.rs`).
     epoch: std::sync::Mutex<crate::store::epoch::Epoch>,
-    /// Phase-10E segment read-fd cache (seq -> open file): the read path
-    /// fetches B-tree nodes, models and streams from segments, and each
-    /// fetch used to open the segment file afresh. While mounted, segments
-    /// are append-only (GC is offline), so the cache is safe and
-    /// unbounded-in-practice; reads use `pread` (offset-based, no shared
-    /// seek position) so the fds are thread-safe. `Arc<File>` (10E1): the
-    /// map mutex is only held to clone the handle, never across the
-    /// `pread` itself, so concurrent object reads do not serialize.
-    segment_fds: std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<std::fs::File>>>,
+    /// Phase-10F storage transport (ADR-0021): the reference synchronous
+    /// engine (`SyncIo`) or the io_uring performance path (`UringIo`).
+    /// Every file mutation and payload read goes through this backend; the
+    /// crash courts run against both and must produce identical
+    /// store-directory bytes at every injection point.
+    io: std::sync::Arc<dyn crate::store::io::IoBackend>,
 }
 
 impl std::fmt::Debug for Store {
@@ -298,6 +302,9 @@ impl Store {
         std::fs::create_dir_all(dir)?;
         std::fs::create_dir_all(dir.join("segments"))?;
         let lock = open_lock(dir)?;
+        // Phase-10F: the transport is fixed at mkfs/mount time (a runtime
+        // choice, not an on-disk format).
+        let io = crate::store::io::build_backend(config.io_backend, dir, config.io_uring_entries)?;
         // Initial root.  Ino 1 is the filesystem root so FUSE's mount
         // root (always ino 1) maps 1:1 to the store (ADR-0002).
         let root = Root {
@@ -306,15 +313,17 @@ impl Store {
             generation: 0,
             ..Default::default()
         };
-        // Initial superblock in slot A (generation 0 is even).
+        // Initial superblock in slot A (generation 0 is even); written
+        // through the backend and made durable (the pre-10F `write_slot`
+        // with sync).
         let sb = Superblock {
             uuid,
             generation: 0,
             segment_seq: 0,
             ..Default::default()
         };
-        let sb_path = dir.join("superblock");
-        crate::store::root::write_slot(&sb_path, SUPERBLOCK_SLOT_A_OFFSET, &sb, true)?;
+        io.write_superblock_slot(SUPERBLOCK_SLOT_A_OFFSET, &sb.encode())?;
+        io.fsync_superblock()?;
         // Root object record lives in segment 0.
         let store = Self {
             dir: dir.to_path_buf(),
@@ -330,14 +339,13 @@ impl Store {
             segment: std::sync::Mutex::new(None),
             stats: std::sync::Mutex::new(StoreStats::default()),
             _lock: lock,
-            superblock_path: sb_path,
             model_cache: std::sync::Mutex::new(crate::cache::model::ModelCache::new(64)),
             dsfb: std::sync::Mutex::new(crate::dsfb::observer::StorageObserver::default()),
             inode_locks: std::sync::Arc::new(InodeLockTable::default()),
             perf: std::sync::Arc::new(crate::perf::Timings::default()),
             foreground: config.foreground,
             epoch: std::sync::Mutex::new(crate::store::epoch::Epoch::default()),
-            segment_fds: std::sync::Mutex::new(std::collections::HashMap::new()),
+            io,
         };
         store.open_segment(0)?;
         // Create the root directory inode (ino 1) and commit the initial
@@ -361,6 +369,9 @@ impl Store {
     /// Open (mount) an existing store: recovery + derived index rebuild.
     pub fn open(dir: &Path, config: &StoreConfig) -> Result<Self, StoreError> {
         let lock = open_lock(dir)?;
+        // Phase-10F: the transport is a per-invocation runtime choice; the
+        // on-disk format is identical for both backends.
+        let io = crate::store::io::build_backend(config.io_backend, dir, config.io_uring_entries)?;
         let sb_path = dir.join("superblock");
         let pair = SuperblockPair::read(&sb_path)?;
         // Rebuild the object index from segments (needed to resolve the
@@ -406,14 +417,13 @@ impl Store {
             segment: std::sync::Mutex::new(None),
             stats: std::sync::Mutex::new(StoreStats::default()),
             _lock: lock,
-            superblock_path: sb_path,
             model_cache: std::sync::Mutex::new(crate::cache::model::ModelCache::new(64)),
             dsfb: std::sync::Mutex::new(crate::dsfb::observer::StorageObserver::default()),
             inode_locks: std::sync::Arc::new(InodeLockTable::default()),
             perf: std::sync::Arc::new(crate::perf::Timings::default()),
             foreground: config.foreground,
             epoch: std::sync::Mutex::new(crate::store::epoch::Epoch::default()),
-            segment_fds: std::sync::Mutex::new(std::collections::HashMap::new()),
+            io,
         };
         // Phase-10D: replay any un-checkpointed mutation log tail left by
         // a process crash (the last checkpoint root is authoritative; the
@@ -748,9 +758,14 @@ impl Store {
     // ------------------------------------------------------------------
 
     fn open_segment(&self, seq: u64) -> Result<(), StoreError> {
-        let w = SegmentWriter::open(&self.dir, seq)?;
+        let w = SegmentWriter::open(&self.io, seq)?;
         *self.segment.lock().expect("segment poisoned") = Some(w);
         Ok(())
+    }
+
+    /// The storage transport (Phase 10F).
+    pub(crate) fn io(&self) -> &std::sync::Arc<dyn crate::store::io::IoBackend> {
+        &self.io
     }
 
     /// Replace the current segment writer (offline GC compaction).
@@ -832,7 +847,7 @@ impl Store {
                     let next = w.seq() + 1;
                     drop(seg);
                     self.open_segment(next)?;
-                    SegmentWriter::sync_dir(&self.dir)?;
+                    self.io.sync_segments_dir()?;
                     base_after_roll(self, &encoded)
                 } else {
                     base
@@ -875,18 +890,19 @@ impl Store {
         Ok(())
     }
 
-    /// Ensure the segments directory entries are durable.
+    /// Ensure the segments directory entries are durable (Phase 10F: via
+    /// the storage transport).
     pub fn sync_segments_dir(&self) -> Result<(), StoreError> {
-        SegmentWriter::sync_dir(&self.dir)?;
-        Ok(())
+        self.io.sync_segments_dir()
     }
 
-    /// Fetch an object payload by content id (Phase-10E: via the cached
-    /// segment read fds + `pread`, so concurrent reads never re-open
-    /// files and never share a seek position).
+    /// Fetch an object payload by content id (Phase-10E/10F: via the
+    /// backend's cached segment read handles + offset-based reads, so
+    /// concurrent reads never re-open files and never share a seek
+    /// position).
     pub fn fetch_object(&self, id: &ChunkId) -> Result<Option<Vec<u8>>, StoreError> {
         match self.object_index.get(id) {
-            Some(loc) => Ok(Some(self.segment_payload(
+            Some(loc) => Ok(Some(self.io.read_payload(
                 loc.segment_seq,
                 loc.offset,
                 loc.stored_len,
@@ -897,55 +913,57 @@ impl Store {
 
     /// Fetch a record payload by location (fsck; also cached-fd reads).
     pub fn read_payload_at(&self, loc: &Location) -> Result<Vec<u8>, StoreError> {
-        self.segment_payload(loc.segment_seq, loc.offset, loc.stored_len)
+        self.io
+            .read_payload(loc.segment_seq, loc.offset, loc.stored_len)
     }
 
-    /// Read a record payload from a segment via the cached fd table
-    /// (Phase-10E/10E1). The fd is opened once per segment and kept;
-    /// `pread` makes the reads thread-safe (no shared seek offset).
-    /// Segments are append-only while mounted, so a cached fd never goes
-    /// stale. The map mutex is released before the `pread` loop (the
-    /// handle is an `Arc<File>` clone), so concurrent object reads never
-    /// serialize on the cache.
-    fn segment_payload(
-        &self,
-        seq: u64,
-        offset: u64,
-        stored_len: u64,
-    ) -> Result<Vec<u8>, StoreError> {
-        let file = {
-            let mut fds = self.segment_fds.lock().expect("segment fds poisoned");
-            match fds.entry(seq) {
-                std::collections::hash_map::Entry::Occupied(e) => e.get().clone(),
-                std::collections::hash_map::Entry::Vacant(v) => v
-                    .insert(std::sync::Arc::new(std::fs::File::open(
-                        crate::store::segment::segment_path(&self.dir, seq),
-                    )?))
-                    .clone(),
+    /// Phase-10F `read_many`: fetch many object payloads in ONE backend
+    /// call (one submission queue for `UringIo`). The i-th result
+    /// corresponds to the i-th id: `Ok(Some(bytes))` when present,
+    /// `Ok(None)` when the object index has no record for it (a committed
+    /// root can never reference such an id; the overlay paths use this for
+    /// pending-chunk resolution), or `Err` for I/O failures.
+    pub fn fetch_objects_many(&self, ids: &[ChunkId]) -> Vec<Result<Option<Vec<u8>>, StoreError>> {
+        let mut reqs: Vec<Option<crate::store::io::ReadRequest>> = Vec::with_capacity(ids.len());
+        let mut any = false;
+        for id in ids {
+            match self.object_index.get(id) {
+                Some(loc) => {
+                    reqs.push(Some(crate::store::io::ReadRequest {
+                        segment_seq: loc.segment_seq,
+                        offset: loc.offset,
+                        stored_len: loc.stored_len,
+                    }));
+                    any = true;
+                }
+                None => reqs.push(None),
             }
-        };
-        let start = offset
-            .checked_add(crate::format::version::RECORD_HEADER_SIZE)
-            .ok_or(StoreError::Limit("payload offset overflow".into()))?;
-        let mut buf = vec![0u8; stored_len as usize];
-        let mut filled = 0usize;
-        while filled < buf.len() {
-            let n = rustix::io::pread(&*file, &mut buf[filled..], start + filled as u64)
-                .map_err(|e| StoreError::Io(e.to_string()))?;
-            if n == 0 {
-                return Err(StoreError::Io("short segment read".into()));
-            }
-            filled += n;
         }
-        Ok(buf)
+        if !any {
+            return ids.iter().map(|_| Ok(None)).collect();
+        }
+        let need: Vec<usize> = (0..reqs.len()).filter(|&i| reqs[i].is_some()).collect();
+        let batch: Vec<crate::store::io::ReadRequest> = need
+            .iter()
+            .map(|&i| reqs[i].expect("filtered to Some"))
+            .collect();
+        let results = self.io.read_many(&batch);
+        let mut out: Vec<Result<Option<Vec<u8>>, StoreError>> =
+            ids.iter().map(|_| Ok(None)).collect();
+        for (k, r) in results.into_iter().enumerate() {
+            let idx = need[k];
+            out[idx] = r.map(Some);
+        }
+        out
     }
 
     // ------------------------------------------------------------------
     // Superblock / commit
     // ------------------------------------------------------------------
 
-    /// Write the inactive superblock slot for the new root. Runs under the
-    /// commit coordinator (`commit_lock`).
+    /// Write the inactive superblock slot for the new root (page cache;
+    /// fsync at the barrier). Runs under the commit coordinator
+    /// (`commit_lock`). Phase 10F: through the storage transport.
     pub fn write_superblock(&self, root_id: ChunkId, root: &Root) -> Result<(), StoreError> {
         let mut cs = self.commit.write().expect("commit state poisoned");
         let mut sb = cs.superblock.clone();
@@ -957,16 +975,14 @@ impl Store {
             0 => SUPERBLOCK_SLOT_A_OFFSET,
             _ => SUPERBLOCK_SLOT_B_OFFSET,
         };
-        crate::store::root::write_slot(&self.superblock_path, offset, &sb, false)?;
+        self.io.write_superblock_slot(offset, &sb.encode())?;
         cs.superblock = sb;
         Ok(())
     }
 
-    /// fsync the superblock file.
+    /// fsync the superblock file (commit durable).
     pub fn fsync_superblock(&self) -> Result<(), StoreError> {
-        let f = File::open(&self.superblock_path)?;
-        f.sync_all()?;
-        Ok(())
+        self.io.fsync_superblock()
     }
 
     /// The durability barrier (ADR-0008, Phase 6): makes the current
@@ -984,7 +1000,8 @@ impl Store {
         // Phase-10D: the barrier also makes the epoch's acknowledged
         // mutations power-durable — checkpoint the epoch first (its own
         // commit is then covered by this barrier; a no-op when empty).
-        self.epoch_checkpoint(hooks)?;
+        self.perf
+            .time("barrier_checkpoint", || self.epoch_checkpoint(hooks))?;
         // Serialize with in-flight commits: an fsync observes every commit
         // that started before it (and every commit that started after
         // waits for the barrier).
@@ -993,18 +1010,22 @@ impl Store {
         // segment has not been fdatasync'd yet.
         hooks.hit(crate::store::transaction::CrashPoint::AfterRecordAppend)?;
         // 1. fdatasync the affected segment.
-        self.fdatasync_segment()?;
+        self.perf
+            .time("barrier_fdatasync", || self.fdatasync_segment())?;
         hooks.hit(crate::store::transaction::CrashPoint::AfterSegmentFdatasync)?;
         // 2. new segment directory entries durable.
-        self.sync_segments_dir()?;
+        self.perf
+            .time("barrier_dir_sync", || self.sync_segments_dir())?;
         hooks.hit(crate::store::transaction::CrashPoint::AfterSegmentDirFsync)?;
         // 3. write the inactive superblock slot (idempotent: the deferred
         //    commit already wrote it to the page cache) and fsync it.
         let root = self.current_root();
         let root_id = root.id();
-        self.write_superblock(root_id, &root)?;
+        self.perf
+            .time("barrier_sb_write", || self.write_superblock(root_id, &root))?;
         hooks.hit(crate::store::transaction::CrashPoint::AfterSuperblockWrite)?;
-        self.fsync_superblock()?;
+        self.perf
+            .time("barrier_sb_fsync", || self.fsync_superblock())?;
         hooks.hit(crate::store::transaction::CrashPoint::AfterSuperblockFsync)?;
         Ok(())
     }
@@ -1325,45 +1346,296 @@ impl Store {
             Some((start, _)) => start,
             None => offset,
         };
-        let (extents, _) = self.perf.time("read_scan", || {
-            crate::store::extent_tree::scan_range(
-                extent_root,
-                scan_start,
-                end,
-                usize::MAX,
-                BTREE_ORDER,
-                self.config.limits.max_fanout,
-                self,
-            )
+        // Phase-10F: LEVEL-ORDER batched scan (one read_many per tree
+        // level), then ONE prefetch submission for the materialization
+        // dependencies, then parallel decode.
+        let extents = self.perf.time("read_scan", || {
+            self.scan_extents_batched(extent_root, scan_start, end)
         })?;
-        let mut out = vec![0u8; avail as usize];
-        for (start, desc_bytes) in extents {
-            let desc = crate::format::descriptor::decode(
-                &desc_bytes,
-                self.config.limits.max_descriptor_bytes,
-                self.config.limits.max_inline_bytes,
-                self.config.limits.max_palette,
-                self.config.limits.max_period,
-                self.config.limits.max_chunk_size,
-            )?;
-            let extent_end = start.saturating_add(desc.len());
-            let copy_start = start.max(offset);
-            let copy_end = extent_end.min(end);
-            if copy_end <= copy_start {
+        self.materialize_range_batched(None, &extents, offset, end, avail as usize)
+    }
+
+    /// Phase-10F batched extent scan: LEVEL-ORDER descent with ONE
+    /// `read_many` per tree level (sibling node fetches batch into a
+    /// single submission for `UringIo`), replacing the per-node sequential
+    /// fetch of the DFS `scan_range` in the read path. Returns the extents
+    /// whose start lies in `[start_offset, end_offset)`, in offset order.
+    /// (The covering extent for `start_offset` — which may start before
+    /// it — is found by the caller's `covering` descent, unchanged.)
+    fn scan_extents_batched(
+        &self,
+        extent_root: ChunkId,
+        start_offset: u64,
+        end_offset: u64,
+    ) -> Result<Vec<(u64, Vec<u8>)>, StoreError> {
+        if extent_root.is_zero() || end_offset <= start_offset {
+            return Ok(Vec::new());
+        }
+        let order = BTREE_ORDER;
+        let fanout = self.config.limits.max_fanout;
+        let start_key = crate::store::extent_tree::extent_key(start_offset);
+        let end_key = crate::store::extent_tree::extent_key(end_offset);
+        let mut out: Vec<(u64, Vec<u8>)> = Vec::new();
+        let mut frontier: Vec<ChunkId> = vec![extent_root];
+        while !frontier.is_empty() {
+            // Fetch every frontier node in ONE read_many.
+            let results = self.fetch_objects_many(&frontier);
+            let mut next: Vec<ChunkId> = Vec::new();
+            for (i, node_id) in frontier.iter().enumerate() {
+                let bytes = match &results[i] {
+                    Ok(Some(b)) => b.clone(),
+                    Ok(None) => {
+                        return Err(StoreError::Invariant(format!(
+                            "extent tree node {node_id} missing (batched scan)"
+                        )));
+                    }
+                    Err(e) => return Err(e.clone()),
+                };
+                match crate::store::index::Node::decode(&bytes, order, fanout) {
+                    Ok(crate::store::index::Node::Leaf { entries }) => {
+                        for e in entries {
+                            if e.key.as_slice() < start_key.as_slice() {
+                                continue;
+                            }
+                            if e.key.as_slice() >= end_key.as_slice() {
+                                break; // sorted: past the range
+                            }
+                            let start = u64::from_be_bytes(
+                                e.key.as_slice().try_into().expect("8-byte extent key"),
+                            );
+                            out.push((start, e.value));
+                        }
+                    }
+                    Ok(crate::store::index::Node::Internal {
+                        first_child,
+                        entries,
+                    }) => {
+                        // Child ranges: first_child covers [.., k0); child_i
+                        // covers [k_i, k_{i+1}) (last: [k_last, ..)).
+                        // Collect the children whose range intersects
+                        // [start_key, end_key).
+                        if entries
+                            .first()
+                            .is_none_or(|e| start_key.as_slice() < e.key.as_slice())
+                        {
+                            next.push(first_child);
+                        }
+                        for (i, e) in entries.iter().enumerate() {
+                            if e.key.as_slice() >= end_key.as_slice() {
+                                break;
+                            }
+                            let child_below_start = entries
+                                .get(i + 1)
+                                .is_some_and(|n| n.key.as_slice() <= start_key.as_slice());
+                            if !child_below_start {
+                                next.push(child_id_value(&e.value));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        return Err(StoreError::Index(format!(
+                            "batched extent scan: node {node_id}: {e}"
+                        )));
+                    }
+                }
+            }
+            frontier = next;
+        }
+        Ok(out)
+    }
+
+    /// Phase-10F read_many: enumerate every object a set of extent
+    /// descriptors needs to materialize — the direct object dependencies
+    /// of each descriptor (model + encoded stream for the entropy
+    /// families, the raw object, the base for BASE_RESIDUAL), plus the
+    /// objects of nested base/target/dictionary descriptors resolved
+    /// through the chunk index, depth-capped. The read path then fetches
+    /// them in ONE backend call (one submission queue for `UringIo`) and
+    /// decodes from the prefetched map.
+    fn collect_read_deps(
+        &self,
+        ep: Option<&crate::store::epoch::Epoch>,
+        desc: &Representation,
+        depth: u8,
+        deps: &mut Vec<ChunkId>,
+        seen_objects: &mut std::collections::HashSet<ChunkId>,
+        seen_nested: &mut std::collections::HashSet<ChunkId>,
+    ) -> Result<(), StoreError> {
+        let limits = self.config.limits;
+        for oid in crate::store::transaction::descriptor_objects(desc, &limits) {
+            if seen_objects.insert(oid) {
+                deps.push(oid);
+            }
+        }
+        if depth >= limits.max_reference_depth {
+            return Ok(());
+        }
+        // Nested chunk references (EXACT_REF targets, BASE_RESIDUAL bases,
+        // and the dictionary/shared-dictionary chunks of the SEQUENCE_DICT
+        // families): resolve the nested descriptor (epoch overlay first)
+        // and recurse so its objects are prefetched too. ZERO ids mean
+        // "absent" (no file dictionary).
+        let mut nested: Vec<ChunkId> = Vec::new();
+        match desc {
+            Representation::ExactRef { target, .. } => nested.push(*target),
+            Representation::BaseResidual { base, .. } => nested.push(*base),
+            Representation::SequenceDict { dictionary, .. } => {
+                if !dictionary.is_zero() {
+                    nested.push(*dictionary);
+                }
+            }
+            Representation::SequenceSharedDict {
+                dictionary, shared, ..
+            } => {
+                if !dictionary.is_zero() {
+                    nested.push(*dictionary);
+                }
+                nested.push(*shared);
+            }
+            _ => {}
+        }
+        for id in nested {
+            if !seen_nested.insert(id) {
                 continue;
             }
-            let mut chunk = vec![0u8; desc.len() as usize];
-            let mut budget = self.config.limits.max_decode_work;
-            self.perf
-                .time("read_materialize", || {
-                    materialize(&desc, self, &self.config.limits, 0, &mut budget, &mut chunk)
-                })
-                .map_err(|e| StoreError::Descriptor(e.to_string()))?;
-            let s = (copy_start - start) as usize;
-            let n = (copy_end - copy_start) as usize;
-            let o = (copy_start - offset) as usize;
-            let n = n.min(avail as usize - o);
-            out[o..o + n].copy_from_slice(&chunk[s..s + n]);
+            let bytes = match ep.and_then(|e| e.overlay_chunk(&id)) {
+                Some(b) => Some(b),
+                None => self.chunk_descriptor(&id)?,
+            };
+            if let Some(b) = bytes {
+                if let Ok(d) = crate::format::descriptor::decode(
+                    &b,
+                    limits.max_descriptor_bytes,
+                    limits.max_inline_bytes,
+                    limits.max_palette,
+                    limits.max_period,
+                    limits.max_chunk_size,
+                ) {
+                    self.collect_read_deps(ep, &d, depth + 1, deps, seen_objects, seen_nested)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Phase-10F batched materialization: prefetch every dependency of the
+    /// merged extents in ONE `read_many`, then decode the extents in
+    /// parallel (scoped threads; single-extent reads inline). The batch is
+    /// an optimization — every object missing from the prefetch falls back
+    /// to the store at decode time, so the bytes are always the exact
+    /// committed/overlay state.
+    fn materialize_range_batched(
+        &self,
+        ep: Option<&crate::store::epoch::Epoch>,
+        extents: &[(u64, Vec<u8>)],
+        offset: u64,
+        end: u64,
+        avail: usize,
+    ) -> Result<Vec<u8>, StoreError> {
+        let limits = self.config.limits;
+        // 1. Decode every descriptor and enumerate its dependencies.
+        let mut descs: Vec<Representation> = Vec::with_capacity(extents.len());
+        let mut deps: Vec<ChunkId> = Vec::new();
+        let mut seen_objects: std::collections::HashSet<ChunkId> = std::collections::HashSet::new();
+        let mut seen_nested: std::collections::HashSet<ChunkId> = std::collections::HashSet::new();
+        for (_, bytes) in extents {
+            let desc = crate::format::descriptor::decode(
+                bytes,
+                limits.max_descriptor_bytes,
+                limits.max_inline_bytes,
+                limits.max_palette,
+                limits.max_period,
+                limits.max_chunk_size,
+            )?;
+            self.collect_read_deps(ep, &desc, 0, &mut deps, &mut seen_objects, &mut seen_nested)?;
+            descs.push(desc);
+        }
+        // 2. ONE batched fetch (the read_many win; one submission queue
+        //    for `UringIo`).
+        let objects: std::collections::HashMap<ChunkId, Vec<u8>> = {
+            let results = self
+                .perf
+                .time("read_prefetch", || self.fetch_objects_many(&deps));
+            let mut map = std::collections::HashMap::with_capacity(deps.len());
+            for (id, r) in deps.iter().zip(results) {
+                match r {
+                    Ok(Some(b)) => {
+                        map.insert(*id, b);
+                    }
+                    Ok(None) => {} // missing: fall back at decode time
+                    Err(e) => return Err(e),
+                }
+            }
+            map
+        };
+        // 3. Decode (parallel for multi-extent reads; the prefetched map
+        //    makes decode pure CPU).
+        let ctx = crate::store::epoch::PrefetchContext::new(self, &objects, ep);
+        let mut out = vec![0u8; avail];
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(descs.len());
+        if descs.len() == 1 || workers <= 1 {
+            for (i, desc) in descs.iter().enumerate() {
+                materialize_into_window(&ctx, desc, extents[i].0, offset, end, &limits, &mut out)?;
+            }
+            return Ok(out);
+        }
+        let n = descs.len();
+        let mut runs: Vec<Result<Vec<(u64, Vec<u8>)>, StoreError>> = Vec::new();
+        std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(workers);
+            for w in 0..workers {
+                let lo = w * n / workers;
+                let hi = ((w + 1) * n / workers).max(lo + 1).min(n);
+                if lo >= hi {
+                    continue;
+                }
+                let descs = &descs;
+                let extents = &extents;
+                let ctx = &ctx;
+                handles.push(s.spawn(move || {
+                    let mut mine = Vec::with_capacity(hi - lo);
+                    for i in lo..hi {
+                        let desc = &descs[i];
+                        let mut chunk = vec![0u8; desc.len() as usize];
+                        let mut budget = limits.max_decode_work;
+                        crate::core::materialize::materialize(
+                            desc,
+                            ctx,
+                            &limits,
+                            0,
+                            &mut budget,
+                            &mut chunk,
+                        )
+                        .map_err(|e| StoreError::Descriptor(e.to_string()))?;
+                        mine.push((extents[i].0, chunk));
+                    }
+                    Ok(mine)
+                }));
+            }
+            for h in handles {
+                runs.push(match h.join() {
+                    Ok(r) => r,
+                    Err(_) => Err(StoreError::Invariant("read decode thread panicked".into())),
+                });
+            }
+        });
+        // Assemble (extent ranges are disjoint and ordered).
+        for run in runs {
+            for (start, chunk) in run? {
+                let extent_end = start.saturating_add(chunk.len() as u64).min(end);
+                let copy_start = start.max(offset);
+                if copy_start >= extent_end {
+                    continue;
+                }
+                let s = (copy_start - start) as usize;
+                let c = (extent_end - copy_start) as usize;
+                let o = (copy_start - offset) as usize;
+                let c = c.min(avail - o);
+                out[o..o + c].copy_from_slice(&chunk[s..s + c]);
+            }
         }
         Ok(out)
     }
@@ -3512,6 +3784,40 @@ fn base_after_roll(store: &Store, encoded: &[u8]) -> u64 {
     base
 }
 
+/// The 32-byte child-id value of an internal B-tree entry.
+fn child_id_value(value: &[u8]) -> ChunkId {
+    ChunkId::new(value.try_into().expect("32-byte child id"))
+}
+
+/// Materialize one extent and copy its window into `out` (the shared
+/// assembly step of the Phase-10F batched read path). Extent ranges are
+/// disjoint, so this is safe to call per-extent in any order.
+fn materialize_into_window(
+    ctx: &dyn DecoderContext,
+    desc: &Representation,
+    start: u64,
+    offset: u64,
+    end: u64,
+    limits: &crate::core::limits::Limits,
+    out: &mut [u8],
+) -> Result<(), StoreError> {
+    let extent_end = start.saturating_add(desc.len()).min(end);
+    let copy_start = start.max(offset);
+    if copy_start >= extent_end {
+        return Ok(());
+    }
+    let mut chunk = vec![0u8; desc.len() as usize];
+    let mut budget = limits.max_decode_work;
+    crate::core::materialize::materialize(desc, ctx, limits, 0, &mut budget, &mut chunk)
+        .map_err(|e| StoreError::Descriptor(e.to_string()))?;
+    let s = (copy_start - start) as usize;
+    let c = (extent_end - copy_start) as usize;
+    let o = (copy_start - offset) as usize;
+    let c = c.min(out.len() - o);
+    out[o..o + c].copy_from_slice(&chunk[s..s + c]);
+    Ok(())
+}
+
 impl ObjectProvider for Store {
     fn get(&self, id: &ChunkId) -> Result<Option<Vec<u8>>, BTreeError> {
         self.fetch_object(id)
@@ -3899,17 +4205,7 @@ impl Store {
         let mut extents: std::collections::BTreeMap<u64, Vec<u8>> =
             std::collections::BTreeMap::new();
         if !extent_root.is_zero() {
-            for (off, bytes) in crate::store::extent_tree::scan_range(
-                extent_root,
-                scan_start,
-                end,
-                usize::MAX,
-                BTREE_ORDER,
-                limits.max_fanout,
-                self,
-            )?
-            .0
-            {
+            for (off, bytes) in self.scan_extents_batched(extent_root, scan_start, end)? {
                 extents.insert(off, bytes);
             }
         }
@@ -3921,34 +4217,12 @@ impl Store {
         // `scan_start`'s predecessor logic missed it (pending extents are
         // always chunk-aligned, so the covering pending extent starts at
         // scan_start or later; nothing to add here).
-        let mut out = vec![0u8; (end - offset) as usize];
-        // Materialize through the epoch-aware context (pending chunk
-        // descriptors resolve before the committed index).
-        let ctx = crate::store::epoch::EpochContext::new(self, ep);
-        // Walk the merged extents covering [offset, end).
-        for (start, bytes) in extents.range(..end) {
-            let desc = crate::format::descriptor::decode(
-                bytes,
-                limits.max_descriptor_bytes,
-                limits.max_inline_bytes,
-                limits.max_palette,
-                limits.max_period,
-                limits.max_chunk_size,
-            )?;
-            let extent_end = start.saturating_add(desc.len()).min(end);
-            let copy_start = (*start).max(offset);
-            if copy_start >= extent_end {
-                continue;
-            }
-            let mut chunk = vec![0u8; desc.len() as usize];
-            let mut budget = limits.max_decode_work;
-            crate::core::materialize::materialize(&desc, &ctx, &limits, 0, &mut budget, &mut chunk)
-                .map_err(|e| StoreError::Descriptor(e.to_string()))?;
-            let src = &chunk[(copy_start - *start) as usize..(extent_end - *start) as usize];
-            let dst = &mut out[(copy_start - offset) as usize..(extent_end - offset) as usize];
-            dst.copy_from_slice(src);
-        }
-        Ok(out)
+        let avail = (end - offset) as usize;
+        let merged: Vec<(u64, Vec<u8>)> = extents.into_iter().collect();
+        // Phase-10F: ONE prefetch submission for every extent's
+        // materialization dependencies (overlay-aware), then parallel
+        // decode.
+        self.materialize_range_batched(Some(ep), &merged, offset, end, avail)
     }
 
     /// Flush the active epoch to a checkpoint (merge + one root
@@ -4088,22 +4362,26 @@ impl Store {
         for (cid, desc) in frozen.pending_chunks.iter() {
             chunk_batch.push((cid.as_bytes().to_vec(), Some(desc.clone())));
         }
-        tx.root_mut().chunk_index_root = crate::store::index::apply_sorted_batch(
-            committed_root.chunk_index_root,
-            &chunk_batch,
-            BTREE_ORDER,
-            fanout,
-            &mut tx,
-        )?;
+        tx.root_mut().chunk_index_root = self.perf.time("cp_chunk_apply", || {
+            crate::store::index::apply_sorted_batch(
+                committed_root.chunk_index_root,
+                &chunk_batch,
+                BTREE_ORDER,
+                fanout,
+                &mut tx,
+            )
+        })?;
 
         // 6. Apply the inode index batch once.
-        tx.root_mut().inode_index_root = crate::store::index::apply_sorted_batch(
-            committed_root.inode_index_root,
-            &inode_batch,
-            BTREE_ORDER,
-            fanout,
-            &mut tx,
-        )?;
+        tx.root_mut().inode_index_root = self.perf.time("cp_inode_apply", || {
+            crate::store::index::apply_sorted_batch(
+                committed_root.inode_index_root,
+                &inode_batch,
+                BTREE_ORDER,
+                fanout,
+                &mut tx,
+            )
+        })?;
 
         // 7. The checkpoint root consumes the frozen log sequence.
         tx.root_mut().log_seq = frozen.seq;
@@ -4969,7 +5247,3 @@ impl Store {
 
 // Re-exports for the fuse layer.
 pub use transaction::{CrashHooks, CrashPoint, Tx};
-
-// Keep HashMap import used (public API surface for stats accounting).
-#[allow(unused_imports)]
-use HashMap as _HashMap;

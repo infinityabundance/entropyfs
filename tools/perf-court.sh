@@ -24,6 +24,7 @@ LABEL=""
 KEEP_STORE=0
 DO_BINDGEN=0
 DROP_CACHES=1
+IO_BACKEND="sync"
 POSITIONAL=()
 
 while [[ $# -gt 0 ]]; do
@@ -33,6 +34,7 @@ while [[ $# -gt 0 ]]; do
         --keep-store) KEEP_STORE=1; shift ;;
         --bindgen) DO_BINDGEN=1; shift ;;
         --no-drop-caches) DROP_CACHES=0; shift ;;
+        --io-backend) IO_BACKEND="$2"; shift 2 ;;
         -h|--help) echo "usage: perf-court.sh STORE_DIR MOUNTPOINT [opts]"; exit 0 ;;
         *) POSITIONAL+=("$1"); shift ;;
     esac
@@ -79,6 +81,7 @@ echo "store: $STORE_DIR"
 echo "mountpoint: $MOUNTPOINT"
 echo "size: ${SIZE_MIB} MiB"
 echo "label: ${LABEL:-none}"
+echo "io backend: $IO_BACKEND"
 echo
 
 # --- context capture ------------------------------------------------------
@@ -108,8 +111,8 @@ diskstats() {
 read -r -a DS_BEFORE <<< "$(diskstats)"
 
 # --- fresh store + mount --------------------------------------------------
-"$ENTROPYFS_BIN" mkfs "$STORE_DIR"
-"$ENTROPYFS_BIN" mount "$STORE_DIR" "$MOUNTPOINT" &
+"$ENTROPYFS_BIN" mkfs --io-backend "$IO_BACKEND" "$STORE_DIR"
+"$ENTROPYFS_BIN" mount --io-backend "$IO_BACKEND" "$STORE_DIR" "$MOUNTPOINT" &
 DAEMON_PID=$!
 trap 'fusermount3 -u "$MOUNTPOINT" 2>/dev/null || true; kill "$DAEMON_PID" 2>/dev/null || true' EXIT
 

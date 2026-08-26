@@ -24,3 +24,4 @@ Architecture Decision Records. Statuses: `accepted`, `superseded`, `proposed`.
 | [0018](0018-statfs.md) | Conservative `statfs`; opt-in logical overcommit | accepted |
 | [0019](0019-kernel-cache-invalidation.md) | FUSE kernel-cache invalidation from a dedicated notifier thread | accepted |
 | [0020](0020-ublk-frontend.md) | Experimental ublk block frontend over the same storage engine | accepted |
+| [0021](0021-io-backend.md) | Storage transport behind an `IoBackend`; io_uring as the performance path | accepted |

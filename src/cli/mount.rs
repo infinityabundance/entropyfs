@@ -50,6 +50,12 @@ pub struct MountArgs {
     /// raw = hash->CAS->RAW (the background optimizer still densifies).
     #[arg(long, value_name = "MODE", default_value = "full")]
     pub foreground: String,
+    /// Phase-10F storage transport (sync reference path | uring).
+    #[arg(long, value_name = "BACKEND", default_value = "sync")]
+    pub io_backend: String,
+    /// io_uring submission queue capacity (UringIo only).
+    #[arg(long, default_value_t = 256)]
+    pub io_uring_entries: u32,
 }
 
 /// Run the mount daemon.
@@ -65,6 +71,8 @@ pub fn run(args: &MountArgs) -> Result<(), String> {
             ));
         }
     };
+    config.io_backend = crate::store::io::IoBackendKind::parse(&args.io_backend)?;
+    config.io_uring_entries = args.io_uring_entries;
     let store = Store::open(&args.store, &config).map_err(|e| e.to_string())?;
     let params = MountParams {
         store_dir: args.store.clone(),
