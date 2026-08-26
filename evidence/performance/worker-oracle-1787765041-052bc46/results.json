@@ -1,0 +1,23 @@
+{
+  "oracle": "phase-11d-worker-oracle",
+  "rev": "052bc46",
+  "machine": "AMD Ryzen 7 9800X3D 8-Core Processor (16 threads, SMT)",
+  "kernel": "7.2.0-1-cachyos",
+  "governor": "performance",
+  "workload": "epoch_write, 256 x 1 MiB writes, fresh store + per-write-distinct content per thread count",
+  "validity": {
+    "dedup_hit_frac": 0.0,
+    "decisive_early_exit_frac": 0.0,
+    "search_cpu_constant_ms": [11053, 11483, 11473, 11632, 11344]
+  },
+  "gates": {
+    "A_queue_share_of_prepare_pct": [4.6, 29.5, 67.1, 83.7, 91.7],
+    "B_spawn_join_share_of_prepare_pct": [32.0, 27.2, 12.7, 6.4, 3.2],
+    "C_useful_cpu_ms": [9988, 10004, 9971, 9939, 9825],
+    "util": [0.62, 0.57, 0.56, 0.55, 0.55],
+    "Q5_p50_us": [5255, 7641, 14206, 24788, 52431],
+    "Q5_p99_us": [9468, 10279, 37475, 121357, 177564],
+    "wall_ms": [1594, 1106, 1111, 1130, 1136]
+  },
+  "decision": "Gate A fires (queue wait 92% of prepare at 16T) but the wall is already at the SMT-adjusted CPU floor (9.8s useful CPU / 8 physical cores); the pool is justified ONLY as a latency-fairness probe, with the bar p50/p99 at 8/16T, not wall."
+}

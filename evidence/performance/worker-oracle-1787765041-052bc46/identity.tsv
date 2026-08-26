@@ -1,0 +1,6 @@
+threads	n_req	total_ms	prepare_ms	residual_ms	residual_share	overlap
+1	321	1386.7	1203.2	12.5	0.009	false
+2	321	1978.8	1748.3	15.3	0.008	false
+4	321	4033.4	3785.4	11.7	0.003	false
+8	321	8096.3	7832.4	12.3	0.002	false
+16	321	16054.7	15796.1	11.9	0.001	false

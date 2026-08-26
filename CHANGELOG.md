@@ -1,5 +1,39 @@
 # EntropyFS changelog
 
+## Unreleased — Phase 11D: the worker-pool decision oracle
+
+Diagnostic, not a release: the 11C semaphore's `prepare` bucket is
+bounded but opaque, so before building a fair worker pool the oracle
+(`src/tests/worker_oracle.rs`, sealed at
+`evidence/performance/worker-oracle-1787765041-052bc46/`;
+`docs/performance/worker-oracle.md`) decomposes it at 1/2/4/8/16 writers:
+
+- `worker_queue_wait` — the grant acquisition (Gate A: semaphore queue).
+- `worker_scope_wall` — the scoped-thread scope duration (Gate B).
+- `worker_useful_cpu` — per-worker thread-CPU time via
+  `CLOCK_THREAD_CPUTIME` (rustix `time` feature; wall fallback), summed
+  across parallel workers (Gate C).
+- Workload-validity probes in the search (dedup-hit fraction, decisive
+  early-exit fraction) that the test asserts are zero.
+
+The first oracle run caught its own methodology bug: one store across
+ the sweep let a mid-run checkpoint feed the committed chunk index, and
+ the 16-thread row measured an EXACT_REF dedup cache (search 11.2 s →
+ 0.21 s, `dedup_hit_frac=1.0`) instead of search CPU. Fixed with fresh
+ stores + per-write-distinct content per thread count (the 11C court's
+ “never share a page” rule).
+
+Sealed result: **search CPU is constant 9.8–10.0 s at every thread
+count** (the semaphore wastes no CPU), **queue wait grows 4.6% → 91.7%
+of `prepare`** (Gate A fires — the batch-granularity head-of-line
+blocking the 11D brief predicted), **16-thread wall 1.14 s ≈ the
+SMT-adjusted CPU floor** (9.8 s / 8 physical cores), and **p50 5.3 →
+52.4 ms / p99 9.5 → 177.6 ms** (tail latency is the only real pool
+headroom). Decision: the pool is justified ONLY as a latency-fairness
+probe — it must beat p50/p99 at 8/16 T without increasing search CPU —
+and is rejected if it merely reproduces the 1.14 s floor with more
+code. 419 lib tests green.
+
 ## v0.7.2 (2026-08-26)
 
 **11C — the three 11B levers, attacked.** The reconciliation court

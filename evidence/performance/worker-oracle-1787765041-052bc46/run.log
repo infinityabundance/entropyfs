@@ -1,0 +1,59 @@
+== machine ==
+7.2.0-1-cachyos
+16
+model name	: AMD Ryzen 7 9800X3D 8-Core Processor
+052bc46e924ea6902835621037b56fe1708a27fb
+   Compiling entropyfs v0.7.2 (/mnt/1tb_kingston/entropyfs)
+warning: unused variable: `prepared`
+   --> src/tests/perf_reconciled.rs:311:13
+    |
+311 |         let prepared = store
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_prepared`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `NoProvider` is never constructed
+   --> src/tests/io_backend_parity.rs:171:24
+    |
+171 |                 struct NoProvider;
+    |                        ^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `entropyfs` (lib test) generated 2 warnings (run `cargo fix --lib -p entropyfs --tests` to apply 1 suggestion)
+    Finished `release` profile [optimized + debuginfo] target(s) in 48.02s
+     Running unittests src/lib.rs (target/release/deps/entropyfs-74bd83962675167c)
+
+running 2 tests
+
+==== Phase-11D worker oracle (epoch write path, release) ====
+threads    wall_ms  prepare%    queue%    spawn% useful_cpu%      util   granted   blocked   qdepth    p50_us    p99_us
+test tests::worker_oracle::worker_oracle_identity_holds ... ok
+          reconcile: n_req=321 total_ms=1386.7 prepare_ms=1203.2 residual_ms=12.5 overlap=false
+1             1594     86.8%      4.6%     32.0%     830.1%     0.62      4336        17        4      5255      9468
+          search_ms=11053.5 rans_ms= 2654.1 validation_ms=   39.6 tasks=4096 reads=192
+          probe: dedup_hit_frac=0.0000 decisive1_frac=0.0000 avg_pre_rans_cands=0.00
+          reconcile: n_req=321 total_ms=1978.8 prepare_ms=1748.3 residual_ms=15.3 overlap=false
+2             1106     88.4%     29.5%     27.2%     572.2%     0.57      4096       253        4      7641     10279
+          search_ms=11483.4 rans_ms= 2740.4 validation_ms=   39.7 tasks=4096 reads=192
+          probe: dedup_hit_frac=0.0000 decisive1_frac=0.0000 avg_pre_rans_cands=0.00
+          reconcile: n_req=321 total_ms=4033.4 prepare_ms=3785.4 residual_ms=11.7 overlap=false
+4             1111     93.9%     67.1%     12.7%     263.4%     0.56      4096       253        4     14206     37475
+          search_ms=11473.2 rans_ms= 2756.9 validation_ms=   40.1 tasks=4096 reads=192
+          probe: dedup_hit_frac=0.0000 decisive1_frac=0.0000 avg_pre_rans_cands=0.00
+          reconcile: n_req=321 total_ms=8096.3 prepare_ms=7832.4 residual_ms=12.3 overlap=false
+8             1130     96.7%     83.7%      6.4%     126.9%     0.55      4096       254        7     24788    121357
+          search_ms=11632.6 rans_ms= 2718.2 validation_ms=   40.4 tasks=4096 reads=192
+          probe: dedup_hit_frac=0.0000 decisive1_frac=0.0000 avg_pre_rans_cands=0.00
+          reconcile: n_req=321 total_ms=16054.7 prepare_ms=15796.1 residual_ms=11.9 overlap=false
+16            1136     98.4%     91.7%      3.2%      62.2%     0.55      4096       250       15     52431    177564
+          search_ms=11344.3 rans_ms= 2736.4 validation_ms=   41.0 tasks=4096 reads=192
+          probe: dedup_hit_frac=0.0000 decisive1_frac=0.0000 avg_pre_rans_cands=0.00
+
+(prepare% = prepare / total request time; queue% = semaphore wait / prepare [Gate A];
+ spawn% = scope-wall − useful/granted per batch / prepare [Gate B]; useful_cpu% = worker thread-CPU / prepare [Gate C, >100% = parallel CPU];
+ util = useful / (granted × batch wall); qdepth = peak threads parked on the semaphore.)
+test tests::worker_oracle::print_worker_oracle ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 417 filtered out; finished in 6.18s
+
