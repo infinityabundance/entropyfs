@@ -169,14 +169,7 @@ impl<'a> Tx<'a> {
         let bytes = self.fetch_pending_or_store(cid)?;
         match bytes {
             Some(b) => {
-                let rep = crate::format::descriptor::decode(
-                    &b,
-                    self.store.limits().max_descriptor_bytes,
-                    self.store.limits().max_inline_bytes,
-                    self.store.limits().max_palette,
-                    self.store.limits().max_period,
-                    self.store.limits().max_chunk_size,
-                )?;
+                let rep = crate::format::descriptor::decode(&b, self.store.limits())?;
                 Ok(Some(rep))
             }
             None => Ok(None),
@@ -484,14 +477,7 @@ enum TreeKind {
 /// streams/bases-as-objects). The chunk-index and extent-tree walks use
 /// this to keep the records those objects are staged under.
 fn descriptor_object_ids(bytes: &[u8], limits: &crate::core::limits::Limits) -> Vec<ChunkId> {
-    let Ok(desc) = crate::format::descriptor::decode(
-        bytes,
-        limits.max_descriptor_bytes,
-        limits.max_inline_bytes,
-        limits.max_palette,
-        limits.max_period,
-        limits.max_chunk_size,
-    ) else {
+    let Ok(desc) = crate::format::descriptor::decode(bytes, &limits) else {
         return Vec::new();
     };
     descriptor_objects(&desc, limits)

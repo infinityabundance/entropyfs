@@ -625,14 +625,7 @@ fn dedup_candidates(
     let Some(desc_bytes) = desc_bytes else {
         return Ok(Vec::new());
     };
-    let desc = match crate::format::descriptor::decode(
-        &desc_bytes,
-        limits.max_descriptor_bytes,
-        limits.max_inline_bytes,
-        limits.max_palette,
-        limits.max_period,
-        limits.max_chunk_size,
-    ) {
+    let desc = match crate::format::descriptor::decode(&desc_bytes, &limits) {
         Ok(d) => d,
         Err(_) => return Ok(Vec::new()), // unreadable index entry: miss
     };
@@ -803,15 +796,7 @@ impl DecoderContext for CandidateResolver<'_> {
     ) -> Result<Representation, crate::core::materialize::MaterializeError> {
         if let Some(bytes) = self.pending_descriptors.and_then(|p| p.get(id)) {
             let limits = *self.store.limits();
-            return crate::format::descriptor::decode(
-                bytes,
-                limits.max_descriptor_bytes,
-                limits.max_inline_bytes,
-                limits.max_palette,
-                limits.max_period,
-                limits.max_chunk_size,
-            )
-            .map_err(|e| {
+            return crate::format::descriptor::decode(bytes, &limits).map_err(|e| {
                 crate::core::materialize::MaterializeError::InvalidDescriptor(e.to_string())
             });
         }
@@ -1111,15 +1096,7 @@ mod tests {
                 bytes.len() as u64 <= limits.max_descriptor_bytes,
                 "descriptor exceeds the format limit"
             );
-            let d = crate::format::descriptor::decode(
-                &bytes,
-                limits.max_descriptor_bytes,
-                limits.max_inline_bytes,
-                limits.max_palette,
-                limits.max_period,
-                limits.max_chunk_size,
-            )
-            .unwrap();
+            let d = crate::format::descriptor::decode(&bytes, &limits).unwrap();
             assert!(d.validate(&limits).is_ok());
         }
         let read = store.read_file(f, 0, 65536).unwrap();

@@ -18,6 +18,7 @@ pub mod epoch_seq_monotonic;
 pub mod fsck;
 pub mod fuse_epoch;
 pub mod helpers;
+pub mod hostile_media;
 pub mod io_backend_parity;
 pub mod model_bundle;
 pub mod model_oracle;

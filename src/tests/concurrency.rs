@@ -215,15 +215,7 @@ fn extent_family(store: &Store, offset: u64) -> String {
         crate::store::extent_tree::covering(root, offset, 64, limits.max_fanout, store)
             .unwrap()
             .unwrap();
-    let d = crate::format::descriptor::decode(
-        &bytes,
-        limits.max_descriptor_bytes,
-        limits.max_inline_bytes,
-        limits.max_palette,
-        limits.max_period,
-        limits.max_chunk_size,
-    )
-    .unwrap();
+    let d = crate::format::descriptor::decode(&bytes, &limits).unwrap();
     d.family().to_string()
 }
 

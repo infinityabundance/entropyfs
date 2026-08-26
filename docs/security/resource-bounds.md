@@ -61,9 +61,50 @@ Every cache is bounded; eviction is LRU-ish and never affects correctness.
 
 ## 6. Testing
 
-- Fuzz targets assert "typed error, never panic, never OOM" on malformed
-  inputs (ADR-0016).
-- Property tests assert `allocation ≤ limit` for every parse path.
-- A stress test feeds a store full of hostile descriptors (huge lengths,
-  deep chains, huge fanouts) and asserts bounded CPU/memory via the budget
-  counters.
+IMPLEMENTED — the Phase-11A hostile-media court
+(`src/tests/hostile_media/`, spec in `docs/security/hostile-media-court.md`;
+sealed evidence under `evidence/hostile-media/`):
+
+- **Descriptor court** (`descriptor_court.rs`): every bounded byte string
+  through `format::descriptor::decode` under deliberately tight limits
+  and the defaults; decode-OK ⇒ `validate` OK (enforced inside `decode`),
+  encoded size within the descriptor cap, byte-exact canonical
+  re-encode. Corpus: one real descriptor of every family (all 17 +
+  every residual kind), truncated at every byte boundary, plus the
+  8192/8193 descriptor-cap boundary and every rank/count/ordering
+  violation the format defines.
+- **Materialization-graph court** (`graph_court.rs`): a fuzz-defined
+  descriptor table + object table + entry descriptor materialized
+  through an in-memory hostile resolver (`HostileResolver`, mirroring
+  the store's `DecoderContext`). Materialization either succeeds within
+  all declared resource bounds (valid seeds pin the exact bytes) or
+  returns a typed error — never panic, never OOM, never unbounded CPU
+  (the budget/depth/allocation counters are what this court proves).
+  Attacks self-reference, cycles, depth bombs, chains at exactly 4/5,
+  diamonds (deepest-path), shared-dict double branches, invalid
+  dictionary chains, corrupted models, hostile command streams.
+- **Store court** (`store_court.rs`): the CRC-aware distinction over real
+  tiny stores — physical corruption (broken envelope → integrity
+  rejection) vs semantic adversarial mutation (recomputed envelope CRC →
+  deep parsers), plus the whole-store mutator (flip / truncate / splice
+  / duplicate / reorder / alter lengths / replace tags / replace
+  payloads / recompute CRC selectively) driving open/fsck/materialize,
+  with the authenticated-bytes clause checked store-side. B-tree fanout
+  4096/4097, unsorted/duplicate keys, a valid-CRC envelope containing a
+  malicious descriptor, and mutation-log duplicate / non-monotonic
+  sequences.
+
+The court asserts "typed error, never panic, never OOM" on malformed
+inputs (ADR-0016), and its `resource-bounds` claim is only ever written
+as implemented when the sealed evidence exists in the repository.
+
+The rest of the suite (implemented today):
+
+- property tests asserting `allocation ≤ limit` for the parse paths
+  (proptest round trips, `src/tests/`);
+- crash courts over both io backends with byte-identical store parity
+  (`src/tests/crash_recovery.rs`, `src/tests/io_backend_parity.rs`);
+- the write path's structural gate (`Representation::validate`) before any
+  descriptor is persisted (`put_chunk_in_tx`), and the materializer's
+  independent bound checks (output size, allocation size, reference
+  depth, work budget) on every read path.

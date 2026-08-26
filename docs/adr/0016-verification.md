@@ -22,11 +22,20 @@ different verification tool.
   restart → mount/read or fsck → verify state is an admissible pre/post
   transaction state, no unreachable authoritative metadata, logical hashes
   intact. Machine-readable receipts.
-- **Fuzzing (cargo-fuzz)**: record decoder, superblock decoder, descriptor
-  decoder, rank/unrank, materializer, residual application, rANS model
-  parser, extent-tree mutation, directory mutation, fsck record walker,
-  corrupted-segment recovery. Malformed persistent data must return typed
-  errors, never panic.
+- **Fuzzing (hostile-media court, in-package)**: the Phase-11A hostile-
+  media court (`src/tests/hostile_media/`, `docs/security/hostile-media-
+  court.md`) is the malformed-input suite: descriptor-decode fuzzing
+  (every bounded byte string through `format::descriptor::decode`;
+  decode-OK implies structural validation OK and a byte-exact canonical
+  re-encode), bounded materialization-graph fuzzing (a fuzz-defined
+  descriptor table + object table + entry descriptor materialized
+  through an in-memory hostile resolver; bounded-valid or typed-reject),
+  and the whole-store mutator (physical corruption with broken CRC vs
+  semantic adversarial mutation with recomputed CRC, driving
+  open/fsck/materialize over tiny stores). The driver is proptest — a
+  deliberate in-package harness rather than a `fuzz/` Cargo package
+  (ADR-0001: one package; no architectural drift). Malformed persistent
+  data must return typed errors, never panic.
 - **Kani** where it provides real value at bounded sizes: checked extent
   arithmetic, sparse rank/unrank small cases, permutation rank/unrank at
   bounded sizes, descriptor output-length proofs, residual inverse

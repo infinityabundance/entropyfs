@@ -297,15 +297,8 @@ impl DecoderContext for FsckCtx {
         )
         .map_err(|e| MaterializeError::InvalidDescriptor(e.to_string()))?
         .ok_or(MaterializeError::MissingChunk(*id))?;
-        crate::format::descriptor::decode(
-            &bytes,
-            self.options.max_descriptor_bytes,
-            self.options.max_inline_bytes,
-            self.options.max_palette,
-            self.options.max_period,
-            self.options.max_chunk_size,
-        )
-        .map_err(|e| MaterializeError::InvalidDescriptor(e.to_string()))
+        crate::format::descriptor::decode(&bytes, &self.limits())
+            .map_err(|e| MaterializeError::InvalidDescriptor(e.to_string()))
     }
 
     fn decode_rans(

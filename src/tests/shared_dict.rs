@@ -108,15 +108,7 @@ fn extent_family(store: &Store, ino: u64, offset: u64) -> String {
     )
     .unwrap()
     .expect("extent covers offset");
-    let d = crate::format::descriptor::decode(
-        &bytes,
-        limits.max_descriptor_bytes,
-        limits.max_inline_bytes,
-        limits.max_palette,
-        limits.max_period,
-        limits.max_chunk_size,
-    )
-    .unwrap();
+    let d = crate::format::descriptor::decode(&bytes, &limits).unwrap();
     d.family().to_string()
 }
 
@@ -178,15 +170,7 @@ fn shared_dict_pass_rewrites_family_correlated_chunks() {
         .into_iter()
         .next()
         .unwrap();
-        let d = crate::format::descriptor::decode(
-            &bytes,
-            store.limits().max_descriptor_bytes,
-            store.limits().max_inline_bytes,
-            store.limits().max_palette,
-            store.limits().max_period,
-            store.limits().max_chunk_size,
-        )
-        .unwrap();
+        let d = crate::format::descriptor::decode(&bytes, store.limits()).unwrap();
         if d.family() == "SEQUENCE_SHARED_DICT" {
             assert_eq!(
                 crate::optimizer::rebase::chain_depth(&store, &d),

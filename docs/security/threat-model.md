@@ -53,6 +53,23 @@ operation, and fsck reports a generation regression as a finding.
 See `docs/security/resource-bounds.md`. No allocation derives directly from
 a disk field without a limit check.
 
+## 5b. Fuzz courts and the CRC-aware distinction
+
+The hostile-media court (`docs/security/hostile-media-court.md`) is the
+adversarial input suite. It runs TWO complementary corruption flavors,
+and the distinction matters: **physical corruption** (mutate bytes, leave
+CRC32C broken) is the bit-rot court — the envelope rejects before the
+deep parsers run; **semantic adversarial mutation** (mutate descriptor /
+tree / model / inode / mutation-log payloads and RECOMPUTE the envelope
+CRC and content id) forces the hostile payload through the deeper
+parsers. "Flip random bits in a store image" alone would mostly fuzz
+CRC32C; the semantic flavor is what reaches the descriptor codec, the
+B-tree walks, the inode decode, the materializer and the epoch replay.
+The acceptance criterion for both: never panic, never hang, allocations
+bounded, and never return bytes inconsistent with the descriptor's
+authenticated content identity (checked store-side through the opened
+store's own view).
+
 ## 6. Dependency trust
 
 `cargo-deny` + `cargo-audit` gate the dependency graph (ADR-0017). The

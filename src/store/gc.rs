@@ -201,14 +201,7 @@ pub fn mark_live_full(store: &Store) -> Result<LiveMark, StoreError> {
         let Some(bytes) = store.chunk_descriptor(&cid)? else {
             continue;
         };
-        let desc = match crate::format::descriptor::decode(
-            &bytes,
-            limits.max_descriptor_bytes,
-            limits.max_inline_bytes,
-            limits.max_palette,
-            limits.max_period,
-            limits.max_chunk_size,
-        ) {
+        let desc = match crate::format::descriptor::decode(&bytes, &limits) {
             Ok(d) => d,
             Err(_) => continue,
         };
@@ -323,14 +316,7 @@ fn collect_descriptor_refs(
     referenced: &mut HashSet<ChunkId>,
 ) -> Result<(), StoreError> {
     let l = store.config().limits;
-    let desc = match crate::format::descriptor::decode(
-        bytes,
-        l.max_descriptor_bytes,
-        l.max_inline_bytes,
-        l.max_palette,
-        l.max_period,
-        l.max_chunk_size,
-    ) {
+    let desc = match crate::format::descriptor::decode(bytes, &l) {
         Ok(d) => d,
         Err(_) => return Ok(()),
     };
@@ -368,14 +354,7 @@ fn mark_descriptor_refs(
     worklist: &mut Vec<(ChunkId, MarkKind)>,
 ) -> Result<(), StoreError> {
     let l = store.config().limits;
-    let desc = match crate::format::descriptor::decode(
-        bytes,
-        l.max_descriptor_bytes,
-        l.max_inline_bytes,
-        l.max_palette,
-        l.max_period,
-        l.max_chunk_size,
-    ) {
+    let desc = match crate::format::descriptor::decode(bytes, &l) {
         Ok(d) => d,
         Err(_) => return Ok(()), // not a descriptor (defensive)
     };

@@ -79,15 +79,7 @@ fn inserted_region_roundtrips_and_uses_base_sequence() {
     )
     .unwrap()
     .unwrap();
-    let desc = crate::format::descriptor::decode(
-        &bytes,
-        limits.max_descriptor_bytes,
-        limits.max_inline_bytes,
-        limits.max_palette,
-        limits.max_period,
-        limits.max_chunk_size,
-    )
-    .unwrap();
+    let desc = crate::format::descriptor::decode(&bytes, &limits).unwrap();
     match &desc {
         crate::core::representation::Representation::BaseResidual { residual, .. } => {
             assert!(

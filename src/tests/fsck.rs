@@ -318,15 +318,7 @@ fn verify_materialized_with_dedup_aliases() {
     )
     .unwrap()
     .unwrap();
-    let desc = crate::format::descriptor::decode(
-        &second_desc,
-        store.limits().max_descriptor_bytes,
-        store.limits().max_inline_bytes,
-        store.limits().max_palette,
-        store.limits().max_period,
-        store.limits().max_chunk_size,
-    )
-    .unwrap();
+    let desc = crate::format::descriptor::decode(&second_desc, store.limits()).unwrap();
     assert!(
         matches!(
             desc,

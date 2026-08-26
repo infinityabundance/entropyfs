@@ -50,15 +50,8 @@ pub fn run(args: &ExplainArgs) -> Result<(), String> {
     let mut logical_total = 0u64;
     let mut descriptor_total = 0u64;
     for (_, bytes) in &entries {
-        let desc = crate::format::descriptor::decode(
-            bytes,
-            store.limits().max_descriptor_bytes,
-            store.limits().max_inline_bytes,
-            store.limits().max_palette,
-            store.limits().max_period,
-            store.limits().max_chunk_size,
-        )
-        .map_err(|e| format!("descriptor decode: {e:?}"))?;
+        let desc = crate::format::descriptor::decode(bytes, store.limits())
+            .map_err(|e| format!("descriptor decode: {e:?}"))?;
         *by_family
             .entry(crate::cli::inspect::family_name(&desc))
             .or_insert(0) += desc.len();

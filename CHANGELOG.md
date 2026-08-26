@@ -1,5 +1,67 @@
 # EntropyFS changelog
 
+## v0.7.0 (2026-08-26)
+
+**11A — hostile-media court.** The security documentation claimed fuzz
+assurance that the repository did not implement; this release closes the
+gap with the persistent-data adversarial suite (`src/tests/hostile_media/`,
+spec in `docs/security/hostile-media-court.md`, sealed evidence under
+`evidence/hostile-media/court-1787750426-a4e8a7a/`). The backing store is
+treated as untrusted/corrupt input; the oracle is uniform — bounded-valid
+result OR typed rejection, never panic/OOM/unbounded CPU, never bytes
+inconsistent with the authenticated content identity:
+
+1. **Descriptor court** (`descriptor_court.rs`): every bounded byte
+   string through `format::descriptor::decode` under deliberately tight
+   limits AND the defaults. decode-OK implies `validate` OK, encoded size
+   within the descriptor cap, and a byte-exact canonical re-encode.
+   Corpus: one real descriptor of every representation family (all 17 +
+   every residual kind) truncated at every byte boundary, the 8192/8193
+   descriptor-cap boundary, and every rank/count/ordering violation the
+   format defines.
+
+2. **Materialization-graph court** (`graph_court.rs`): a fuzz-defined
+   descriptor table + object table + entry descriptor materialized
+   through an in-memory hostile resolver that mirrors the store's
+   `DecoderContext`. Valid seeds pin the exact materialized bytes;
+   structural bombs (self-reference, cycles, depth bombs, chains at
+   exactly 4/5, diamonds, shared-dict double branches, invalid dictionary
+   chains, corrupted models, hostile command streams) must terminate
+   boundedly — the budget/depth/allocation counters are what this court
+   proves.
+
+3. **Store court** (`store_court.rs`): the CRC-aware distinction —
+   physical corruption (broken envelope → integrity rejection) vs
+   semantic adversarial mutation (envelope CRC + content id recomputed so
+   the hostile payload reaches the deep parsers), over real tiny stores
+   with a whole-store mutator (flip / truncate / splice / duplicate /
+   reorder / alter lengths / replace tags / replace payloads / recompute
+   CRC selectively) driving open/fsck/materialize. Dedicated exhibits:
+   B-tree fanout exactly 4096/4097, unsorted and duplicate keys, a
+   valid-CRC envelope containing a malicious (self-referential)
+   descriptor, and mutation-log duplicate / non-monotonic sequences.
+
+**Layering fix the court required:** `format::descriptor::decode` now
+ takes the full `&Limits` and passes every decoded representation through
+ `Representation::validate` before returning — the read path never hands
+ an unvalidated descriptor to the materializer, matching the write path's
+ gate (`put_chunk_in_tx`). The on-disk format is unchanged; the parser is
+ stricter about accepting, never about encoding. This is the invariant
+ the security documentation always described, now actually enforced and
+ fuzz-proven.
+
+Also: `docs/security/resource-bounds.md` §6 is corrected to describe the
+implemented court (it previously claimed fuzz targets that did not
+ exist); `docs/security/threat-model.md` documents the two-court
+ CRC-aware distinction; ADR-0016's fuzzing section records the decision
+ to run the hostile-media court as an in-package proptest-driven harness
+ rather than a `fuzz/` Cargo package (ADR-0001: one package);
+ `tools/hostile-court.sh` is the evidence-sealing runner.
+
+Sealed: the court runs 200k descriptor cases + 200k graph cases + 30k
+store-mutator cases per proptest target in release mode, plus the full
+lib suite (428 tests), all green; evidence receipt at the revision above.
+
 ## v0.6.3 (2026-08-26)
 
 **10G — parallel-workload hardening.** The writeback-native architecture

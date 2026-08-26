@@ -135,15 +135,7 @@ fn extract_extent(store: &Store, ino: u64, offset: u64, dir: u64) -> Option<Exte
         store,
     )
     .ok()??;
-    let desc = crate::format::descriptor::decode(
-        &bytes,
-        limits.max_descriptor_bytes,
-        limits.max_inline_bytes,
-        limits.max_palette,
-        limits.max_period,
-        limits.max_chunk_size,
-    )
-    .ok()?;
+    let desc = crate::format::descriptor::decode(&bytes, &limits).ok()?;
     let refs = |model: ChunkId, enc_obj: ChunkId| crate::rans::sequence::StreamRefs {
         model,
         enc_obj,

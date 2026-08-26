@@ -82,8 +82,15 @@ pub(crate) fn numbers(store: &Store) -> (u64, u64, u64, BTreeMap<String, u64>) {
             crate::store::extent_tree::scan_all(root, crate::store::BTREE_ORDER, 256, store)
                 .unwrap()
         {
-            let d = crate::format::descriptor::decode(&bytes, 1 << 20, 4096, 256, 1 << 16, 1 << 16)
-                .unwrap();
+            let loose = crate::core::limits::Limits {
+                max_descriptor_bytes: 1 << 20,
+                max_inline_bytes: 4096,
+                max_palette: 256,
+                max_period: 1 << 16,
+                max_chunk_size: 1 << 16,
+                ..Default::default()
+            };
+            let d = crate::format::descriptor::decode(&bytes, &loose).unwrap();
             *families.entry(d.family().to_string()).or_insert(0) += 1;
             let _ = d;
         }
@@ -752,14 +759,7 @@ fn print_tree_gap_decomposition() {
         )
         .unwrap()
         {
-            let Ok(d) = crate::format::descriptor::decode(
-                &bytes,
-                limits.max_descriptor_bytes,
-                limits.max_inline_bytes,
-                limits.max_palette,
-                limits.max_period,
-                limits.max_chunk_size,
-            ) else {
+            let Ok(d) = crate::format::descriptor::decode(&bytes, &limits) else {
                 continue;
             };
             descriptor_bytes += d.encoded_size();

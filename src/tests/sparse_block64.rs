@@ -60,15 +60,7 @@ fn overflow_range_sparse_roundtrips_via_write_path() {
     )
     .unwrap()
     .unwrap();
-    let desc = crate::format::descriptor::decode(
-        &bytes,
-        limits.max_descriptor_bytes,
-        limits.max_inline_bytes,
-        limits.max_palette,
-        limits.max_period,
-        limits.max_chunk_size,
-    )
-    .unwrap();
+    let desc = crate::format::descriptor::decode(&bytes, &limits).unwrap();
     assert!(
         matches!(
             desc,

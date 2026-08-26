@@ -106,15 +106,7 @@ fn extent_descriptor(store: &Store, ino: u64, offset: u64) -> Vec<u8> {
 fn extent_family(store: &Store, ino: u64, offset: u64) -> String {
     let limits = store.limits();
     let bytes = extent_descriptor(store, ino, offset);
-    let desc = crate::format::descriptor::decode(
-        &bytes,
-        limits.max_descriptor_bytes,
-        limits.max_inline_bytes,
-        limits.max_palette,
-        limits.max_period,
-        limits.max_chunk_size,
-    )
-    .unwrap();
+    let desc = crate::format::descriptor::decode(&bytes, &limits).unwrap();
     desc.family().to_string()
 }
 
@@ -311,15 +303,7 @@ fn in_batch_dict_chain_never_exceeds_decode_cap() {
             .unwrap()
             .expect("extent covers offset")
         };
-        let desc = crate::format::descriptor::decode(
-            &bytes,
-            store.limits().max_descriptor_bytes,
-            store.limits().max_inline_bytes,
-            store.limits().max_palette,
-            store.limits().max_period,
-            store.limits().max_chunk_size,
-        )
-        .unwrap();
+        let desc = crate::format::descriptor::decode(&bytes, store.limits()).unwrap();
         let depth = crate::optimizer::rebase::chain_depth(&store, &desc);
         assert!(
             depth <= max_depth,

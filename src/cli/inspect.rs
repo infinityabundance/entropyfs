@@ -47,15 +47,8 @@ pub fn run(args: &InspectArgs) -> Result<(), String> {
             println!("file: {}", args.path);
             println!("logical: {} bytes ({} extents)", inode.size, entries.len());
             for (start, bytes) in entries {
-                let desc = crate::format::descriptor::decode(
-                    &bytes,
-                    store.limits().max_descriptor_bytes,
-                    store.limits().max_inline_bytes,
-                    store.limits().max_palette,
-                    store.limits().max_period,
-                    store.limits().max_chunk_size,
-                )
-                .map_err(|e| format!("descriptor decode: {e:?}"))?;
+                let desc = crate::format::descriptor::decode(&bytes, store.limits())
+                    .map_err(|e| format!("descriptor decode: {e:?}"))?;
                 let focused = start <= args.offset && args.offset < start + desc.len();
                 if focused {
                     println!();

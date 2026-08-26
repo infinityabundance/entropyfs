@@ -1568,15 +1568,7 @@ fn extent_decomposition(
         crate::store::extent_tree::scan_all(root, BTREE_ORDER, limits.max_fanout, store)
             .map_err(|e| e.to_string())?
     {
-        let d = crate::format::descriptor::decode(
-            &bytes,
-            limits.max_descriptor_bytes,
-            limits.max_inline_bytes,
-            limits.max_palette,
-            limits.max_period,
-            limits.max_chunk_size,
-        )
-        .map_err(|e| e.to_string())?;
+        let d = crate::format::descriptor::decode(&bytes, &limits).map_err(|e| e.to_string())?;
         descriptor_bytes += d.encoded_size();
         *families.entry(d.family().to_string()).or_insert(0) += 1;
         // Objects are counted once per unique id: content-addressed stores
@@ -2036,14 +2028,7 @@ fn per_extent_overhead(store: &Store) -> Result<(u64, u64), String> {
             crate::store::extent_tree::scan_all(root, BTREE_ORDER, limits.max_fanout, store)
                 .map_err(|e| e.to_string())?
         {
-            let Ok(d) = crate::format::descriptor::decode(
-                &bytes,
-                limits.max_descriptor_bytes,
-                limits.max_inline_bytes,
-                limits.max_palette,
-                limits.max_period,
-                limits.max_chunk_size,
-            ) else {
+            let Ok(d) = crate::format::descriptor::decode(&bytes, &limits) else {
                 continue;
             };
             descriptor_bytes = descriptor_bytes.saturating_add(d.encoded_size());
@@ -2170,14 +2155,7 @@ fn tree_families(store: &Store) -> Result<BTreeMap<String, u64>, String> {
             crate::store::extent_tree::scan_all(root, BTREE_ORDER, limits.max_fanout, store)
                 .map_err(|e| e.to_string())?
         {
-            if let Ok(d) = crate::format::descriptor::decode(
-                &bytes,
-                limits.max_descriptor_bytes,
-                limits.max_inline_bytes,
-                limits.max_palette,
-                limits.max_period,
-                limits.max_chunk_size,
-            ) {
+            if let Ok(d) = crate::format::descriptor::decode(&bytes, &limits) {
                 *families.entry(d.family().to_string()).or_insert(0) += 1;
             }
         }

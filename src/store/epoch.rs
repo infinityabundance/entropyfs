@@ -407,15 +407,7 @@ impl crate::core::materialize::DecoderContext for PrefetchContext<'_> {
     > {
         if let Some(bytes) = self.ep.and_then(|e| e.overlay_chunk(id)) {
             let limits = *self.store.limits();
-            return crate::format::descriptor::decode(
-                &bytes,
-                limits.max_descriptor_bytes,
-                limits.max_inline_bytes,
-                limits.max_palette,
-                limits.max_period,
-                limits.max_chunk_size,
-            )
-            .map_err(|e| {
+            return crate::format::descriptor::decode(&bytes, &limits).map_err(|e| {
                 crate::core::materialize::MaterializeError::InvalidDescriptor(e.to_string())
             });
         }

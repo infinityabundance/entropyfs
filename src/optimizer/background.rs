@@ -180,14 +180,7 @@ fn evaluate_commit_extent(
     stats: &mut BackgroundStats,
 ) -> Result<(), StoreError> {
     let limits = *store.limits();
-    let desc = match crate::format::descriptor::decode(
-        &desc_bytes,
-        limits.max_descriptor_bytes,
-        limits.max_inline_bytes,
-        limits.max_palette,
-        limits.max_period,
-        limits.max_chunk_size,
-    ) {
+    let desc = match crate::format::descriptor::decode(&desc_bytes, &limits) {
         Ok(d) => d,
         Err(_) => {
             stats.errors += 1;
@@ -391,14 +384,7 @@ pub(crate) fn shared_dict_pass_pool(
         let Some(first_bytes) = store.extent_descriptor(ino, 0)? else {
             continue;
         };
-        let desc = match crate::format::descriptor::decode(
-            &first_bytes,
-            limits.max_descriptor_bytes,
-            limits.max_inline_bytes,
-            limits.max_palette,
-            limits.max_period,
-            limits.max_chunk_size,
-        ) {
+        let desc = match crate::format::descriptor::decode(&first_bytes, &limits) {
             Ok(d) => d,
             Err(_) => continue,
         };
@@ -571,14 +557,7 @@ fn select_anchor_pool(
         let Some(desc_bytes) = store.chunk_descriptor(&ChunkId::of(c))? else {
             continue;
         };
-        let Ok(desc) = crate::format::descriptor::decode(
-            &desc_bytes,
-            limits.max_descriptor_bytes,
-            limits.max_inline_bytes,
-            limits.max_palette,
-            limits.max_period,
-            limits.max_chunk_size,
-        ) else {
+        let Ok(desc) = crate::format::descriptor::decode(&desc_bytes, &limits) else {
             continue;
         };
         if crate::core::cost::reference_depth(&desc) != 0 {
@@ -826,14 +805,7 @@ fn collect_model_member(
     limits: &crate::core::limits::Limits,
 ) -> Result<Option<ModelMember>, StoreError> {
     use crate::core::representation::Representation;
-    let desc = match crate::format::descriptor::decode(
-        &desc_bytes,
-        limits.max_descriptor_bytes,
-        limits.max_inline_bytes,
-        limits.max_palette,
-        limits.max_period,
-        limits.max_chunk_size,
-    ) {
+    let desc = match crate::format::descriptor::decode(&desc_bytes, &limits) {
         Ok(d) => d,
         Err(_) => return Ok(None),
     };

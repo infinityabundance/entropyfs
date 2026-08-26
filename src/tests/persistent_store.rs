@@ -118,15 +118,7 @@ fn extents(store: &Store, ino: u64) -> Vec<(u64, crate::core::representation::Re
         .unwrap()
         .into_iter()
         .map(|(start, bytes)| {
-            let d = crate::format::descriptor::decode(
-                &bytes,
-                limits.max_descriptor_bytes,
-                limits.max_inline_bytes,
-                limits.max_palette,
-                limits.max_period,
-                limits.max_chunk_size,
-            )
-            .unwrap();
+            let d = crate::format::descriptor::decode(&bytes, &limits).unwrap();
             (start, d)
         })
         .collect()
@@ -521,15 +513,7 @@ fn rans_extent_survives_remount() {
         )
         .unwrap();
         assert!(!all.is_empty());
-        let desc = crate::format::descriptor::decode(
-            &all[0].1,
-            store.limits().max_descriptor_bytes,
-            store.limits().max_inline_bytes,
-            store.limits().max_palette,
-            store.limits().max_period,
-            store.limits().max_chunk_size,
-        )
-        .unwrap();
+        let desc = crate::format::descriptor::decode(&all[0].1, store.limits()).unwrap();
         assert!(
             matches!(desc, Representation::Rans { .. }),
             "expected RANS, got {desc:?}"

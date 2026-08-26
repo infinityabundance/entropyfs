@@ -190,14 +190,7 @@ fn representation_distribution(
     )
     .map_err(|e| e.to_string())?
     {
-        if let Ok(d) = crate::format::descriptor::decode(
-            &bytes,
-            limits.max_descriptor_bytes,
-            limits.max_inline_bytes,
-            limits.max_palette,
-            limits.max_period,
-            limits.max_chunk_size,
-        ) {
+        if let Ok(d) = crate::format::descriptor::decode(&bytes, &limits) {
             *counts.entry(d.family()).or_insert(0) += 1;
         }
     }

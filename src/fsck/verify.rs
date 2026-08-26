@@ -301,14 +301,7 @@ fn verify_extents(ctx: &mut FsckCtx, inodes: &HashMap<u64, Inode>) -> Result<(),
                         .try_into()
                         .map_err(|_| "extent key not 8 bytes".to_string())?,
                 );
-                let desc = match crate::format::descriptor::decode(
-                    &desc_bytes,
-                    ctx.options.max_descriptor_bytes,
-                    ctx.options.max_inline_bytes,
-                    ctx.options.max_palette,
-                    ctx.options.max_period,
-                    ctx.options.max_chunk_size,
-                ) {
+                let desc = match crate::format::descriptor::decode(&desc_bytes, &ctx.limits()) {
                     Ok(d) => d,
                     Err(e) => {
                         ctx.issues.push(FsckIssue::new(
@@ -404,14 +397,7 @@ fn verify_extent_content(ctx: &mut FsckCtx, ino: u64, start: u64, desc: &Represe
             // descriptor (e.g. an EXACT_REF alias resolves to the original
             // descriptor for the shared content), so the binding is proven
             // by materialization, not descriptor-byte equality (§33).
-            let idx_desc = match crate::format::descriptor::decode(
-                &v,
-                ctx.options.max_descriptor_bytes,
-                ctx.options.max_inline_bytes,
-                ctx.options.max_palette,
-                ctx.options.max_period,
-                ctx.options.max_chunk_size,
-            ) {
+            let idx_desc = match crate::format::descriptor::decode(&v, &ctx.limits()) {
                 Ok(d) => d,
                 Err(e) => {
                     ctx.issues.push(FsckIssue::new(
@@ -480,14 +466,7 @@ fn verify_chunk_index(ctx: &mut FsckCtx) -> Result<(), String> {
                 .try_into()
                 .map_err(|_| "chunk index key not 32 bytes".to_string())?,
         );
-        let desc = match crate::format::descriptor::decode(
-            &v,
-            ctx.options.max_descriptor_bytes,
-            ctx.options.max_inline_bytes,
-            ctx.options.max_palette,
-            ctx.options.max_period,
-            ctx.options.max_chunk_size,
-        ) {
+        let desc = match crate::format::descriptor::decode(&v, &ctx.limits()) {
             Ok(d) => d,
             Err(e) => {
                 ctx.issues.push(FsckIssue::new(

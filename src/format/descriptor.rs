@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 use crate::core::extent::ChunkId;
+use crate::core::limits::Limits;
 use crate::core::representation::{RansCodec, Representation, Residual, TransformId, UniverseId};
 use crate::format::codec::{CodecError, Reader, Writer};
 
@@ -396,21 +397,24 @@ pub fn encode_residual(w: &mut Writer, r: &Residual) -> Result<(), CodecError> {
 /// payloads; `max_palette` bounds palette cardinality; `max_period` bounds
 /// periodic patterns. All structural invariants are validated by the
 /// returned representation's own `validate()`.
-pub fn decode(
-    bytes: &[u8],
-    max_descriptor_bytes: u64,
-    max_inline: u64,
-    max_palette: usize,
-    max_period: u32,
-    max_chunk_size: u64,
-) -> Result<Representation, CodecError> {
-    if bytes.len() as u64 > max_descriptor_bytes {
+/// Decode a representation descriptor under the given limits.
+///
+/// `max_descriptor_bytes` bounds the input; `max_inline` bounds INLINE
+/// payloads; `max_palette` bounds palette cardinality; `max_period` bounds
+/// periodic patterns. The decoded representation is passed through
+/// `Representation::validate` BEFORE it is returned: decode-OK implies
+/// structurally valid (Phase-11A hostile-media contract), so a caller may
+/// rely on the returned representation satisfying every invariant of
+/// `validate` under the same limits. The read path therefore never hands
+/// an unvalidated descriptor to the materializer.
+pub fn decode(bytes: &[u8], limits: &Limits) -> Result<Representation, CodecError> {
+    if bytes.len() as u64 > limits.max_descriptor_bytes {
         return Err(CodecError::TooLong);
     }
     let mut r = Reader::new(bytes);
     let tag = r.u8()?;
     let len = r.u32()? as u64;
-    if len > max_chunk_size {
+    if len > limits.max_chunk_size {
         return Err(CodecError::TooLong);
     }
     let rep = match tag {
@@ -420,7 +424,7 @@ pub fn decode(
             Representation::Fill { value, len }
         }
         TAG_INLINE => {
-            if len > max_inline {
+            if len > limits.max_inline_bytes {
                 return Err(CodecError::TooLong);
             }
             let data = r.take(len as usize)?.to_vec();
@@ -472,7 +476,7 @@ pub fn decode(
         }
         TAG_PALETTE => {
             let m = r.u8()? as usize;
-            if m > max_palette || m == 0 {
+            if m > limits.max_palette || m == 0 {
                 return Err(CodecError::Malformed);
             }
             let palette = r.take(m)?.to_vec();
@@ -490,7 +494,7 @@ pub fn decode(
         }
         TAG_PERIODIC => {
             let period = r.u32()?;
-            if period == 0 || period > max_period {
+            if period == 0 || period > limits.max_period {
                 return Err(CodecError::Malformed);
             }
             let pattern = r.take(period as usize)?.to_vec();
@@ -672,6 +676,16 @@ pub fn decode(
     if !r.done() {
         return Err(CodecError::Malformed);
     }
+    // Phase-11A: decode-OK implies structurally valid. Every descriptor
+    // that survives the parse must satisfy `validate` under the SAME
+    // limits (lengths, canonical forms, rank ranges, stream sanity, and
+    // the encoded-size cap), so no caller — store read path, fsck,
+    // materializer — ever sees a decodable-but-invalid descriptor.
+    rep.validate(limits).map_err(|e| match e {
+        crate::core::representation::ReprError::DescriptorTooLarge
+        | crate::core::representation::ReprError::ChunkTooLarge => CodecError::TooLong,
+        _ => CodecError::Malformed,
+    })?;
     Ok(rep)
 }
 
@@ -771,6 +785,10 @@ mod tests {
     use super::*;
     use crate::core::representation::{Edit, RangeChange};
     use proptest::prelude::*;
+
+    fn dl() -> Limits {
+        Limits::default()
+    }
 
     fn sample_reps() -> Vec<Representation> {
         let id = ChunkId::of(b"sample");
@@ -923,7 +941,7 @@ mod tests {
     fn roundtrip_all_families() {
         for rep in sample_reps() {
             let bytes = encode(&rep).unwrap();
-            let back = decode(&bytes, 8192, 4096, 16, 1024, 262144).unwrap();
+            let back = decode(&bytes, &dl()).unwrap();
             assert_eq!(back, rep, "family roundtrip failed for {rep:?}");
         }
     }
@@ -953,12 +971,12 @@ mod tests {
                 // Some flips produce a *valid different* descriptor (e.g. a
                 // different fill value); the contract is: never panic, and
                 // either a typed error or a structurally valid descriptor.
-                if let Ok(rep2) = decode(&bad, 8192, 4096, 16, 1024, 262144) {
+                if let Ok(rep2) = decode(&bad, &dl()) {
                     // A flipped byte may produce a valid descriptor (e.g.
                     // a different fill value); the contract is: never
                     // panic, and the result must pass structural
                     // validation (or be rejected — either is fine here).
-                    let _ = rep2.validate(&crate::core::limits::Limits::default());
+                    let _ = rep2.validate(&dl());
                 }
             }
         }
@@ -970,7 +988,7 @@ mod tests {
             let bytes = encode(&rep).unwrap();
             for cut in 0..bytes.len() {
                 assert!(
-                    decode(&bytes[..cut], 8192, 4096, 16, 1024, 262144).is_err(),
+                    decode(&bytes[..cut], &dl()).is_err(),
                     "cut at {cut} of {} for {rep:?}",
                     bytes.len()
                 );
@@ -987,10 +1005,11 @@ mod tests {
             len: 64,
         };
         let bytes = encode(&rep).unwrap();
-        assert_eq!(
-            decode(&bytes, bytes.len() as u64 - 1, 4096, 16, 1024, 262144),
-            Err(CodecError::TooLong)
-        );
+        let tight = Limits {
+            max_descriptor_bytes: bytes.len() as u64 - 1,
+            ..Limits::default()
+        };
+        assert_eq!(decode(&bytes, &tight), Err(CodecError::TooLong));
     }
 
     proptest! {
@@ -1010,7 +1029,7 @@ mod tests {
                     continue;
                 }
                 let bytes = encode(&rep).unwrap();
-                let back = decode(&bytes, 8192, 4096, 16, 1024, 262144).unwrap();
+                let back = decode(&bytes, &dl()).unwrap();
                 assert_eq!(back, rep);
                 assert_eq!(bytes.len() as u64, rep.encoded_size());
             }

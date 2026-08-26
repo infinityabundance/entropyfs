@@ -231,15 +231,7 @@ fn mark_descriptor_refs(
     live: &mut HashSet<ChunkId>,
     work: &mut VecDeque<(ChunkId, MarkKind)>,
 ) -> Result<(), String> {
-    let o = &ctx.options;
-    let desc = match crate::format::descriptor::decode(
-        bytes,
-        o.max_descriptor_bytes,
-        o.max_inline_bytes,
-        o.max_palette,
-        o.max_period,
-        o.max_chunk_size,
-    ) {
+    let desc = match crate::format::descriptor::decode(bytes, &ctx.limits()) {
         Ok(d) => d,
         // A corrupt descriptor cannot be walked; report it as an issue and
         // continue (fsck must never abort on one bad record).

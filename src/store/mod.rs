@@ -635,14 +635,7 @@ impl Store {
             return Ok(None);
         };
         let limits = self.config.limits;
-        let desc = match crate::format::descriptor::decode(
-            &desc_bytes,
-            limits.max_descriptor_bytes,
-            limits.max_inline_bytes,
-            limits.max_palette,
-            limits.max_period,
-            limits.max_chunk_size,
-        ) {
+        let desc = match crate::format::descriptor::decode(&desc_bytes, &limits) {
             Ok(d) => d,
             Err(_) => return Ok(None),
         };
@@ -718,14 +711,7 @@ impl Store {
                 self,
             )?;
             for (start, desc_bytes) in entries {
-                let desc = match crate::format::descriptor::decode(
-                    &desc_bytes,
-                    limits.max_descriptor_bytes,
-                    limits.max_inline_bytes,
-                    limits.max_palette,
-                    limits.max_period,
-                    limits.max_chunk_size,
-                ) {
+                let desc = match crate::format::descriptor::decode(&desc_bytes, &limits) {
                     Ok(d) => d,
                     Err(_) => continue,
                 };
@@ -1503,14 +1489,7 @@ impl Store {
                 None => self.chunk_descriptor(&id)?,
             };
             if let Some(b) = bytes {
-                if let Ok(d) = crate::format::descriptor::decode(
-                    &b,
-                    limits.max_descriptor_bytes,
-                    limits.max_inline_bytes,
-                    limits.max_palette,
-                    limits.max_period,
-                    limits.max_chunk_size,
-                ) {
+                if let Ok(d) = crate::format::descriptor::decode(&b, &limits) {
                     self.collect_read_deps(ep, &d, depth + 1, deps, seen_objects, seen_nested)?;
                 }
             }
@@ -1539,14 +1518,7 @@ impl Store {
         let mut seen_objects: std::collections::HashSet<ChunkId> = std::collections::HashSet::new();
         let mut seen_nested: std::collections::HashSet<ChunkId> = std::collections::HashSet::new();
         for (_, bytes) in extents {
-            let desc = crate::format::descriptor::decode(
-                bytes,
-                limits.max_descriptor_bytes,
-                limits.max_inline_bytes,
-                limits.max_palette,
-                limits.max_period,
-                limits.max_chunk_size,
-            )?;
+            let desc = crate::format::descriptor::decode(bytes, &limits)?;
             self.collect_read_deps(ep, &desc, 0, &mut deps, &mut seen_objects, &mut seen_nested)?;
             descs.push(desc);
         }
@@ -1966,14 +1938,7 @@ impl Store {
                 self,
             )? {
                 Some((start, desc_bytes)) => {
-                    let desc = crate::format::descriptor::decode(
-                        &desc_bytes,
-                        limits.max_descriptor_bytes,
-                        limits.max_inline_bytes,
-                        limits.max_palette,
-                        limits.max_period,
-                        limits.max_chunk_size,
-                    )?;
+                    let desc = crate::format::descriptor::decode(&desc_bytes, &limits)?;
                     let extent_end = start.saturating_add(desc.len());
                     if extent_end > new_size {
                         let mut chunk = vec![0u8; desc.len() as usize];
@@ -3153,14 +3118,7 @@ impl Store {
                 .and_then(|p| p.descriptors.get(&c.cid))
                 .cloned();
             if let Some(canon_bytes) = canonical {
-                let canon = crate::format::descriptor::decode(
-                    &canon_bytes,
-                    limits.max_descriptor_bytes,
-                    limits.max_inline_bytes,
-                    limits.max_palette,
-                    limits.max_period,
-                    limits.max_chunk_size,
-                )?;
+                let canon = crate::format::descriptor::decode(&canon_bytes, &limits)?;
                 let reuse_cost = canon_bytes.len() as u64;
                 let alias = if options.allow_exact_ref {
                     crate::core::candidate::exact_ref_candidate(
@@ -3438,14 +3396,7 @@ impl Store {
                     self,
                 )?;
                 for (_, bytes) in entries {
-                    if let Ok(d) = crate::format::descriptor::decode(
-                        &bytes,
-                        limits.max_descriptor_bytes,
-                        limits.max_inline_bytes,
-                        limits.max_palette,
-                        limits.max_period,
-                        limits.max_chunk_size,
-                    ) {
+                    if let Ok(d) = crate::format::descriptor::decode(&bytes, &limits) {
                         total = total.saturating_add(d.len());
                     }
                 }
@@ -3848,15 +3799,8 @@ impl DecoderContext for Store {
             .chunk_descriptor(id)
             .map_err(|e| MaterializeError::Universe(e.to_string()))?
         {
-            Some(bytes) => crate::format::descriptor::decode(
-                &bytes,
-                self.config.limits.max_descriptor_bytes,
-                self.config.limits.max_inline_bytes,
-                self.config.limits.max_palette,
-                self.config.limits.max_period,
-                self.config.limits.max_chunk_size,
-            )
-            .map_err(|e| MaterializeError::InvalidDescriptor(e.to_string())),
+            Some(bytes) => crate::format::descriptor::decode(&bytes, &self.config.limits)
+                .map_err(|e| MaterializeError::InvalidDescriptor(e.to_string())),
             None => Err(MaterializeError::MissingChunk(*id)),
         }
     }
@@ -5366,14 +5310,7 @@ impl Store {
                 inode_id,
             } => {
                 for (off, cid, desc_bytes) in chunks {
-                    let rep = crate::format::descriptor::decode(
-                        desc_bytes,
-                        limits.max_descriptor_bytes,
-                        limits.max_inline_bytes,
-                        limits.max_palette,
-                        limits.max_period,
-                        limits.max_chunk_size,
-                    )?;
+                    let rep = crate::format::descriptor::decode(desc_bytes, &limits)?;
                     Store::put_chunk_in_tx(tx, cid, &rep)?;
                     Store::put_extent_in_tx(tx, *ino, *off, &rep)?;
                 }

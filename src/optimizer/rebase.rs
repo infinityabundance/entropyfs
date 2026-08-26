@@ -61,14 +61,7 @@ pub fn chain_depth(store: &Store, desc: &Representation) -> u8 {
             let Some(desc_bytes) = store.chunk_descriptor(&cur).ok().flatten() else {
                 continue;
             };
-            let Ok(next_desc) = crate::format::descriptor::decode(
-                &desc_bytes,
-                limits.max_descriptor_bytes,
-                limits.max_inline_bytes,
-                limits.max_palette,
-                limits.max_period,
-                limits.max_chunk_size,
-            ) else {
+            let Ok(next_desc) = crate::format::descriptor::decode(&desc_bytes, &limits) else {
                 continue;
             };
             let mut nexts: Vec<ChunkId> = Vec::new();
@@ -159,14 +152,7 @@ pub fn chain_depth_uncapped(
             let Some(desc_bytes) = store.chunk_descriptor(&cur).ok().flatten() else {
                 continue;
             };
-            let Ok(next_desc) = crate::format::descriptor::decode(
-                &desc_bytes,
-                limits.max_descriptor_bytes,
-                limits.max_inline_bytes,
-                limits.max_palette,
-                limits.max_period,
-                limits.max_chunk_size,
-            ) else {
+            let Ok(next_desc) = crate::format::descriptor::decode(&desc_bytes, &limits) else {
                 continue;
             };
             let mut nexts: Vec<ChunkId> = Vec::new();
@@ -252,14 +238,7 @@ pub fn chain_contains(
         let Some(desc_bytes) = store.chunk_descriptor(&cur_id).ok().flatten() else {
             continue;
         };
-        let Ok(desc) = crate::format::descriptor::decode(
-            &desc_bytes,
-            limits.max_descriptor_bytes,
-            limits.max_inline_bytes,
-            limits.max_palette,
-            limits.max_period,
-            limits.max_chunk_size,
-        ) else {
+        let Ok(desc) = crate::format::descriptor::decode(&desc_bytes, &limits) else {
             continue;
         };
         let mut nexts: Vec<ChunkId> = Vec::new();
