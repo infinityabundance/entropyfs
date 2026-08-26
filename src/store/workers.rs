@@ -50,6 +50,25 @@ fn cap() -> usize {
 struct BudgetState {
     cap: usize,
     in_flight: usize,
+    /// Threads currently parked on the condvar (queue depth).
+    waiters: usize,
+    /// Peak concurrent waiters observed.
+    max_waiters: usize,
+}
+
+/// Phase-11D oracle snapshot of the worker budget (diagnostic counters).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WorkerOracleSnapshot {
+    /// Sum of requested worker slots.
+    pub requested: u64,
+    /// Sum of granted worker slots.
+    pub granted: u64,
+    /// Acquires that had to wait for the semaphore.
+    pub blocked: u64,
+    /// Grant events (worker batches).
+    pub batches: u64,
+    /// Peak concurrent threads parked on the condvar.
+    pub max_queue_depth: u64,
 }
 
 /// The process-wide worker budget (a counting semaphore over search/decode
@@ -57,8 +76,11 @@ struct BudgetState {
 pub struct WorkerBudget {
     state: Mutex<BudgetState>,
     cv: Condvar,
-    /// Diagnostics: total worker batches granted (for the perf diag).
-    grants: AtomicUsize,
+    /// Phase-11D oracle counters (diagnostic; never affect scheduling).
+    requested: AtomicUsize,
+    granted: AtomicUsize,
+    blocked: AtomicUsize,
+    batches: AtomicUsize,
 }
 
 impl WorkerBudget {
@@ -67,9 +89,14 @@ impl WorkerBudget {
             state: Mutex::new(BudgetState {
                 cap: 0, // lazily set at the first acquisition
                 in_flight: 0,
+                waiters: 0,
+                max_waiters: 0,
             }),
             cv: Condvar::new(),
-            grants: AtomicUsize::new(0),
+            requested: AtomicUsize::new(0),
+            granted: AtomicUsize::new(0),
+            blocked: AtomicUsize::new(0),
+            batches: AtomicUsize::new(0),
         }
     }
 
@@ -82,11 +109,22 @@ impl WorkerBudget {
         if st.cap == 0 {
             st.cap = cap();
         }
-        while st.in_flight + want > st.cap {
-            st = self.cv.wait(st).expect("worker budget poisoned");
+        self.requested
+            .fetch_add(want, std::sync::atomic::Ordering::Relaxed);
+        if st.in_flight + want > st.cap {
+            st.waiters += 1;
+            st.max_waiters = st.max_waiters.max(st.waiters);
+            self.blocked
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            while st.in_flight + want > st.cap {
+                st = self.cv.wait(st).expect("worker budget poisoned");
+            }
+            st.waiters -= 1;
         }
         st.in_flight += want;
-        self.grants
+        self.granted
+            .fetch_add(want, std::sync::atomic::Ordering::Relaxed);
+        self.batches
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         drop(st);
         WorkerGrant { n: want }
@@ -102,10 +140,64 @@ impl WorkerBudget {
         drop(st);
         self.cv.notify_all();
     }
+
+    /// Phase-11D oracle: the budget's cumulative counters.
+    pub fn snapshot(&self) -> WorkerOracleSnapshot {
+        let st = self.state.lock().expect("worker budget poisoned");
+        WorkerOracleSnapshot {
+            requested: self.requested.load(std::sync::atomic::Ordering::Relaxed) as u64,
+            granted: self.granted.load(std::sync::atomic::Ordering::Relaxed) as u64,
+            blocked: self.blocked.load(std::sync::atomic::Ordering::Relaxed) as u64,
+            batches: self.batches.load(std::sync::atomic::Ordering::Relaxed) as u64,
+            max_queue_depth: st.max_waiters as u64,
+        }
+    }
 }
 
 /// The process-wide budget.
 pub static WORKERS: WorkerBudget = WorkerBudget::new();
+
+/// The oracle's worker clock: true thread-CPU time (`CLOCK_THREAD_CPUTIME`)
+/// where the kernel provides it, wall time as the fallback. This is what
+/// lets the 11D oracle distinguish USEFUL search/decode CPU from semaphore
+/// queue wait and spawn/join overhead — `prepare` is otherwise one opaque
+/// bucket.
+pub struct WorkerClock {
+    cpu: Option<u64>,
+    wall: std::time::Instant,
+}
+
+impl WorkerClock {
+    /// Start the clock.
+    pub fn start() -> Self {
+        Self {
+            cpu: thread_cpu_ns(),
+            wall: std::time::Instant::now(),
+        }
+    }
+
+    /// Nanoseconds elapsed on THIS thread (CPU time when available).
+    pub fn elapsed_ns(&self) -> u64 {
+        match self.cpu {
+            Some(c0) => thread_cpu_ns().unwrap_or(c0).saturating_sub(c0),
+            None => self.wall.elapsed().as_nanos() as u64,
+        }
+    }
+}
+
+/// `CLOCK_THREAD_CPUTIME_ID` nanoseconds (Linux); `None` elsewhere.
+fn thread_cpu_ns() -> Option<u64> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = rustix::time::ClockId::ThreadCPUTime;
+        None
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let t = rustix::time::clock_gettime(rustix::time::ClockId::ThreadCPUTime);
+        Some(t.tv_sec as u64 * 1_000_000_000 + t.tv_nsec as u64)
+    }
+}
 
 /// An RAII worker grant: releases the reservation on drop (including the
 /// panic path — the scoped threads' join propagates a worker panic before

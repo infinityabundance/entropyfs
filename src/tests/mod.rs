@@ -42,4 +42,5 @@ pub mod split_write;
 pub mod srctree_diag;
 pub mod unsafe_ledger;
 pub mod uring_bench;
+pub mod worker_oracle;
 pub mod write_parallel;

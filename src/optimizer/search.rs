@@ -185,6 +185,14 @@ pub fn encode_guided(
         let mut dd = store.perf().time("search_dedup", || {
             dedup_candidates(store, ctx.target, cid, &limits, ctx.pending, &options)
         })?;
+        // Phase-11D oracle: workload-validity probe (0/1). The oracle
+        // feeds each sweep distinct content, so this must stay 0 — a
+        // non-zero dedup-hit fraction means the sweep is measuring the
+        // EXACT_REF cache, not search CPU (the first oracle run's 16T
+        // collapse was exactly that).
+        store
+            .perf()
+            .record("probe_dedup_hit", if dd.is_empty() { 0 } else { 1 });
         if !options.allow_exact_ref {
             // Content-addressed object sharing is a store invariant, not a
             // representation: reusing a canonical descriptor of an allowed
@@ -264,6 +272,16 @@ pub fn encode_guided(
         .min_by_key(|c| metric(c))
         .map(|c| metric(c) <= raw_bytes / 8)
         .unwrap_or(false);
+    // Phase-11D oracle: the decisive early-exit fraction (0/1) and the
+    // pre-rANS candidate count — the search-collapse witnesses. With
+    // distinct content these must be 0 / 0: the expensive families must
+    // run on every chunk or the sweep is not measuring search CPU.
+    store
+        .perf()
+        .record("probe_decisive1", if decisive { 1 } else { 0 });
+    store
+        .perf()
+        .record("probe_pre_rans_cands", candidates.len() as u64);
     if !decisive && options.allow_configurational && fg_set.configurational {
         store.perf().time("search_configurational", || {
             for enc in [

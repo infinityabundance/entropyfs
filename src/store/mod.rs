@@ -1697,7 +1697,11 @@ impl Store {
                     .map(|n| n.get())
                     .unwrap_or(4),
             );
+            // Phase-11D oracle: the decode batch's queue wait (Gate A).
+            let t_q = std::time::Instant::now();
             let grant = crate::store::workers::grant(want);
+            self.perf
+                .record("worker_queue_wait", t_q.elapsed().as_nanos() as u64);
             let workers = grant.n();
             if workers <= 1 {
                 for (i, desc) in descs.iter().enumerate() {
@@ -1707,6 +1711,11 @@ impl Store {
             }
             let n = descs.len();
             let mut runs: Vec<Result<Vec<(u64, Vec<u8>)>, StoreError>> = Vec::new();
+            // Phase-11D oracle: the decode scope wall (Gate B) and the
+            // workers' true thread-CPU time (Gate C).
+            let t_s = std::time::Instant::now();
+            let useful = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let perf = &self.perf;
             std::thread::scope(|s| {
                 let mut handles = Vec::with_capacity(workers);
                 for w in 0..workers {
@@ -1718,7 +1727,10 @@ impl Store {
                     let descs = &descs;
                     let starts = &starts;
                     let ctx = &ctx;
+                    let useful = std::sync::Arc::clone(&useful);
+                    let perf = perf;
                     handles.push(s.spawn(move || {
+                        let t0 = crate::store::workers::WorkerClock::start();
                         let mut mine = Vec::with_capacity(hi - lo);
                         for i in lo..hi {
                             let desc = &descs[i];
@@ -1734,7 +1746,9 @@ impl Store {
                             )
                             .map_err(|e| StoreError::Descriptor(e.to_string()))?;
                             mine.push((starts[i], chunk));
+                            perf.record("worker_tasks", 0);
                         }
+                        useful.fetch_add(t0.elapsed_ns(), std::sync::atomic::Ordering::Relaxed);
                         Ok(mine)
                     }));
                 }
@@ -1745,6 +1759,12 @@ impl Store {
                     });
                 }
             });
+            self.perf
+                .record("worker_scope_wall", t_s.elapsed().as_nanos() as u64);
+            self.perf.record(
+                "worker_useful_cpu",
+                useful.load(std::sync::atomic::Ordering::Relaxed),
+            );
             // Assemble (extent ranges are disjoint and ordered).
             for run in runs {
                 for (start, chunk) in run? {
@@ -3254,7 +3274,13 @@ impl Store {
                     .map(|p| p.get())
                     .unwrap_or(4),
             );
+            // Phase-11D oracle: the grant acquisition IS the semaphore
+            // queue wait (Gate A) — measured as its own phase so `prepare`
+            // decomposes into useful CPU + queue wait + spawn/join.
+            let t_q = std::time::Instant::now();
             let grant = crate::store::workers::grant(want);
+            self.perf
+                .record("worker_queue_wait", t_q.elapsed().as_nanos() as u64);
             let workers = grant.n();
             if workers <= 1 {
                 for (j, slot) in results.iter_mut().enumerate() {
@@ -3269,23 +3295,39 @@ impl Store {
                 }
             } else {
                 let per = n.div_ceil(workers);
+                // Phase-11D oracle: the scope wall (Gate B: spawn/join) and
+                // the workers' TRUE thread-CPU time (Gate C: useful work).
+                let t_s = std::time::Instant::now();
+                let useful = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
                 std::thread::scope(|s| {
                     let mut handles = Vec::with_capacity(workers);
                     for (w, slice) in results.chunks_mut(per).enumerate() {
                         let store = &*self;
                         let composed = &composed[..];
+                        let useful = std::sync::Arc::clone(&useful);
                         handles.push(s.spawn(move || {
+                            // The oracle's worker clock: true thread-CPU
+                            // time — the useful-search-CPU contribution.
+                            let t0 = crate::store::workers::WorkerClock::start();
                             for (j, slot) in slice.iter_mut().enumerate() {
                                 let c = &composed[w * per + j];
                                 let r = encode_prepared_chunk(store, c, ino, limits, options, fg);
                                 *slot = Some(r);
+                                store.perf().record("worker_tasks", 0);
                             }
+                            useful.fetch_add(t0.elapsed_ns(), std::sync::atomic::Ordering::Relaxed);
                         }));
                     }
                     for h in handles {
                         let _ = h.join();
                     }
                 });
+                self.perf
+                    .record("worker_scope_wall", t_s.elapsed().as_nanos() as u64);
+                self.perf.record(
+                    "worker_useful_cpu",
+                    useful.load(std::sync::atomic::Ordering::Relaxed),
+                );
             }
         }
 
