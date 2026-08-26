@@ -1,5 +1,40 @@
 # EntropyFS changelog
 
+## v0.6.0 (2026-08-26)
+
+**10E — segment read-fd cache + range-traversal read paths (no format
+change, no new feature bit):** the read path used to open the segment
+file afresh for every object fetch and descend the extent tree
+chunk-by-chunk per read. Now: one read-only fd per segment (append-only
+while mounted, so a cached fd never goes stale) with offset-based
+`pread` (no shared seek position; thread-safe), and one `scan_range`
+traversal per file read (`read_file` and the epoch overlay path) instead
+of a per-chunk `covering` descent.
+
+**Reference-depth invariant fixes (correctness; surfaced by the real-tree
+tests, not by the read-path change):**
+
+- The depth walks (`chain_depth` / `chain_depth_uncapped`) undercounted
+diamond-shaped reference DAGs — a SEQUENCE_SHARED_DICT whose dictionary
+chain and shared chain converge — because a first-reached-wins visited
+set blocked deeper paths through an already-visited chunk. The depth gate
+could then admit a descriptor whose true chain exceeds
+`max_reference_depth`, leaving the file unreadable (`DepthExceeded`).
+The walks now record the DEEPEST depth at which each node was explored.
+- A background pass could replace a chunk-index entry (content id →
+descriptor) with a DEEPER descriptor after an earlier extent had already
+been validated against the shallower entry — references resolve through
+the index at materialize time, so the earlier extent became unreadable.
+A post-pass convergence sweep (`Store::rebase_overdepth_extents`, run at
+the end of `optimize_pass` / `shared_dict_pass` / `model_bundle_pass`)
+rebases any extent whose chain now exceeds the decode cap to a depth-0
+encoding, §32-gated (relaxed decode budget recovers the bytes).
+
+Regression-tested (`chain_depth_reports_deepest_path_through_a_diamond`);
+full suite 365 lib + 1 bin tests green; real-tree convergence, remount,
+fsck and crash courts all green. 10E is implemented with the read-path
+changes in place; the mounted FUSE court for 10E is pending.
+
 ## Unreleased (Phase 10: writeback-native persistence)
 
 **10B — ruthless foreground selection:** `ForegroundPolicy` (full/cheap/raw-
