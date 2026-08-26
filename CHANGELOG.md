@@ -1,6 +1,6 @@
 # EntropyFS changelog
 
-## Unreleased
+## v0.7.5 (2026-08-26)
 
 **Ultra-verbose commentary doctrine — applied repository-wide.** The
 implementation is research evidence; the commentary standard
@@ -43,7 +43,8 @@ entire source tree (~59 400 lines, every module):
 
 Comment-only pass: `cargo check --all-targets` clean (pre-existing
 warnings only), full 421-test lib suite green, no measurement or on-disk
-behavior changed — no evidence updates, no version bump.
+behavior changed — no evidence updates. Released as 0.7.5 (patch;
+docs-only, no behavior change).
 
 ## v0.7.4 (2026-08-26)
 
