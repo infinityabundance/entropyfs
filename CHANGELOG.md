@@ -1,12 +1,14 @@
 # EntropyFS changelog
 
-## Unreleased — Phase 11D: the worker-pool decision oracle
+## v0.7.3 (2026-08-26)
 
-Diagnostic, not a release: the 11C semaphore's `prepare` bucket is
-bounded but opaque, so before building a fair worker pool the oracle
-(`src/tests/worker_oracle.rs`, sealed at
+**11D — the worker-pool decision oracle.** The 11C semaphore's `prepare`
+bucket is bounded but opaque; before building a fair worker pool, the
+oracle (`src/tests/worker_oracle.rs`, sealed at
 `evidence/performance/worker-oracle-1787765041-052bc46/`;
-`docs/performance/worker-oracle.md`) decomposes it at 1/2/4/8/16 writers:
+`docs/performance/worker-oracle.md`) decomposes it at 1/2/4/8/16 writers
+(the search/decode workers now report true thread-CPU time via
+`CLOCK_THREAD_CPUTIME`):
 
 - `worker_queue_wait` — the grant acquisition (Gate A: semaphore queue).
 - `worker_scope_wall` — the scoped-thread scope duration (Gate B).
