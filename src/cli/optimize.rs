@@ -5,6 +5,44 @@
 //! channels, universe negative control, reference-chain flattening), and
 //! atomically replaces extents whose new representation is strictly
 //! cheaper — after byte-exact validation (§32) and a CAS check (§25).
+//!
+//! # PURPOSE
+//!
+//! Expose the optimizer as a CLI: run the per-extent densification pass,
+//! then the amortized shared-dictionary pass (Phase 9C) and the
+//! amortized entropy-model pass (Phase 9G), printing the saved-bytes
+//! accounting of each. The `--raw-only` / `--raw-rans` / `--no-dsfb`
+//! flags are ablation gates so a store can be optimized under a
+//! constrained pipeline for comparison.
+//!
+//! # BOUNDARY
+//!
+//! KNOWS: `OptimizeOptions` gates and the three background passes.
+//! NEVER KNOWS: how any pass encodes; it only observes
+//! `optimize_pass` stats. The command refuses to run on a mounted store
+//! (`crate::fsck::ensure_unmounted`) — the background worker owns
+//! optimization while mounted.
+//!
+//! # MODEL
+//!
+//! A linear pipeline over the store: per-extent pass → shared-dict pass →
+//! model-bundle pass, each strict-cheaper (a rewrite only when the new
+//! representation saves bytes after validation). Each pass reports
+//! scanned / rewritten / saved bytes (persisted bytes, best-effort
+//! estimate from the stats), and the shared/model passes self-gate on
+//! their feature flags, so their output lines appear only when they did
+//! work.
+//!
+//! # KEY INVARIANTS
+//!
+//! - Unmounted-only: running against a mounted store would race the
+//!   background worker and the epoch write path.
+//! - Every rewrite is strictly cheaper AND byte-exact validated (§32)
+//!   and CAS-checked (§25) — this command never trades correctness for
+//!   density.
+//! - The three ablation flags compose: `--raw-only` / `--raw-rans`
+//!   select a restricted pipeline; `--no-dsfb` disables plan ordering
+//!   within the full pipeline.
 
 #![forbid(unsafe_code)]
 

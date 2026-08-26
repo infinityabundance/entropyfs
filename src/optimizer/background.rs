@@ -10,6 +10,118 @@
 //!   can never overwrite a newer foreground write;
 //! - the pass runs on extents in a snapshot; commits replace one extent at
 //!   a time.
+//!
+//! PURPOSE
+//!     Re-encode cold extents into strictly cheaper representations when
+//!     the filesystem is otherwise idle: the full-search pass
+//!     (`optimize_pass`), the cross-file shared-dictionary pass
+//!     (`shared_dict_pass`), and the amortized entropy-model pass
+//!     (`model_bundle_pass`), driven by an idle-gated daemon worker
+//!     (`spawn_background_worker`). The foreground write path defers work
+//!     here on purpose (Phase-10B): the background full search recovers
+//!     everything the cheap foreground skips.
+//!
+//! BOUNDARY
+//!     This module knows the COMMITTED store (inode list, extent trees,
+//!     object/chunk indexes) and the candidate/encoder machinery. It
+//!     never defines correctness — §32 byte-exactness lives in candidate
+//!     validation — and it never reads or writes the active epoch's
+//!     pending state (Phase-10D: the pass flushes the epoch first,
+//!     because re-encoding a file the epoch is mid-write to would corrupt
+//!     the overlay view). It only proposes; the store's transactional
+//!     commit path decides what becomes durable.
+//!
+//! MODEL
+//!     The pass is a reader of committed state that materializes an
+//!     extent, searches for a strictly cheaper valid representation, and
+//!     commits it only if the extent is unchanged since the read (the CAS
+//!     gate, §25) and the candidate is byte-exact (§32). Commits replace
+//!     one extent at a time; every pass is idempotent and resumable
+//!     (`PassCursor`), so bounded cycles can cover the whole store without
+//!     a global lock.
+//!
+//! PERSISTENT AUTHORITY
+//!     Yes — a committed rewrite replaces the extent's on-disk descriptor
+//!     and can add objects (encoded payloads, models, shared-dictionary
+//!     references). Two consequences are load-bearing:
+//!
+//!     - a rewritten extent may reference an anchor chunk chosen from
+//!       another file; that anchor is then pinned by GC through the
+//!       reference closure, so a deleted anchor owner never breaks
+//!       surviving members (see `shared_dict_pass`);
+//!     - an extent's decode depth is resolved through the chunk index at
+//!       materialize time, so a later rewrite of the same content can
+//!       deepen an already-committed chain; every pass closes with the
+//!       Phase-10E convergence sweep (`Store::rebase_overdepth_extents`).
+//!
+//! CORRECTNESS INVARIANTS
+//!     - every committed replacement is byte-exact against the
+//!       materialized incumbent (§32), re-checked through a resolver that
+//!       can see the candidate's own staged objects;
+//!     - a rewrite commits only when the extent's descriptor is unchanged
+//!       since the read (the CAS token, §25) — never overwrite a newer
+//!       foreground write;
+//!     - only strictly cheaper representations commit (persisted-byte
+//!       accounting: descriptor + attributable objects, see
+//!       `current_persisted_bytes` / `update_persisted_bytes`);
+//!     - the logical content id (`ChunkId::of(bytes)`) is the final gate
+//!       before commit;
+//!     - no committed extent may exceed `max_reference_depth`: the
+//!       Phase-10E sweep enforces it after every pass;
+//!     - passes are idempotent: re-running a completed pass commits
+//!       nothing.
+//!
+//! CONCURRENCY
+//!     Runs concurrently with foreground readers and writers. Reads at the
+//!     store level are lock-free (reads traverse committed snapshots), so
+//!     scanning never blocks requests; the worker additionally defers a
+//!     cycle while the op counter advances (idle gate). Commits take the
+//!     per-inode lock, which closes the CAS check→commit window against
+//!     foreground writers for that inode. The three passes run
+//!     sequentially per worker cycle; one worker per filesystem instance.
+//!
+//! DURABILITY
+//!     Commits go through the ordinary transactional commit path
+//!     (`commit_file_extents` with `CrashHooks::none()`), so a committed
+//!     rewrite is as durable as any foreground write. Background savings
+//!     are never acknowledged to a user: settling is not a request.
+//!
+//! RESOURCE BOUNDS
+//!     All work is bounded by explicit counts: `max_extents` bounds the
+//!     pass slice (the worker uses `WORKER_CYCLE_EXTENTS` = 64 extents per
+//!     idle cycle); anchor candidates are capped at `MAX_ANCHOR_CANDIDATES`
+//!     = 12 with the pool at `MAX_ANCHOR_POOL` = 4 per directory, each at
+//!     least `MIN_ANCHOR_BYTES` = 512 bytes; the model bundle pool is
+//!     `MAX_MODEL_POOL` = 4. Depth walks are capped by the store's depth
+//!     limits (see `optimizer::rebase`).
+//!
+//! PERFORMANCE
+//!     Shaped as an idle-only, bounded, resumable worker so optimization
+//!     CPU lands on cold data and never competes with requests. Measured
+//!     rationale (tree court, `evidence/performance/INDEX.md`): post-GC
+//!     per-file density rises with the passes — shared dict 2.182× →
+//!     2.328× (`campaign-1787679299-8d6e147`), + anchor pool + deep
+//!     family 2.194× → 2.354× (`campaign-1787681660-9be6bd3`), + model
+//!     bundles 2.813× → 2.881× (`campaign-1787685723-60ecaf2`) — and the
+//!     Phase-10B court proves cheap-foreground + background-settle keeps
+//!     settled density unchanged (1.994×, evidence `d38f73f`).
+//!
+//! FAILURE MODES
+//!     Expected and counted per extent: decode/materialize/encode errors →
+//!     `errors`, CAS miss → `stale_skips`, no strict gain → `no_gain`. A
+//!     failing extent never blocks the pass. A corrupting flatten is never
+//!     committed (`flatten_if_deep` returns `None` on byte mismatch). The
+//!     one state that must never occur is a committed extent whose chain
+//!     exceeds the decode cap — the Phase-10E sweep exists to prevent
+//!     exactly that (unreadable files became possible before it).
+//!
+//! HISTORY / EVIDENCE
+//!     Phase-9B (`current_persisted_bytes` and staged-object resolution
+//!     defects surfaced by SequenceDict), 9C/9D (shared dictionary +
+//!     anchor pool), 9E (deep family), 9G (amortized model bundles; oracle
+//!     S1/S3/S4 falsified), 10B (foreground/background division of labor),
+//!     10D (epoch flush before rewrite), 10E (convergence rebase).
+//!     Evidence: the sealed campaigns in `evidence/performance/INDEX.md`.
 
 #![forbid(unsafe_code)]
 
@@ -23,6 +135,18 @@ use crate::store::transaction::CrashHooks;
 use crate::store::{Store, StoreError};
 
 /// Background-pass statistics (reported by the CLI and `status`).
+///
+/// Role: the per-call accounting of one background pass (or one worker
+/// cycle's worth of passes). Counters are CUMULATIVE within the call, not
+/// snapshots of store state: `scanned` counts extents examined,
+/// `rewritten` counts committed replacements, and `saved_bytes` is the
+/// summed (current − new) persisted bytes over the rewritten extents.
+///
+/// Per extent, exactly one exit is counted (`rewritten` / `stale_skips` /
+/// `no_gain` / `errors`); the exceptions are the Phase-10E convergence
+/// sweep, which adds rebased extents to `rewritten` without scanning
+/// them, and the model pass, which charges a whole rejected cohort to
+/// `no_gain` at once.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BackgroundStats {
     /// Extents examined.
@@ -63,6 +187,12 @@ pub fn current_persisted_bytes(
 
 /// Resumable pass cursor: where the last bounded pass stopped. Best-effort
 /// (inode numbers can change between passes; the pass is idempotent).
+///
+/// Units: `ino_index` is an INDEX into the inode list snapshot the next
+/// pass takes (not an inode number), so a stale cursor merely resumes at
+/// a nearby inode; `offset` is the extent start offset in bytes within
+/// that inode's extent tree. A completed (untruncated) pass resets the
+/// cursor to default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PassCursor {
     /// Index into the inode list where the next pass resumes.
@@ -85,17 +215,38 @@ pub fn optimize_pass(
     max_extents: Option<u64>,
     mut cursor: Option<&mut PassCursor>,
 ) -> Result<BackgroundStats, StoreError> {
+    // ---------------------------------------------------------------------
+    // Stage 1: Flush the active epoch into the committed store.
+    //
     // Phase-10D: the optimizer rewrites COMMITTED state; the active
     // epoch's pending chunks are invisible to it (and re-encoding a file
     // the epoch is mid-write to would corrupt the overlay view). Flush
     // the epoch first.
+    // ---------------------------------------------------------------------
     store.ensure_epoch_flushed(&crate::store::transaction::CrashHooks::none())?;
+    // ---------------------------------------------------------------------
+    // Stage 2: Position the cursor over the inode list snapshot.
+    //
+    // `inos` is the snapshot of committed inodes this pass walks; a
+    // resumable pass starts at `(start_idx, resume_offset)` and advances
+    // as it goes. `truncated` records whether `max_extents` stopped the
+    // pass before the end.
+    // ---------------------------------------------------------------------
     let mut stats = BackgroundStats::default();
     let inos = store.all_inodes()?;
     let start_idx = cursor.as_ref().map(|c| c.ino_index).unwrap_or(0);
     let mut resume_offset = cursor.as_ref().map(|c| c.offset).unwrap_or(0);
     let mut idx = 0usize;
     let mut truncated = false;
+    // ---------------------------------------------------------------------
+    // Stage 3: Walk inodes and extents, evaluating one extent at a time.
+    //
+    // Each extent is materialized and re-searched with the full plan;
+    // `evaluate_commit_extent` commits only a strictly cheaper valid
+    // replacement and only when the extent is unchanged since we read it.
+    // When `max_extents` is hit, the cursor is parked at the current
+    // (inode index, extent start) so the next pass resumes exactly here.
+    // ---------------------------------------------------------------------
     'ino: for ino in &inos {
         let at = *ino;
         if idx < start_idx {
@@ -147,16 +298,24 @@ pub fn optimize_pass(
         }
         idx += 1;
     }
+    // ---------------------------------------------------------------------
+    // Stage 4: Reset the cursor when the pass completed.
+    //
     // A pass that was not truncated by `max_extents` completed: reset the
     // cursor so the next pass starts fresh.
+    // ---------------------------------------------------------------------
     if !truncated {
         if let Some(c) = cursor {
             *c = PassCursor::default();
         }
     }
+    // ---------------------------------------------------------------------
+    // Stage 5: Phase-10E convergence sweep.
+    //
     // Phase-10E convergence: index-entry replacements during this pass may
     // have deepened previously-committed chains past the decode cap; rebase
     // any such extent to a depth-0 encoding so no file becomes unreadable.
+    // ---------------------------------------------------------------------
     let rebased = store.rebase_overdepth_extents(&crate::store::transaction::CrashHooks::none())?;
     stats.rewritten = stats.rewritten.saturating_add(rebased);
     Ok(stats)
@@ -179,6 +338,15 @@ fn evaluate_commit_extent(
     options: OptimizeOptions,
     stats: &mut BackgroundStats,
 ) -> Result<(), StoreError> {
+    // ---------------------------------------------------------------------
+    // Stage 1: Decode and materialize the incumbent extent.
+    //
+    // `desc_bytes` is the CAS token — the exact committed descriptor this
+    // pass read and materialized from; `bytes` is the logical content any
+    // replacement must reproduce byte-exactly (§32). A decode/materialize
+    // failure is counted, not fatal: an undecodable extent is never a
+    // rewrite target.
+    // ---------------------------------------------------------------------
     let limits = *store.limits();
     let desc = match crate::format::descriptor::decode(&desc_bytes, &limits) {
         Ok(d) => d,
@@ -195,6 +363,16 @@ fn evaluate_commit_extent(
         }
     };
     let cid = ChunkId::of(&bytes);
+    // ---------------------------------------------------------------------
+    // Stage 2: Generate candidate replacements.
+    //
+    // 2a. The rebase candidate: flatten a deep reference chain to a
+    //     depth-0 encoding (the λ_depth tradeoff; §11).
+    // 2b. The guided search — once without a shared dictionary, or once
+    //     per pool anchor (each full search also covers every
+    //     anchor-independent family, so the winner is the best across all
+    //     anchors).
+    // ---------------------------------------------------------------------
     // Rebasing: a deep reference chain may be worth flattening to a
     // depth-0 encoding even when the guided search prefers the chain
     // (λ_depth tradeoff; §11).
@@ -255,6 +433,16 @@ fn evaluate_commit_extent(
             }
         }
     }
+    // ---------------------------------------------------------------------
+    // Stage 3: Select the strictly-cheaper best candidate.
+    //
+    // The persisted-byte total is category-agnostic: descriptor + new
+    // object payloads + attributable integrity. `update_persisted_bytes`
+    // counts every payload in the update (whether or not the object
+    // already exists) — conservative, never phantom savings. The winner
+    // must beat the incumbent by strictly fewer bytes, so a rewrite never
+    // trades bytes away for density.
+    // ---------------------------------------------------------------------
     // Choose the cheapest guided outcome (any anchor) and the rebased
     // candidate, whichever is strictly cheaper than current. The
     // persisted-byte total is category-agnostic: descriptor + new object
@@ -288,9 +476,30 @@ fn evaluate_commit_extent(
         stats.no_gain += 1;
         return Ok(());
     }
-    // CAS: the extent must still hold the descriptor we read (§25 — never
-    // overwrite a newer write). The per-inode lock closes the
-    // check→commit window against foreground writers.
+    // ---------------------------------------------------------------------
+    // Stage 4: CAS gate, content-id gate, and commit.
+    //
+    // WHY THE CAS TOKEN IS THE INCUMBENT DESCRIPTOR BYTES:
+    //
+    // The optimizer read a file state (decoded `desc`, materialized
+    // `bytes`), then spent real CPU computing a denser representation.
+    // Between that read and this commit, a foreground writer may have
+    // replaced the extent with NEW bytes. Committing the stale candidate
+    // would silently overwrite the newer write's bytes with the old
+    // content, re-encoded — a data-loss class, not a density question.
+    // The gate therefore commits only when the extent is UNCHANGED since
+    // the read, and the read's only witness is the descriptor itself:
+    // `desc_bytes` is the exact committed bytes we materialized from, so
+    // the compare IS the CAS token. Without the gate a concurrent write's
+    // bytes could be silently replaced by stale candidate bytes.
+    //
+    // `store.inode_lock(ino)` — the same per-inode mutation lock the
+    // write path takes (`write_region_with_fg`, `write_region_batch`,
+    // `truncate_file`) — then closes the check→commit window against
+    // foreground writers, making the comparison and the replacement
+    // atomic with respect to that inode's writers (§25 — never overwrite
+    // a newer write).
+    // ---------------------------------------------------------------------
     let _lock = store.inode_lock(ino);
     let current_desc = store.extent_descriptor(ino, start)?;
     let stale = match current_desc {
@@ -315,6 +524,13 @@ fn evaluate_commit_extent(
 
 /// Persisted bytes attributable to an extent update: descriptor + the
 /// payloads of the new objects it requires + attributable integrity.
+///
+/// Units: persisted bytes (physical). Every object payload in the update
+/// is counted whether or not it already exists in the object index — a
+/// conservative overestimate of the marginal cost, never an
+/// underestimate — so the strictly-cheaper gate cannot commit on phantom
+/// savings. (The 9G model pass is stricter: its model cost charges only
+/// unique payloads absent from the committed CAS.)
 fn update_persisted_bytes(update: &crate::store::ExtentUpdate) -> u64 {
     let mut total = update.descriptor.encoded_size();
     for o in &update.objects {
@@ -336,6 +552,22 @@ fn update_persisted_bytes(update: &crate::store::ExtentUpdate) -> u64 {
 /// pool anchor as the SEQUENCE_SHARED_DICT dictionary when strictly
 /// cheaper (same commit path as `optimize_pass`, incl. the CAS gate and
 /// byte-exact validation).
+///
+/// WHY ANCHORS SURVIVE OWNER DELETION:
+///
+/// An anchor is a member first-chunk: an existing terminal chunk owned by
+/// some file in the directory. Once surviving members reference it as
+/// their SEQUENCE_SHARED_DICT dictionary, the anchor becomes reachable
+/// through those extents' REFERENCE CLOSURE, and GC — which traces from
+/// the roots through every referenced object — pins it for as long as any
+/// referencing extent survives. A deleted owner's anchor therefore
+/// remains a valid dictionary source for surviving members; no separate
+/// anchor registration or pin list exists, and none is needed. Evidence:
+/// the shared-dict era tree courts sealed the post-GC per-file gains
+/// (9C `campaign-1787679299-8d6e147` 2.182× → 2.328×; 9D/9E
+/// `campaign-1787681660-9be6bd3` 2.194× → 2.354×; 9G
+/// `campaign-1787685723-60ecaf2` 2.813× → 2.881×), all measured AFTER
+/// GC ran — surviving references kept their anchors alive.
 ///
 /// v1 anchors are terminal descriptors (reference depth 0), so every
 /// rewritten extent has depth ≤ 1 and shared-dictionary chains cannot

@@ -1,12 +1,61 @@
 //! Predictor channels and their evidence features
 //! (`docs/theory/dsfb-selection.md`).
+//!
+//! # Purpose
+//!
+//! Define the channel vocabulary — the predictor families a candidate can
+//! belong to (P0..P8) — and derive the bounded evidence scalar each
+//! evaluated channel feeds the observer: [`Features::from_base`] compares
+//! a candidate base against the target chunk and reduces the comparison
+//! to a `[0, 1]` measurement.
+//!
+//! # Boundary
+//!
+//! Evidence extraction is read-only over target/base bytes (diff
+//! summaries and histograms): it never encodes, allocates store objects,
+//! or alters any candidate. Its output is advisory — it shapes trust and
+//! search order only (ADR-0004).
+//!
+//! # Measurement model and units
+//!
+//! [`Features::measurement`] maps the residual-ratio proxy `x ∈ [0, 1]`
+//! (per-byte residual cost; 0 = perfect predictor, 1 = raw-sized) to
+//! `1 − log2(1 + x)/2` — 1.0 for an exact match, 0.5 for a raw-sized
+//! residual — the log-scaled, fixed-denominator normalization of the
+//! theory §2 formula. `diff_density` is differing positions / n;
+//! `hist_change` is the L1 histogram distance over 2n; both are in [0, 1].
+//! When no base exists (or the lengths mismatch) the features are the
+//! worst case — raw-sized residual, no exact match — so a channel must
+//! actually have a usable base to earn trust.
+//!
+//! # Invariants
+//!
+//! - [`Features::measurement`] ∈ [0, 1] for any input (clamped).
+//! - [`Features::from_base`] never panics: missing or mismatched bases
+//!   return worst-case features; empty targets yield density 0.
+//! - `Channel` is `#[repr(u8)]` and its discriminant is used as an array
+//!   index in `observer.rs` (`c as usize` into the EMA/weight/last-y
+//!   arrays) — renumbering channels would silently corrupt observer
+//!   state.
+//!
+//! # Concurrency
+//!
+//! Pure functions over borrowed slices; no shared state, no locks.
+//!
+//! # History / evidence
+//!
+//! Phase 4 defined P0–P5; P8 (SharedDict) joined in Phase-9C (v0.4.0,
+//! gated by the `allow_shared_dict` ablation flag).
 
 #![forbid(unsafe_code)]
 
 use crate::core::candidate::BaseChunk;
 use crate::core::extent::ChunkId;
 
-/// Predictor channel ids (P0..P7).
+/// Predictor channel ids (P0..P8). Each channel is one candidate
+/// predictor family; a channel's discriminant doubles as its index into
+/// the observer's fixed-size state arrays (`observer.rs`), so the ids are
+/// load-bearing — do not renumber.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Channel {
@@ -61,11 +110,18 @@ impl Channel {
 }
 
 /// Raw evidence features extracted from an exact candidate evaluation.
+///
+/// Role: the input to the observer's measurement and to the slew
+/// detector. Every field is derived, advisory evidence about how well one
+/// predictor family reproduced the target chunk — never an authority over
+/// the committed representation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Features {
     /// Channel this evidence belongs to.
     pub channel: Channel,
     /// Encoded residual length ratio (0 = perfect predictor, 1 = raw-sized).
+    /// Computed as the diff-density proxy — `from_base` sets
+    /// `residual_ratio = diff_density`.
     pub residual_ratio: f64,
     /// Non-zero density of the XOR difference (0..1).
     pub diff_density: f64,
@@ -80,9 +136,15 @@ pub struct Features {
 }
 
 impl Features {
-    /// Bounded measurement scalar fed to the observer: `1 − log2(1+residual
-    /// cost)/log2(1+raw cost)` in `[0, 1]`, where residual cost is the
-    /// residual-ratio proxy. Higher = better predictor.
+    /// Bounded measurement scalar fed to the observer: `1 − log2(1 + x)/2`
+    /// with `x` the residual-ratio proxy clamped to [0, 1]. Higher =
+    /// better predictor: 1.0 for an exact match (`x = 0`), 0.5 for a
+    /// raw-sized residual (`x = 1`). This is the log-scaled,
+    /// fixed-denominator normalization of the theory §2 formula
+    /// (`docs/theory/dsfb-selection.md`): the denominator
+    /// `log2(1 + raw_cost)` is held at the constant 2.0 instead of being
+    /// computed from the raw candidate. The result lies in [0.5, 1] for
+    /// the density proxy, so "as expensive as raw" maps to 0.5, not 0.
     pub fn measurement(&self) -> f64 {
         let x = self.residual_ratio.clamp(0.0, 1.0);
         let v = 1.0 - (1.0 + x).log2() / 2.0;
@@ -147,7 +209,16 @@ impl Features {
     }
 }
 
-/// Stable key identifying a (file, offset) logical chunk for observer state.
+/// Stable key identifying a (file, offset) logical chunk for observer
+/// state.
+///
+/// Role: the identity under which per-chunk observer state lives. Because
+/// `content_id` is the *new* chunk's id (built in `encode_guided`), the
+/// key is version-scoped: rewriting a chunk with different bytes creates
+/// a new observer entry (full distrust, Unknown), while re-writing
+/// identical bytes continues the series. Consequence: trust/regime
+/// history never bleeds across content changes, and each distinct version
+/// costs one bounded entry (capped by `DSFB_MAX_CHUNKS` eviction).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ChunkKey {
     /// File inode identifier (logical, stable across writes).

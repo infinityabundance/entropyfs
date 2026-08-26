@@ -24,6 +24,119 @@
 //! `UringIo` is crash-court parity: at every injection point the store
 //! directory must be byte-identical to the `SyncIo` state, and recovery
 //! must produce the same admissible state.
+//!
+//! # PURPOSE
+//!
+//! Define the transport seam below the store and make the syscall
+//! *issuing* strategy replaceable without touching format, durability
+//! ordering, or recovery: `SyncIo` issues each syscall directly and
+//! synchronously; `UringIo` issues the same logical operations through
+//! one io_uring ring. The on-disk format is untouched by the choice — a
+//! store is equally mountable with either backend.
+//!
+//! # BOUNDARY
+//!
+//! KNOWS: the store directory layout, segment file naming and open mode,
+//! the record header size (payloads begin at `offset +
+//! RECORD_HEADER_SIZE`), and the durability primitives the store needs.
+//! NEVER KNOWS: record format semantics, transaction / epoch
+//! orchestration, recovery, or any policy. This module is safe Rust
+//! (`#![forbid(unsafe_code)]`); the crate's one `unsafe` surface is
+//! [`crate::platform::io_uring`], with a ledger entry and a
+//! walk-the-src enforcement test.
+//!
+//! # MODEL
+//!
+//! A backend is a byte-addressed transport: every operation addresses
+//! `(segment_seq, offset, length)` where offsets and lengths are in
+//! bytes within a segment file (or the superblock file, byte offsets).
+//! Backends are `Send + Sync` handles; the store holds one `Arc<dyn
+//! IoBackend>` for its lifetime. `open_segment_common` and
+//! `find_clean_end_bytes` are backend-agnostic and shared so the
+//! open-time torn-tail state machine cannot drift between engines.
+//!
+//! # PERSISTENT AUTHORITY
+//!
+//! Yes — this seam writes the persistent-data surface: segment bytes,
+//! torn-tail truncation, superblock slots + `fsync`, GC unlinks. The
+//! contract per call is identical across backends, and the acceptance
+//! test for `UringIo` is canonically byte-identical store directories at
+//! every crash injection point (inode wall-clock times canonicalized),
+//! with recovery producing the same admissible state.
+//!
+//! # CORRECTNESS INVARIANTS
+//!
+//! - Every call completes its durability work before returning (the
+//!   ADR-0008 recovery contract holds for both backends by
+//!   construction).
+//! - A fresh segment is the 4-byte `SEGMENT_MAGIC` made durable before
+//!   `open_segment` returns; an existing segment has its torn tail
+//!   truncated and made durable; a truncated magic (< 4 bytes) or a
+//!   wrong magic is `Malformed`, never silently accepted.
+//! - `write_at` is pwrite semantics (page-cache accept); short writes
+//!   loop, 0-byte completions are errors.
+//! - `read_many` returns results in request order (the i-th result
+//!   corresponds to the i-th request) — the parallel-decode consumer
+//!   relies on this.
+//! - `delete_segment` is idempotent (missing file tolerated) and only
+//!   runs after the new root is durable (GC ordering lives above).
+//!
+//! # CONCURRENCY
+//!
+//! The seam itself adds no locks: `SyncIo` guards only its fd map
+//! (10E/10E1 discipline — clone the `Arc`, never hold across an op);
+//! `UringIo` guards only its ring. The write path is serialized above
+//! (`commit_lock` + segment mutex); `read_many` is the read-path
+//! parallelism unit (one submission for `UringIo`, sequential preads for
+//! `SyncIo`).
+//!
+//! # DURABILITY
+//!
+//! Acknowledgment semantics are spelled out per method: `write_at` =
+//! page-cache accept; `sync_segment_file` = full fsync (fresh-magic
+//! durability); `fdatasync_segment` = record durability;
+//! `sync_segments_dir` = new segment directory entry durable;
+//! `write_superblock_slot` = page cache; `fsync_superblock` = commit
+//! durable. The store composes these into checkpoints and barriers.
+//!
+//! # RESOURCE BOUNDS
+//!
+//! `read_payload` / `read_many` allocate `stored_len` bytes per request
+//! (record `stored_len` is a `u32` field; the read path validates via
+//! `Limits` above this seam). `uring_entries` bounds the submission
+//! queue capacity of `UringIo` only.
+//!
+//! # PERFORMANCE
+//!
+//! The two implementations exist because the synchronous syscall-per-op
+//! shape dominated the read path (a materialization fetches a model, an
+//! encoded stream, a dictionary and B-tree nodes individually) and the
+//! commit durability sequence. `read_many` batches those fetches into
+//! one ring submission for `UringIo`. The sealed 10F court pair
+//! (tmpfs-backed, `fuse-court-*-10f-sync/uring`) measured `UringIo`
+//! trailing by 5–27% on writes and 7–12% on reads — the ~2.3 µs ring
+//! submit/wait floor on sub-µs tmpfs I/O; the default stays `sync`
+//! (the oracle) until real-device evidence flips it.
+//!
+//! # FAILURE MODES
+//!
+//! `StoreError::Io` for syscall failures; `StoreError::Limit` for
+//! arithmetic overflow in payload offsets; `SegmentError::Malformed` for
+//! a torn/wrong magic; `SegmentError::Overflow` in `find_clean_end_bytes`
+//! for a record whose size overflows. A record that fails decode is a
+//! clean-end boundary, never an error, at open time (torn tail).
+//!
+//! # HISTORY / EVIDENCE
+//!
+//! Phase 10F (v0.6.2, ADR-0021): the seam was introduced with `SyncIo`
+//! as the preserved oracle and `UringIo` as the opt-in performance path;
+//! crash and durability courts are parameterized over both backends
+//! (`src/tests/io_backend_parity.rs`); the sealed pair is
+//! `fuse-court-*-10f-sync/uring`. The `Arc<File>` fd-cache shape came
+//! from Phase 10E1 (`fuse-court-*-10e1-before/after`). The write-path
+//! hunt during 10F also found and fixed `apply_sorted_batch` walking the
+//! whole tree per tiny batch (empty-batch short-circuit, ~50× win on
+//! both backends).
 
 #![forbid(unsafe_code)]
 
@@ -165,7 +278,15 @@ pub fn build_backend(
 /// validate + truncate the torn tail. Both backends share this; the
 /// primitives (`segment_len`, `write_at`, `truncate_segment`,
 /// `sync_segment_file`) are backend-specific.
+///
+/// All offsets and lengths here are byte units within the segment file.
 pub(crate) fn open_segment_common(io: &dyn IoBackend, seq: u64) -> Result<u64, StoreError> {
+    // -----------------------------------------------------------------
+    // Stage 1: fresh segment — write the magic header and make it
+    // durable (sync_all) before returning. A segment the store has never
+    // seen must not be openable as a 0-length file whose first append
+    // lands at offset 0 and is later mistaken for a magic.
+    // -----------------------------------------------------------------
     let len = io.segment_len(seq)?;
     if len == 0 {
         // Fresh segment: write the magic header and make it durable
@@ -174,6 +295,14 @@ pub(crate) fn open_segment_common(io: &dyn IoBackend, seq: u64) -> Result<u64, S
         io.sync_segment_file(seq)?;
         return Ok(4);
     }
+    // -----------------------------------------------------------------
+    // Stage 2: existing segment — read it whole and validate the magic.
+    // A torn magic (crash mid-magic-write) or a wrong magic is
+    // Malformed, never silently treated as valid: the durability
+    // ordering makes a torn magic unreachable in practice (the dir entry
+    // is synced only after open returns), so accepting it here would
+    // paper over a real ordering violation.
+    // -----------------------------------------------------------------
     let bytes = io.read_segment_file(seq)?;
     if bytes.len() < 4 {
         // Torn magic (a crash mid-magic-write): malformed segment. The
@@ -185,6 +314,12 @@ pub(crate) fn open_segment_common(io: &dyn IoBackend, seq: u64) -> Result<u64, S
     if bytes[..4] != SEGMENT_MAGIC {
         return Err(SegmentError::Malformed.into());
     }
+    // -----------------------------------------------------------------
+    // Stage 3: torn-tail removal — find the last clean record boundary
+    // and truncate beyond it, then make the truncation durable (sync_data).
+    // New appends must never follow garbage; a truncation that is not
+    // itself durable could resurrect the garbage after a crash.
+    // -----------------------------------------------------------------
     let clean = find_clean_end_bytes(&bytes)?;
     if clean < len {
         // Truncate the torn tail so new appends never follow garbage, then

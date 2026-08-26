@@ -3,6 +3,60 @@
 //! A [`ChunkId`] is the 256-bit BLAKE3 logical content hash of a chunk's
 //! *materialized* bytes (ADR-0011). Two different physical representations
 //! of the same logical bytes MUST have the same [`ChunkId`].
+//!
+//! # PURPOSE
+//!
+//! Content identity ([`ChunkId`]) and logical extent geometry ([`Extent`]) —
+//! the two value types every other core module builds on.
+//!
+//! # BOUNDARY
+//!
+//! Knows nothing about representations, encoding, the store, or the disk
+//! format. Pure value types with parsing helpers.
+//!
+//! # MODEL
+//!
+//! `ChunkId` = BLAKE3-256 over the *materialized logical bytes* — identity
+//! is representation-independent, so a rewrite that changes the physical
+//! encoding must not change the id. `ChunkId::ZERO` is the "none"
+//! sentinel. `Extent` is a half-open interval `[offset, offset+length)`
+//! within a file, in bytes.
+//!
+//! # PERSISTENT AUTHORITY
+//!
+//! Yes: content ids are persisted in descriptors (references, bases,
+//! models, enc objects), in the chunk index, and as the integrity anchor
+//! — the store authenticates bytes against the id (ADR-0011), and dedup
+//! keys on it. `Extent` offsets/lengths appear in the extent tree.
+//!
+//! # CORRECTNESS INVARIANTS
+//!
+//! - the id is a function of the materialized bytes only: same bytes ⇒
+//!   same id (BLAKE3 collision resistance);
+//! - `is_zero` is a sentinel, never a real content hash (`ChunkId::of`
+//!   cannot produce it except by collision, which is assumed infeasible);
+//! - extent end arithmetic is checked: `[offset, offset+length)` must not
+//!   wrap (validated at parse time; [`Extent::end`] re-checks).
+//!
+//! # CONCURRENCY
+//!
+//! Immutable `Copy` values; no locks; shared freely across threads.
+//!
+//! # RESOURCE BOUNDS
+//!
+//! Fixed 32-byte ids; parsing accepts exactly 32 raw bytes or 64 hex
+//! characters — nothing else.
+//!
+//! # FAILURE MODES
+//!
+//! [`ChunkId::from_bytes`] / [`ChunkId::from_hex`] return `None` on
+//! malformed input; [`Extent::end`] returns `None` on overflow (and
+//! `contains` then correctly answers false).
+//!
+//! # HISTORY / EVIDENCE
+//!
+//! ADR-0011 (integrity: the content id is the authenticated-bytes
+//! anchor); `docs/format/ondisk-v1.md` (ids and extents on disk).
 
 #![forbid(unsafe_code)]
 
@@ -12,6 +66,10 @@ use std::fmt;
 ///
 /// Used for: logical content identity (dedup, references), structural
 /// object identity in the store, and integrity verification.
+///
+/// Invariants: the id depends only on the materialized bytes, so physical
+/// representation changes never change identity; [`ChunkId::ZERO`] is a
+/// reserved sentinel that `ChunkId::of` cannot produce for real content.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ChunkId(pub [u8; 32]);
 
@@ -99,7 +157,8 @@ fn hex_prefix(bytes: &[u8; 32], n: usize) -> String {
     s
 }
 
-/// A logical extent: `[offset, offset+length)` within a file.
+/// A logical extent: `[offset, offset+length)` within a file — a
+/// half-open interval in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Extent {
     /// Logical offset of the extent start.
@@ -109,8 +168,9 @@ pub struct Extent {
 }
 
 impl Extent {
-    /// Create a new extent. The caller guarantees `offset + length` does not
-    /// overflow (validated at parse time; here we check and panic in debug).
+    /// Create a new extent. The caller guarantees `offset + length` does
+    /// not overflow (validated at parse time); callers that need the
+    /// checked end use [`Extent::end`].
     pub const fn new(offset: u64, length: u64) -> Self {
         Self { offset, length }
     }

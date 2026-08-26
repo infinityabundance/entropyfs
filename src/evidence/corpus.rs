@@ -2,6 +2,62 @@
 //! reproducible logical data sets. Every corpus records its name, source,
 //! description, content hash (BLAKE3) and per-version hashes so a result
 //! can be re-verified byte-for-byte.
+//!
+//! # PURPOSE
+//!
+//! Define the inputs that every benchmark and campaign measures, and
+//! make them reproducible: the same generator call yields the same
+//! bytes, and the hashes prove it. This is the input half of the
+//! honesty machinery — a claim about "the src corpus" or "H2" is
+//! only meaningful if the exact byte stream is pinned.
+//!
+//! # BOUNDARY
+//!
+//! KNOWS: how to synthesize deterministic byte streams (including
+//! invoking `zstd` as an external baseline tool) and how to pack the
+//! source tree. NEVER KNOWS: the store, the optimizer, or any
+//! representation — a corpus is pure logical bytes with no opinion
+//! about how they will be encoded.
+//!
+//! # MODEL
+//!
+//! A [`Corpus`] is a name + provenance + a write stream: `versions`
+//! is one full-file version written over the previous (single-element
+//! for one-shot corpora). The corpus's *logical content* is the final
+//! version; `content_hash` covers it, `version_hashes` cover every
+//! version so write-stream verification can re-check each one. The
+//! structured corpus is byte-for-byte the Phase-4 ablation generator
+//! (kept in sync with `cli/benchmark.rs`); the versioned/shuffled/
+//! urandom/compressed corpora are the methodology §5 controls.
+//!
+//! # CORRECTNESS INVARIANTS
+//!
+//! - Determinism: the same call returns the same bytes on any machine
+//!   (fixed seeds; `splitmix64` for the random-ish streams; no
+//!   wall-clock, PID, or environment inputs). Regression-tested.
+//! - The shuffled control is a pure permutation: the byte multiset of
+//!   each version is preserved, only temporal adjacency is destroyed
+//!   (regression-tested) — otherwise a "shuffled" result could
+//!   silently differ for the wrong reason.
+//! - Negative controls are structural, not optional: urandom and
+//!   already-compressed corpora exist so random data must converge to
+//!   RAW and compressed data must show little gain (methodology §5).
+//! - `source_tree_pack` is deterministic per revision: files sorted by
+//!   path, fixed framing (`u32 LE` name_len, name, `u64 LE`
+//!   content_len, content), so the pack hash IS the corpus hash.
+//!
+//! # RESOURCE BOUNDS
+//!
+//! A corpus is `size_mib` MiB of in-memory bytes for the synthetic
+//! ones; the source pack reads the whole `docs` + `src` + `evidence`
+//! tree into memory. The compressed control invokes `zstd` once on a
+//! temp file (best-effort; its absence skips the corpus upstream).
+//!
+//! # HISTORY / EVIDENCE
+//!
+//! The structured corpus reproduces the `evidence/ablation-2026-08-25`
+//! fixture and the DSFB write-throughput signal on the same input;
+//! campaign archives pin every corpus by hash in `corpus-manifest.json`.
 
 #![forbid(unsafe_code)]
 

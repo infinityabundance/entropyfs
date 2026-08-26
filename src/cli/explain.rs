@@ -1,6 +1,43 @@
 //! `entropyfs explain <store> <path>`: the full representation breakdown
 //! of a file (§49) — per-family byte share, alternatives for a focused
 //! extent, and honest total accounting.
+//!
+//! # PURPOSE
+//!
+//! Answer "why does this file cost what it costs": print logical bytes,
+//! descriptor (extent-metadata) bytes, the per-family byte share of the
+//! logical content, the physical reachable estimate (segments +
+//! superblock), and — for a focused extent — re-encode the materialized
+//! bytes and print every alternative candidate with its exact cost so
+//! the incumbent can be justified or questioned.
+//!
+//! # BOUNDARY
+//!
+//! KNOWS: the store's public read APIs, descriptor decode, the candidate
+//! encoders, and GC's `mark_live` for the reachability estimate. NEVER
+//! KNOWS: any write path — it is strictly read-only (opens the store
+//! without mutating it).
+//!
+//! # MODEL
+//!
+//! A file is a sequence of extents; each extent is a descriptor over
+//! objects. `explain` sums descriptor lengths by representation family
+//! (logical bytes), sums descriptor bytes (metadata), and estimates
+//! physical reachable bytes by summing object sizes for ids GC marks
+//! live. The effective ratio is logical / physical-reachable — an
+//! honest, workload-dependent estimate, never a capacity guarantee
+//! (printed as such).
+//!
+//! # KEY INVARIANTS
+//!
+//! - Accounting is split: logical bytes (what the user wrote) and
+//!   descriptor bytes (extent metadata) are never merged.
+//! - The physical figure is a reachable estimate from `mark_live`, the
+//!   same authority the campaign uses — never `physical_used` (which
+//!   includes unreclaimed COW records).
+//! - `print_alternatives` re-encodes the materialized bytes with the
+//!   same candidate set and budget as the write path (`pick_cheapest`)
+//!   so the "<- selected" marker is the same decision the store made.
 
 #![forbid(unsafe_code)]
 

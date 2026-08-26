@@ -2,6 +2,36 @@
 //! representation family (the fuzz seeds), plus hand-crafted exhibits for
 //! every boundary the format defines (the permanent court exhibits).
 //!
+//! # Purpose
+//!
+//! This is the hostile-media court's evidence base: the fixed, reviewed,
+//! byte-stable input set the fuzzers start from and the exhibits the
+//! courts must pass forever. It turns "fuzz a parser" into "fuzz from
+//! seeds that reach deep variant-specific logic" and pins the format's
+//! boundaries as named, receipt-able exhibits.
+//!
+//! # Boundary
+//!
+//! The corpus MAY contain: canonical descriptors of every family;
+//! graphs that materialize to known bytes; and hand-assembled bytes that
+//! violate what the encoder refuses (the whole point of the exhibits). It
+//! may NEVER contain non-deterministic bytes — everything here is built
+//! from fixed seeds and constants, never the wall clock — and it never
+//! asserts "must reject" on random data: only where the format's outcome
+//! is fully determined is `MustReject`/`MustAccept` used.
+//!
+//! # Model
+//!
+//! Three sections:
+//! 1. canonical family seeds (`descriptor_seeds`) — the fuzz corpus
+//!    seeds, one per representation family;
+//! 2. graph seeds (`graph_seeds`) + their pinned expectations
+//!    (`graph_seed_expectations`) — valid graphs that materialize to
+//!    KNOWN bytes plus the structural bombs (self-reference, cycles,
+//!    depth chains, diamonds);
+//! 3. exhibits (`exhibits`) — descriptor-level and graph-level boundary
+//!    bytes for every limit the format defines.
+//!
 //! Corpus discipline (Phase-11A):
 //! - every family seed decodes, validates, and re-encodes byte-exactly;
 //! - graph seeds with real rANS/sequence streams materialize to known
@@ -10,6 +40,29 @@
 //!   format's outcome is fully determined; the default oracle is
 //!   `Either` (bounded-valid or typed-reject);
 //! - all bytes are deterministic (fixed seeds; no wall clock).
+//!
+//! # Resource bounds
+//!
+//! Every byte string here is bounded by the format's own caps (descriptor
+//! sizes ≤ 8193 bytes, chunk lengths ≤ `max_chunk_size`, models at/around
+//! `max_model_bytes` = 2048 bytes, dictionaries ≤ 64 KiB, table counts ≤
+//! `GRAPH_MAX_TABLES`). The corpus is small and fixed — it is the base
+//! the fuzzers bound, not a source of unbounded inputs.
+//!
+//! # Failure modes
+//!
+//! Expected: exhibits declare `MustReject` (typed rejection is the
+//! admissible arm) or `Either`. Never: a seed that fails to decode
+//! canonically (it would poison every mutation strategy built on it) or
+//! a pinned graph expectation that materializes to different bytes (the
+//! §32/§33 byte-exactness contract).
+//!
+//! # History / evidence
+//!
+//! Phase 11A (v0.7.0). Sealed evidence:
+//! `evidence/hostile-media/court-1787750784-a2983dc/` (revision
+//! `a2983dc`): 200k descriptor + 200k graph cases per proptest target
+//! in release mode, seeded from this corpus.
 
 #![forbid(unsafe_code)]
 
@@ -25,9 +78,17 @@ use crate::tests::hostile_media::seeded_bytes;
 use crate::tests::hostile_media::{Exhibit, ExhibitKind, Expect, GraphSpec, encode_graph_spec};
 
 /// A family seed: a name plus the encoded descriptor bytes.
+///
+/// Role: the fuzz corpus seed — one per representation family, so
+/// mutation strategies start from valid structure. The name is the
+/// receipt key and the failure-message key.
 pub type FamilySeed = (String, Vec<u8>);
 
 /// A graph seed: a name plus the encoded graph-spec bytes.
+///
+/// Role: a valid graph (entry descriptor + tables) that materializes to
+/// known bytes, or a structural bomb; the bytes are the flat graph-spec
+/// form produced by `encode_graph_spec`.
 pub type GraphSeed = (String, Vec<u8>);
 
 /// Stable synthetic ids for corpus entries (content-addressed names; the
@@ -47,6 +108,10 @@ fn entry_id() -> ChunkId {
 // ---------------------------------------------------------------------------
 
 /// Text with long-distance repeats (the SequenceRans showcase).
+///
+/// Unit: `n` bytes of repeated sentences with a per-iteration unique
+/// tail — long-distance matches for the sequence encoder without being
+/// trivially periodic.
 fn text_chunk(n: usize) -> Vec<u8> {
     let sentence =
         b"the quick brown fox jumps over the lazy dog and then walks back to the riverbed ";
@@ -62,6 +127,11 @@ fn text_chunk(n: usize) -> Vec<u8> {
 }
 
 /// A 64 KiB pattern dictionary (u16-addressable).
+///
+/// Unit: exactly 65536 bytes (the sequence dictionary size limit —
+/// `SequenceDict`/`SequenceSharedDict` address dictionaries by u16
+/// offset). Fills by repeating a 7-byte pattern, so dictionary copies
+/// exercise real data.
 fn dict_chunk() -> Vec<u8> {
     let mut out = Vec::with_capacity(65536);
     let pattern: Vec<u8> = (0..7u32).map(|i| (i * 37 % 251) as u8).collect();
@@ -73,11 +143,18 @@ fn dict_chunk() -> Vec<u8> {
 }
 
 /// Structured data with real rANS compressibility.
+///
+/// Unit: `n` bytes of a repeating 53-symbol ramp (`(i * 13) % 53`):
+/// skewed but deterministic, so the rANS/sequence encoders produce real
+/// (small) models and streams for the seeds.
 fn compressible(n: usize) -> Vec<u8> {
     (0..n as u32).map(|i| ((i * 13) % 53) as u8).collect()
 }
 
 /// Deterministic noise (no structure; RAW stays the winner).
+///
+/// Kept for the evidence corpus builders (dead in this build): used to
+/// prove the RAW fallback on incompressible inputs.
 #[allow(dead_code)] // kept for the evidence corpus builders
 fn noise(n: usize) -> Vec<u8> {
     seeded_bytes(n, 0x243F_6A88_85A3_08D3)
@@ -85,6 +162,11 @@ fn noise(n: usize) -> Vec<u8> {
 
 /// Encode N raw streams into a model object + enc object + per-stream
 /// encoded lengths (the sequence families' shared machinery).
+///
+/// The three return values are the objects and the per-stream encoded
+/// byte lengths (`lens[i]`) that the sequence-family descriptors embed;
+/// the model and enc objects are content-addressed into the graph's
+/// object table by their `ChunkId::of(...)` ids.
 fn encode_streams(streams: &[Vec<u8>]) -> (Vec<u8>, Vec<u8>, Vec<u32>) {
     let enc = crate::rans::sequence::encode_streams_n(streams)
         .expect("streams must encode for a valid seed");
@@ -97,6 +179,10 @@ fn sequence_scale_codec() -> (u8, RansCodec) {
 }
 
 /// Run one encoder over `input` and take its single candidate.
+///
+/// Role: build the valid seeds' representations through the REAL encoders
+/// (not hand-written bytes), so the seeds are canonical by construction
+/// and carry real model/stream objects.
 fn one_candidate(
     enc: &dyn Encoder,
     input: &[u8],
@@ -137,6 +223,9 @@ fn spec_with_objects(rep: &Representation, objects: &[ObjectRecord]) -> GraphSpe
 
 /// Add a chunk descriptor + its payload object to a spec (a referenced
 /// chunk resolved through the descriptor table).
+///
+/// The chunk is added as `RAW { obj: cid }` with its bytes in the object
+/// table — the minimal valid binding for a referenced chunk.
 fn add_chunk(spec: &mut GraphSpec, cid: ChunkId, bytes: &[u8]) {
     let rep = Representation::Raw {
         obj: cid,
@@ -155,6 +244,15 @@ fn add_chunk(spec: &mut GraphSpec, cid: ChunkId, bytes: &[u8]) {
 // ---------------------------------------------------------------------------
 
 /// One real encoded descriptor of every representation family.
+///
+/// Role: the fuzz corpus seeds — 20 canonical descriptors (one per
+/// family, BASE_RESIDUAL for every residual kind). The court asserts
+/// `seeds.len() >= 20`, so a family added to `Representation` without a
+/// seed fails the corpus contract.
+///
+/// Invariant: every returned byte string decodes, validates, and
+/// re-encodes byte-exactly under the default limits (the corpus
+/// contract, asserted by `seeds_are_canonical_and_valid`).
 #[allow(clippy::vec_init_then_push)] // a push-per-exhibit builder by design
 pub fn descriptor_seeds() -> Vec<FamilySeed> {
     let o = id(b"object");
@@ -411,6 +509,17 @@ fn enc(rep: &Representation) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 /// Build the valid graph seeds with real streams.
+///
+/// Role: graph seeds are the materialization-graph corpus — valid graphs
+/// that materialize to KNOWN bytes (pinned by
+/// `graph_seed_expectations`), plus the structural bombs (self-reference,
+/// two-node cycle, depth chains at exactly 4/5 and 20, diamonds). The
+/// valid seeds go through the REAL encoders so their models and streams
+/// are canonical.
+///
+/// The mutation strategies start from these bytes, so the graph fuzzer
+/// drifts fields/ids/lengths of near-valid graphs instead of discovering
+/// structure from scratch.
 pub fn graph_seeds() -> Vec<GraphSeed> {
     let limits = Limits::default();
     let mut out: Vec<GraphSeed> = Vec::new();
@@ -998,6 +1107,10 @@ pub fn graph_seeds() -> Vec<GraphSeed> {
 /// seed name). `expected = Some(bytes)` pins the materialized bytes
 /// exactly; `None` means the seed is a structural bomb whose only contract
 /// is the typed rejection / boundedness in `expect`.
+///
+/// The `Some` pins are the §32/§33 byte-exactness contract: the valid
+/// seeds' materialized output must equal these bytes exactly — a changed
+/// encoder or materializer that shifts even one byte fails the court.
 pub fn graph_seed_expectations() -> Vec<(String, Expect, Option<Vec<u8>>)> {
     let mut v: Vec<(String, Expect, Option<Vec<u8>>)> = Vec::new();
     let ok = |v: &mut Vec<(String, Expect, Option<Vec<u8>>)>, name: &str, bytes: Vec<u8>| {
@@ -1118,6 +1231,10 @@ pub fn graph_seed_expectations() -> Vec<(String, Expect, Option<Vec<u8>>)> {
 }
 
 /// The permanent adversarial exhibit corpus (descriptor-level + graph-level).
+///
+/// Role: the union of both exhibit sets, consumed by the descriptor and
+/// graph courts. Every exhibit is deterministic, named (receipt key), and
+/// classified by `Expect`.
 pub fn exhibits() -> Vec<Exhibit> {
     let mut v: Vec<Exhibit> = Vec::new();
     v.extend(descriptor_exhibits());
@@ -1130,6 +1247,12 @@ pub fn exhibits() -> Vec<Exhibit> {
 /// as `Either` (a tight-mount rejection of an over-cap descriptor is
 /// itself correct behavior) except where the exhibit is explicitly
 /// constructed to exercise the tight set.
+///
+/// Role: one named exhibit per boundary the descriptor format defines —
+/// encoded-size edges (8192/8193), unknown tags, trailing garbage, logical
+/// length at/over the chunk cap, and per-family rank/count/order/size
+/// violations. Hand-assembled bytes (the `*_bytes` builders) can express
+/// encodings the real encoder refuses — that is their purpose.
 fn descriptor_exhibits() -> Vec<Exhibit> {
     let mut v: Vec<Exhibit> = Vec::new();
 
@@ -1833,6 +1956,15 @@ fn descriptor_exhibits() -> Vec<Exhibit> {
 
 /// Graph-level adversarial exhibits. The bytes are graph specs (parsed by
 /// `parse_graph_spec`); the oracle is `run_graph_oracle`.
+///
+/// Role: one named exhibit per graph-level failure class — corrupted
+/// model objects under valid descriptors, hostile sequence command
+/// streams (COPY before history, exhausted streams, dictionary copies at
+/// and beyond the dictionary end), invalid dictionary chains, SparseBlock64
+/// popcount/rank violations, reserved deep-command bytes, model objects
+/// at/around `max_model_bytes` (2048 bytes default), hostile rANS streams
+/// under valid models, missing objects/chunks, EXACT_REF range edges, and
+/// lenient-parser truncation.
 fn graph_exhibits() -> Vec<Exhibit> {
     let mut v: Vec<Exhibit> = Vec::new();
     let limits = Limits::default();
@@ -2366,9 +2498,14 @@ fn graph_exhibits() -> Vec<Exhibit> {
 
 // ---------------------------------------------------------------------------
 // Byte builders for boundary exhibits (hand-assembled, not via `encode`,
-// so the exhibit can violate what the encoder refuses).
+// so the exhibit can violate what the encoder refuses). Each builder emits
+// the exact wire bytes of one representation family: the leading byte is
+// the family's tag, followed by its fixed fields (see the per-family
+// decode in `format::descriptor`).
 // ---------------------------------------------------------------------------
 
+/// SPARSE wire bytes: tag 0x07, len u32 LE, k u32 LE, rank u128 LE,
+/// then `k` literal bytes.
 fn sparse_bytes(k: u32, len: u32, rank: u128, literals: &[u8]) -> Vec<u8> {
     let mut b = vec![0x07u8];
     b.extend_from_slice(&len.to_le_bytes());
@@ -2378,6 +2515,8 @@ fn sparse_bytes(k: u32, len: u32, rank: u128, literals: &[u8]) -> Vec<u8> {
     b
 }
 
+/// PALETTE wire bytes: tag 0x08, len u32 LE, symbol count u8, palette
+/// bytes, per-symbol counts u32 LE each, rank u128 LE.
 fn palette_bytes(m: u8, palette: &[u8], counts: &[u32], len: u32, rank: u128) -> Vec<u8> {
     let mut b = vec![0x08u8];
     b.extend_from_slice(&len.to_le_bytes());
@@ -2390,6 +2529,8 @@ fn palette_bytes(m: u8, palette: &[u8], counts: &[u32], len: u32, rank: u128) ->
     b
 }
 
+/// PERIODIC wire bytes: tag 0x09, len u32 LE, period u32 LE, pattern
+/// bytes, count u32 LE, tail length u32 LE, tail bytes.
 fn periodic_bytes(period: u32, pattern: &[u8], count: u32, tail: &[u8], len: u32) -> Vec<u8> {
     let mut b = vec![0x09u8];
     b.extend_from_slice(&len.to_le_bytes());
@@ -2401,6 +2542,8 @@ fn periodic_bytes(period: u32, pattern: &[u8], count: u32, tail: &[u8], len: u32
     b
 }
 
+/// PERMUTATION wire bytes: tag 0x0C, len u32 LE, rank u128 LE, then the
+/// alphabet bytes.
 fn permutation_bytes(rank: u128, alphabet: &[u8], len: u32) -> Vec<u8> {
     let mut b = vec![0x0Cu8];
     b.extend_from_slice(&len.to_le_bytes());

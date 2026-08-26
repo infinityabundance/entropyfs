@@ -1,11 +1,25 @@
 //! BaseSequence: shift-aware copy/literal delta coding (Phase-8 directive
 //! §5, ADR-0005 residual kind 0x04).
 //!
+//! # PURPOSE
+//!
 //! The target chunk `X` is represented against a base `B` by a command
 //! stream: `COPY(base_offset, len)` copies a base range, `LITERAL(run)`
 //! appends literal bytes. Inserted/deleted regions shift positions, so
 //! positional XOR residuals (XorSparse/RansCoded) degrade catastrophically
-//! on such edits; copy/literal deltas do not.
+//! on such edits; copy/literal deltas do not — this is the shift-aware
+//! member of the `BASE_RESIDUAL` family.
+//!
+//! # BOUNDARY
+//!
+//! - Knows: the base bytes and the target bytes, and the SEQUENCE_RANS
+//!   stream codec it reuses (`encode_streams`, `hash_at`).
+//! - Never knows: how the base chunk is itself represented (it is a
+//!   content-addressed reference), entropy model construction, or the
+//!   store layout. One candidate is proposed per base, depth-capped by
+//!   the caller.
+//!
+//! # MODEL
 //!
 //! Command encoding (one byte per command):
 //!
@@ -15,9 +29,66 @@
 //!
 //! The three streams reuse the SEQUENCE_RANS stream codec (per-stream
 //! rANS with a raw fallback; three-slot model object). The offset width is
-//! 4 bytes per copy (base offsets up to 2^32), and copy lengths are
-//! clipped so the tail remainder after 131-byte chunking is never 1..=3
-//! (same corruption trap as the SEQUENCE_RANS encoder).
+//! 4 bytes per copy (base offsets up to 2^32). The output is built from
+//! scratch against the base: the streams are the full copy/literal recipe,
+//! not a diff.
+//!
+//! # PERSISTENT AUTHORITY
+//!
+//! The command stream, literal stream, and offset stream are persisted
+//! (rANS-coded or raw, per slot) together with the base reference; the
+//! decoder reproduces `X` exactly from the base bytes. Byte-exactness is a
+//! persistence invariant: the tail-remainder clip (below) changes only
+//! *how* bytes are coded, never the materialized output.
+//!
+//! # CORRECTNESS INVARIANTS
+//!
+//! - Copy lengths are `4..=131`; a tail remainder of `1..=3` bytes after
+//!   131-byte chunking is clipped off so it is emitted as literals — the
+//!   same corruption trap as the SEQUENCE_RANS encoder (`0x7F` would
+//!   decode as a 128-byte literal run; Phase 8 M3, sealed
+//!   `campaign-1787671040-923df7b/`).
+//! - Every copy's `base[off..off+len]` is validated against the base
+//!   length at decode (materialize), so an out-of-bounds copy is a typed
+//!   error, never an overrun.
+//! - The base may be shorter or longer than the target (insertions and
+//!   deletions) — unlike positional residuals, which require
+//!   `base_len >= target_len`.
+//!
+//! # CONCURRENCY
+//!
+//! `encode_delta` is a pure deterministic function over `(target, base)`;
+//! `DeltaEncoder` holds no state. No locks.
+//!
+//! # RESOURCE BOUNDS
+//!
+//! Hash-chain tables are `2^16` heads + `base.len()` chain slots; the
+//! match walk is depth-capped (`CHAIN_DEPTH`); offsets are u32. All loops
+//! are length-bounded by `target.len()` / `base.len()`.
+//!
+//! # PERFORMANCE
+//!
+//! Greedy longest-match parse with continuation copies at consecutive
+//! base offsets: an inserted region costs only its own literal bytes, and
+//! a shifted region is a single copy command, regardless of how far the
+//! shift moved it (positional XOR would pay for every shifted byte).
+//!
+//! # FAILURE MODES
+//!
+//! No typed errors: degenerate inputs (empty target, base shorter than
+//! `MIN_MATCH`) degrade to an all-literals delta, which is correct though
+//! useless; the honest gate (descriptor + model + enc vs raw) and the
+//! cost model drop candidates that do not beat RAW.
+//!
+//! # HISTORY / EVIDENCE
+//!
+//! - Phase 8 M4 — BaseSequence sealed `campaign-1787666036-43bf17e/`:
+//!   H2 flips back to **+35.2%** (sequential 2.752× vs shuffled 1.784×);
+//!   the shuffled control grows because deltas also capture structural
+//!   similarity between unrelated-history chunks — recorded as the
+//!   finding.
+//! - The tail-remainder clip inherits the Phase 8 M3 SEQUENCE_RANS fix
+//!   (H2 campaign, `campaign-1787671040-923df7b/`).
 
 #![forbid(unsafe_code)]
 
@@ -40,11 +111,21 @@ const CODEC: RansCodec = RansCodec::Interleaved2;
 /// Greedy: at each target position, find the longest match in the base
 /// (hash chains over the base's 4-byte windows), emit copies (continuation
 /// at consecutive base offsets), otherwise literal runs. Deterministic and
-/// bounded; the base can be shorter or longer than the target.
+/// bounded; the base can be shorter or longer than the target (insertions
+/// and deletions shift positions — the shift-aware property that
+/// positional XOR residuals lack).
+///
+/// The returned streams are the full copy/literal recipe: the decoder
+/// builds the output from scratch against the base, so byte-exactness is a
+/// direct invariant of this parse.
 pub fn encode_delta(target: &[u8], base: &[u8]) -> SequenceStreams {
     let mut commands = Vec::new();
     let mut literals = Vec::new();
     let mut offsets = Vec::new();
+    // ---------------------------------------------------------------------
+    // Stage 1: Degenerate inputs — an all-literals delta (correct, if
+    // useless; the candidate gate drops it later).
+    // ---------------------------------------------------------------------
     if target.is_empty() || base.len() < MIN_MATCH {
         // All literals (a correct, if useless, delta).
         let mut t = 0usize;
@@ -60,6 +141,11 @@ pub fn encode_delta(target: &[u8], base: &[u8]) -> SequenceStreams {
             offsets,
         };
     }
+    // ---------------------------------------------------------------------
+    // Stage 2: Build the base hash-chain tables (built once; the base is
+    // immutable for the parse). 2^16 heads × base.len() chain slots;
+    // `find_base_match` walks each chain at most `CHAIN_DEPTH` deep.
+    // ---------------------------------------------------------------------
     // Hash chains over the base.
     let hsize = 1usize << 16;
     let mut head = vec![u32::MAX; hsize];
@@ -72,9 +158,21 @@ pub fn encode_delta(target: &[u8], base: &[u8]) -> SequenceStreams {
         *slot = head[h];
         head[h] = p as u32;
     }
+    // ---------------------------------------------------------------------
+    // Stage 3: Greedy parse — longest base match or a literal run.
+    // ---------------------------------------------------------------------
     let mut t = 0usize;
     while t < target.len() {
         if let Some((boff, len)) = find_base_match(target, t, base, &head, &chain) {
+            // -----------------------------------------------------------------
+            // Stage 3a: Copy emission with the SEQUENCE_RANS tail-remainder
+            // clip: a tail of 1..=3 bytes after 131-byte chunking would
+            // encode into the literal-command range (`0x80 + 3 - 4 = 0x7F`
+            // decodes as a 128-byte literal run — the Phase 8 M3
+            // corruption, sealed `campaign-1787671040-923df7b/`), so the
+            // tail is clipped off and falls to the literal path below;
+            // byte-exactness is preserved.
+            // -----------------------------------------------------------------
             // Clip so the tail remainder after 131-byte chunking is never
             // 1..=3 (an invalid copy length; the tail falls to literals).
             let mut len = len;
@@ -82,6 +180,8 @@ pub fn encode_delta(target: &[u8], base: &[u8]) -> SequenceStreams {
             if rem > 0 && rem < MIN_MATCH {
                 len -= rem;
             }
+            // Continuation commands advance the base offset by `take` —
+            // the decoder reads each command's u32 LE offset independently.
             let mut remaining = len;
             let mut o = boff;
             while remaining > 0 {
@@ -94,6 +194,8 @@ pub fn encode_delta(target: &[u8], base: &[u8]) -> SequenceStreams {
             }
             t += len;
         } else {
+            // Stage 3b: Literal run — consume positions with no match,
+            // capped at 128 bytes per command.
             let start = t;
             let mut run = 0usize;
             while t < target.len() && run < MAX_LIT_RUN {
@@ -118,6 +220,10 @@ pub fn encode_delta(target: &[u8], base: &[u8]) -> SequenceStreams {
 
 /// Find the longest base match at target position `t` (chain depth
 /// capped). Returns `(base_offset, len)` with `len >= MIN_MATCH`.
+///
+/// Hash-chain search: walk the chain of base positions sharing the
+/// 4-byte window hash, compare bytewise, keep the longest match, and stop
+/// early when a match reaches the input end (nothing can be longer).
 fn find_base_match(
     target: &[u8],
     t: usize,
@@ -157,7 +263,11 @@ fn find_base_match(
     }
 }
 
-/// The shift-aware delta candidate family: one candidate per base.
+/// The shift-aware delta candidate family: one candidate per base chunk.
+///
+/// The encoder is stateless; `ctx.bases` supplies the candidate bases and
+/// the depth cap. A candidate is proposed only when the full persisted
+/// cost (descriptor + model object + enc object) beats RAW.
 #[derive(Debug, Default)]
 pub struct DeltaEncoder;
 
@@ -167,10 +277,17 @@ impl Encoder for DeltaEncoder {
     }
 
     fn encode(&self, input: &[u8], ctx: &CandidateContext<'_>) -> Vec<Candidate> {
+        // -----------------------------------------------------------------
+        // Stage 1: Input guard — empty/oversized chunks have no candidate.
+        // -----------------------------------------------------------------
         if input.is_empty() || input.len() as u64 > ctx.limits.max_chunk_size {
             return Vec::new();
         }
         let mut out = Vec::new();
+        // -----------------------------------------------------------------
+        // Stage 2: One parse per base — depth-capped, non-empty bases
+        // only.
+        // -----------------------------------------------------------------
         for base in ctx.bases {
             if base.depth >= ctx.limits.max_reference_depth {
                 continue;
@@ -206,6 +323,14 @@ impl Encoder for DeltaEncoder {
                 residual,
                 len: input.len() as u64,
             };
+            // -----------------------------------------------------------------
+            // Stage 3: Honest gate — descriptor + persisted model object +
+            // enc object must beat the raw bytes (the base chunk itself is
+            // a reference, accounted where it is materialized). This is
+            // the Phase-9G0 model-cost discipline applied at the candidate
+            // level: a model that cannot pay for itself must not be
+            // persisted (evidence-sealed campaign-1787684918-80e36c8).
+            // -----------------------------------------------------------------
             // Honest gate: descriptor + model + enc must beat raw.
             let total = rep
                 .encoded_size()

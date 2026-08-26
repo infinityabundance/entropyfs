@@ -1052,9 +1052,19 @@ impl Store {
         // commit is then covered by this barrier; a no-op when empty). The
         // cp_* exclusive rows inside `epoch_checkpoint` attach here.
         self.epoch_checkpoint(hooks)?;
-        // Serialize with in-flight commits: an fsync observes every commit
-        // that started before it (and every commit that started after
-        // waits for the barrier).
+        // Serialize with in-flight commits: the barrier holds the commit
+        // lock across [fdatasync -> superblock fsync] because a commit
+        // that completed mid-barrier would ack after the fsync started but
+        // before its cut — the fsync would then report durable writes the
+        // barrier never covered, breaking write->fsync durability
+        // linearizability (the crash courts pin this). The hold is why
+        // concurrent fsyncs queue: the "fsync convoy" the 11B/11C
+        // reconciliation measured as `commit_lock_wait` (34.7% of
+        // 16-thread request time pre-11C, 10.8-16.4% after). It is
+        // contract-inherent; a future "group durability" could amortize
+        // the physical barrier across concurrent fsyncs (each waiter
+        // completes only after a cut that includes its writes) without
+        // removing the linearizability requirement.
         let _guard = self.perf.time_request("barrier_commit_lock_wait", || {
             self.commit_lock.lock().expect("commit lock poisoned")
         });
@@ -4627,6 +4637,16 @@ impl Store {
                 extents.insert(off, bytes);
             }
         }
+        // The pending window is half-open: `(ino, scan_start)..(ino, end)`
+        // with `end` EXCLUSIVE (one past the read's last byte, clamped to
+        // the file size). The exclusive upper bound is load-bearing:
+        // Phase-11C found the window with an INCLUSIVE bound — a
+        // chunk-aligned read then pulled in the NEXT chunk's pending
+        // extent, forcing a multi-extent decode + worker-semaphore wait on
+        // every write-path prefill read (measured as the 11C read_decode
+        // explosion at 2+ threads). The regression test
+        // `epoch_read_window_excludes_adjacent_pending_extent` pins both
+        // this bound and the conditional predecessor extension above.
         for ((fino, off), bytes) in ep.pending_extents.range((ino, scan_start)..(ino, end)) {
             let _ = fino;
             extents.insert(*off, bytes.clone());

@@ -1,6 +1,81 @@
 //! Palette / multinomial configuration encoder: a chunk using only a small
 //! number of distinct symbols, encoded as palette + multiplicities +
 //! multinomial rank (`n!/(∏ c_i!)`).
+//!
+//! # PURPOSE
+//!
+//! The PALETTE representation family (tag `0x08`): a low-cardinality chunk
+//! is a small alphabet plus the multinomial coordinate of the symbol-index
+//! sequence. The state space is `|F| = n!/(∏ c_i!)`; the saved bits are
+//! `ceil(log2 |F|)` against `n` raw bytes
+//! (`docs/theory/configurational-storage.md` §3).
+//!
+//! # BOUNDARY
+//!
+//! A pure candidate encoder. It maps chunk bytes → (ascending palette,
+//! multiplicities, symbol-index sequence), asks `rank.rs` for the
+//! multinomial coordinate, and accounts honestly; it never touches the
+//! store and never decides whether the family wins (ADR-0010).
+//! `m == 1` is FILL's family; `m > max_palette` is rANS/RAW territory.
+//!
+//! # MODEL
+//!
+//! `chunk = Σ over positions of palette[seq[pos]]`, with `seq` the
+//! symbol-index sequence and `counts` the multiplicities (`Σ c_i = n`).
+//! The descriptor persists `(palette, counts, rank, len)`; the
+//! materializer unranks `seq` and maps each index through the palette.
+//!
+//! # PERSISTENT AUTHORITY
+//!
+//! Yes: the descriptor is persisted verbatim when this candidate wins
+//! (`docs/format/ondisk-v1.md`, tag `0x08`: `m u8 (≤16), palette m bytes,
+//! counts m×u32, rank u128`). The multinomial state space must fit `u128`;
+//! a space that does not is rejected — the family is not representable in
+//! v1 and rANS/RAW handle the chunk instead.
+//!
+//! # CORRECTNESS INVARIANTS
+//!
+//! - `m ∈ [2, max_palette]`;
+//! - palette strictly ascending (the canonical form: the same chunk always
+//!   yields the same descriptor) and `counts[i]` is the multiplicity of
+//!   `palette[i]`;
+//! - `Σ counts == n` and `rank < n!/(∏ c_i!)` (checked by
+//!   `Representation::validate`);
+//! - materialization is byte-exact — enforced by the §32 candidate
+//!   validation gate.
+//!
+//! # CONCURRENCY
+//!
+//! Stateless encoder; safe to call from any thread (parallel chunk
+//! preparation, Phase-10C).
+//!
+//! # RESOURCE BOUNDS
+//!
+//! `n ≤ max_chunk_size`; `m ≤ max_palette` (16); state space `u128`-bound
+//! (for large low-cardinality chunks the multinomial overflows and the
+//! candidate is honestly rejected). Encode is an `O(n)` histogram, an
+//! `O(256)` palette extraction, and an `O(n·m)` index mapping (linear
+//! palette lookup — fine for `m ≤ 16`).
+//!
+//! # PERFORMANCE
+//!
+//! One histogram pass; the multinomial rank is computed once per
+//! candidate. The honest `ByteSplit` (rank as the 16-byte configurational
+//! coordinate; palette + counts remain descriptor bytes) means the cost
+//! function sees exactly what would be persisted.
+//!
+//! # FAILURE MODES
+//!
+//! `SpaceOverflow` / `Overflow` from the rank, or a failed
+//! `Representation::validate`, yields an empty candidate list — the
+//! family skips itself and rANS/RAW win. Nothing here panics; a wrong
+//! candidate would be caught by the §32 gate.
+//!
+//! # HISTORY / EVIDENCE
+//!
+//! Phase-1 family (`docs/theory/configurational-storage.md` §3); the
+//! honest overflow-rejection path for large low-cardinality chunks is
+//! pinned by `palette_skips_overflowing_state_space`.
 
 #![forbid(unsafe_code)]
 
@@ -10,6 +85,12 @@ use crate::core::representation::Representation;
 use crate::entropy::rank::{RankError, rank_multinomial};
 
 /// Palette encoder: `m ∈ [2, max_palette]` distinct symbols.
+///
+/// Single-candidate family: the palette is canonicalized ascending, so a
+/// chunk has exactly one palette descriptor. `m == 1` is FILL's family;
+/// `m > max_palette` is rANS/RAW territory — and for large low-cardinality
+/// chunks the multinomial state space overflows u128, which is an honest
+/// rejection (never truncated).
 #[derive(Debug, Default)]
 pub struct PaletteEncoder;
 
@@ -19,11 +100,17 @@ impl Encoder for PaletteEncoder {
     }
 
     fn encode(&self, input: &[u8], ctx: &CandidateContext<'_>) -> Vec<Candidate> {
+        // -------------------------------------------------------------------
+        // Stage 1: bounds gate. An empty or oversized chunk is not a
+        // representable palette configuration in v1.
+        // -------------------------------------------------------------------
         let n = input.len() as u64;
         if n == 0 || n > ctx.limits.max_chunk_size {
             return Vec::new();
         }
-        // Histogram.
+        // -------------------------------------------------------------------
+        // Stage 2: histogram and cardinality gate.
+        // -------------------------------------------------------------------
         let mut hist = [0u32; 256];
         for &b in input {
             hist[b as usize] += 1;
@@ -33,6 +120,11 @@ impl Encoder for PaletteEncoder {
             // m == 1 is FILL; m > max is rANS/RAW territory.
             return Vec::new();
         }
+        // -------------------------------------------------------------------
+        // Stage 3: canonical form — the palette in ascending byte order,
+        // its multiplicities, and the symbol-index sequence the multinomial
+        // rank operates on.
+        // -------------------------------------------------------------------
         // Palette sorted ascending (deterministic canonical form).
         let palette: Vec<u8> = (0..256u16)
             .filter(|&i| hist[i as usize] > 0)
@@ -46,6 +138,12 @@ impl Encoder for PaletteEncoder {
             let idx = palette.iter().position(|&s| s == b).unwrap() as u8;
             seq.push(idx);
         }
+        // -------------------------------------------------------------------
+        // Stage 4: multinomial rank. The state space `n!/(∏c_i!)` must fit
+        // u128; overflow rejects the candidate (never truncated) — for
+        // large low-cardinality chunks this is the honest path, and
+        // rANS/RAW handle the chunk instead.
+        // -------------------------------------------------------------------
         let rank = match rank_multinomial(&seq, n, &counts) {
             Ok(r) => r,
             Err(RankError::SpaceOverflow) | Err(RankError::Overflow) => return Vec::new(),
@@ -60,6 +158,12 @@ impl Encoder for PaletteEncoder {
         if rep.validate(ctx.limits).is_err() {
             return Vec::new();
         }
+        // -------------------------------------------------------------------
+        // Stage 5: honest accounting and candidate. The rank (16 bytes) is
+        // the configurational coordinate; palette + counts remain
+        // descriptor bytes (`encoded_size` counts them). The cost function
+        // decides from here.
+        // -------------------------------------------------------------------
         // Account: descriptor keeps palette+counts; rank is configurational.
         let split = ByteSplit {
             configurational: 16,

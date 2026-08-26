@@ -1,5 +1,38 @@
 //! `entropyfs inspect <store> <path> [--offset N]`: per-extent detail for
 //! a file (§49). Works on an unmounted store.
+//!
+//! # PURPOSE
+//!
+//! Print the extent table of a file — logical range, content id,
+//! representation family, materialized vs descriptor bytes — and, for
+//! the extent containing `--offset`, the candidate-cost breakdown from
+//! [`crate::cli::explain::print_alternatives`]. This is the diagnostic
+//! counterpart of `explain`: `explain` summarizes the whole file,
+//! `inspect` drills into one logical offset.
+//!
+//! # BOUNDARY
+//!
+//! KNOWS: the store's public read APIs and descriptor decode. NEVER
+//! KNOWS: write paths, encoding internals, or mutation — strictly
+//! read-only against an unmounted store.
+//!
+//! # MODEL
+//!
+//! Resolve the path to an inode, scan its extent tree (level-order via
+//! `scan_all`), decode each descriptor, and print one line per extent.
+//! `--offset` selects the extent whose `[start, start + len)` half-open
+//! range contains it (exclusive upper bound), mirroring how the read
+//! path resolves logical offsets to extents.
+//!
+//! # KEY INVARIANTS
+//!
+//! - Extent ranges are half-open: the focus test is `start <= offset <
+//!   start + desc.len()`, the same bound the read path uses.
+//! - Totals are split logical vs descriptor bytes; the two are never
+//!   summed (descriptor bytes are metadata, not content).
+//! - `family_name` is the canonical display mapping shared with
+//!   `explain` and the benchmark output, so every frontend names a
+//!   family identically.
 
 #![forbid(unsafe_code)]
 

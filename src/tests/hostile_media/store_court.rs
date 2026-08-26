@@ -1,6 +1,29 @@
 //! The store court (Phase-11A): the CRC-aware distinction over REAL tiny
 //! stores, plus the whole-store mutator.
 //!
+//! # Purpose
+//!
+//! Prove the bounded-valid-or-typed-rejection oracle over the STORE
+//! layer — the third hostile-media layer after the descriptor codec and
+//! the materialization graph. Real tiny stores carry every persistent
+//! structure the deep parsers consume (records of every tag, B-tree
+//! nodes, inodes, descriptors, mutation-log envelopes, a superblock), so
+//! hostile bytes here exercise open/fsck/read/epoch-replay paths no
+//! other court touches.
+//!
+//! # Boundary
+//!
+//! The court MAY mutate record/superblock bytes, re-encode records,
+//! replace tags, patch root object ids and mutation-log sequences, and
+//! recompute CRCs — in BOTH CRC flavors (see #Model). It may NEVER assume
+//! a mutated image is self-consistent: fsck and open may legitimately
+//! select different admissible roots, `Store::open` is not read-only
+//! (epoch replay commits and rewrites the superblock), and the
+//! authenticated-bytes clause is therefore checked through the OPENED
+//! store's own view only.
+//!
+//! # Model
+//!
 //! The user's critical point: "flip random bits in a store image" as the
 //! PRINCIPAL strategy would fuzz CRC32C — the envelope rejects the vast
 //! majority of mutations before the deep parsers ever see them. Two
@@ -28,6 +51,34 @@
 //!    (flip / truncate / splice / duplicate / alter lengths / replace ids
 //!    / replace tags / recompute CRC selectively) applied to known-good
 //!    tiny stores, then open / fsck / materialize.
+//!
+//! # Resource bounds
+//!
+//! The images are tiny by construction: 1 MiB segments, a 64 KiB + 20
+//! KiB + 64 KiB file payload set, one snapshot/xattr/setattr, and a
+//! bounded mutation-log tail. Every scan is capped (100 000 records per
+//! segment), every decode runs under `Limits`, and the fuzz dimension is
+//! bounded (1..=6 mutation ops per recipe, plus a reorder and the
+//! superblock patch).
+//!
+//! # Failure modes
+//!
+//! Expected: any typed rejection from scan/open/fsck/read — the
+//! admissible arm; a torn-tail recovery (bounded) is explicitly
+//! admissible. Never: panic, hang, unbounded allocation, or — when the
+//! opened store's own view is authenticated — reads returning bytes
+//! inconsistent with the content id. `run_store_oracle` returns an
+//! `Err(description)` for every violation and the tests turn it into a
+//! failure.
+//!
+//! # History / evidence
+//!
+//! Phase 11A (v0.7.0). The CRC-aware two-court distinction originates
+//! here (see `docs/security/hostile-media-court.md` §2.3 and
+//! `docs/security/threat-model.md`). Sealed evidence:
+//! `evidence/hostile-media/court-1787750784-a2983dc/` (revision
+//! `a2983dc`): 30k store-mutator cases per proptest target in release
+//! mode, plus the full suite, all green.
 
 #![forbid(unsafe_code)]
 
@@ -40,9 +91,16 @@ use crate::store::transaction::CrashHooks;
 use crate::store::{NewEntry, Store, StoreConfig};
 
 /// The segment file magic (the first 4 bytes of every segment).
+///
+/// Structural, not a record: `apply_physical` preserves it (positions
+/// clamp to `>= 4`) and the physical courts assert it survives every op.
 const SEGMENT_MAGIC: [u8; 4] = *b"ESEG";
 
 /// A small segment cap keeps every image tiny (fast copies + scans).
+///
+/// Unit: 1 MiB per segment — small enough that copy/scan/rebuild per
+/// mutation is cheap, large enough to hold the full image in one segment
+/// so every court op has a single target.
 fn config() -> StoreConfig {
     StoreConfig {
         segment_size: 1024 * 1024,
@@ -51,6 +109,11 @@ fn config() -> StoreConfig {
 }
 
 /// Deterministic pseudo-random bytes (SplitMix64).
+///
+/// Unit: `n` output bytes; deterministic for a given `(n, seed)` pair
+/// (no wall clock), so every mutation recipe is reproducible. This is
+/// the store court's private copy of the court-wide `seeded_bytes`
+/// primitive.
 fn prng_bytes(n: usize, mut seed: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(n);
     while out.len() < n {
@@ -76,6 +139,12 @@ fn compressible(n: usize) -> Vec<u8> {
 /// durability barrier — so the image contains every persistent structure
 /// the deep parsers consume (records of every tag, B-tree nodes, inodes,
 /// descriptors, a mutation-log tail that was checkpointed).
+///
+/// Invariants: `dir` is the PRISTINE image — the courts always copy it
+/// before mutating (`copy_image`), so every recipe starts from identical
+/// known-good bytes; `files` records the exact committed content of every
+/// known inode (read back through the store before the image is sealed),
+/// which the authenticated-bytes clause compares against.
 struct TinyImage {
     /// The pristine store directory (never mutated in place).
     dir: TempDir,
@@ -83,6 +152,17 @@ struct TinyImage {
     files: Vec<(u64, Vec<u8>)>,
 }
 
+/// Build the sealed tiny-store image.
+///
+/// Contents, with sizes: dir `d`; file `f1` = 65536 bytes compressible
+/// (rANS/sequence descriptors); file `f2` = 20000 bytes noise (RAW) +
+/// 65536 bytes compressible at offset 65536 (a second chunk); an xattr
+/// on `f1` (its own index tree); snapshot `snap1` (its own tree); a
+/// setattr (an inode rewrite); and a durability barrier that checkpoints
+/// the epoch — so the image holds records of every tag AND a clean
+/// checkpointed state. The sealed `files` content is read back through
+/// the store before `drop(store)` so the oracle compares against the
+/// exact committed bytes.
 fn build_tiny_image() -> TinyImage {
     let dir = TempDir::new().expect("tempdir");
     let cfg = config();
@@ -174,6 +254,10 @@ fn build_tiny_image() -> TinyImage {
 /// A tiny store with an UN-CHECKPOINTED mutation-log tail (epoch ops, no
 /// durability barrier): the replay path at open must process the
 /// envelopes with `seq > root.log_seq`.
+///
+/// This is the second image family: hostile mutations here exercise the
+/// epoch-replay path (recovery skipping `seq <= root.log_seq` envelopes
+/// and rejecting duplicates), which the checkpointed image never reaches.
 fn build_log_tail_image() -> TinyImage {
     let dir = TempDir::new().expect("tempdir");
     let cfg = config();
@@ -205,6 +289,10 @@ fn build_log_tail_image() -> TinyImage {
 }
 
 /// Copy a store directory (recursively) to a fresh temp dir.
+///
+/// Copies the superblock, every segment, and the lock file if present.
+/// Every mutation court works on a copy; the pristine image is never
+/// touched, so recipes are repeatable and side-effect-free.
 fn copy_image(dir: &Path) -> TempDir {
     let copy = TempDir::new().expect("tempdir");
     std::fs::copy(dir.join("superblock"), copy.path().join("superblock")).expect("copy sb");
@@ -234,6 +322,9 @@ fn write_segment(dir: &Path, seq: u64, bytes: &[u8]) {
 }
 
 /// The records of a segment (pristine images only: the scan must succeed).
+///
+/// The scan is capped at 100 000 records per segment — the tiny images
+/// hold far fewer, so the cap is a bound, not a limit.
 fn records_in(dir: &Path, seq: u64) -> Vec<crate::store::segment::ScanRecord> {
     let path = crate::store::segment::segment_path(dir, seq);
     let (records, _) =
@@ -253,6 +344,36 @@ fn try_records_in(dir: &Path, seq: u64) -> Option<Vec<crate::store::segment::Sca
 }
 
 /// Rebuild a segment from re-encoded records (semantic mutations).
+///
+/// # Why semantic mutation must recompute the envelope
+///
+/// A record envelope is validated by `format::record::decode` on three
+/// independent checks: the header CRC (CRC32C over the 50 header bytes,
+/// including the content id), the payload CRC (CRC32C over the payload),
+/// and the content-id binding (`ChunkId::of(payload) == content_id`).
+/// ANY of them stale means the envelope is rejected with `Malformed` at
+/// the scan boundary — before the deep parsers (descriptor codec, B-tree
+/// walks, inode decode, materializer, epoch replay) ever see the bytes.
+///
+/// That is exactly the PHYSICAL court's purpose: bit flips left in place
+/// prove integrity rejection is real. But a bit-flip-as-principal-strategy
+/// court would only ever fuzz CRC32C — the envelope swallows the vast
+/// majority of mutations (docs/security/hostile-media-court.md §2.3).
+///
+/// Semantic adversarial mutation is a DIFFERENT threat: the hostile
+/// payload must REACH the deep parsers for the court to prove anything
+/// about them. So this rebuild re-encodes every record through
+/// `format::record::encode`, which recomputes the header CRC and the
+/// payload CRC over the new bytes — and `reencode` additionally
+/// recomputes the content id as `ChunkId::of(payload)` (see below). Both
+/// are necessary: a valid CRC over a payload whose content-id binding is
+/// stale fails the third check at the envelope just the same.
+///
+/// The whole-store mutator therefore applies recipes in BOTH flavors,
+/// selected by the `semantic` bit in `apply_mutation`: physical ops keep
+/// the CRCs broken (integrity rejection is the expected outcome);
+/// semantic ops re-encode here so the hostile payload is what the deep
+/// parsers actually parse.
 fn rebuild_segment(dir: &Path, seq: u64, records: &[crate::store::segment::ScanRecord]) {
     let mut out = SEGMENT_MAGIC.to_vec();
     for r in records {
@@ -274,6 +395,15 @@ fn rebuild_segment(dir: &Path, seq: u64, records: &[crate::store::segment::ScanR
 /// Re-encode one record with a new payload (semantic: the envelope CRC and
 /// the content id are recomputed, so the hostile payload reaches the deep
 /// parsers).
+///
+/// `stored_len` is kept in sync with the new payload length and the
+/// content id is recomputed as `ChunkId::of(payload)` — the record's
+/// identity is derived from ITS OWN bytes, never copied from the old
+/// record. The envelope CRCs are recomputed when the segment is rebuilt
+/// via `format::record::encode` (see the causal story at
+/// `rebuild_segment`): without BOTH, the record fails the envelope's
+/// header-CRC/payload-CRC/content-id checks and the deep parsers never
+/// see the hostile bytes.
 fn reencode(
     rec: &crate::store::segment::ScanRecord,
     payload: Vec<u8>,
@@ -288,6 +418,10 @@ fn reencode(
 /// The NEWEST root record in a segment (the highest generation: the most
 /// recent committed root). The segment accumulates one root record per
 /// commit; the newest is the one the active superblock slot references.
+///
+/// Generation is read from the ROOT payload itself (`Root::decode`), so
+/// a root whose payload fails to decode is skipped — a corrupted root
+/// cannot hijack the selection.
 fn newest_root_record(dir: &Path, seq: u64) -> crate::store::segment::ScanRecord {
     let records = records_in(dir, seq);
     records
@@ -308,6 +442,17 @@ fn newest_root_record(dir: &Path, seq: u64) -> crate::store::segment::ScanRecord
 /// epoch replay commits and rewrites the superblock). When the opened
 /// store's own view binds every reachable extent to the chunk index, the
 /// reads must succeed and return exactly those authenticated bytes.
+///
+/// The oracle contract, asserted step by step below (bounded-valid OR
+/// typed rejection, never panic):
+/// 1. fsck: a typed rejection at scan is admissible; a report must never
+///    panic;
+/// 2. open: typed rejection or success;
+/// 3. reads on an opened store: typed rejection or bounded bytes (the
+///    read window is capped at 64 KiB or the file length, whichever is
+///    smaller);
+/// 4. authenticated-bytes: when `store_view_is_authenticated` holds,
+///    every known file must read back byte-exact.
 fn run_store_oracle(dir: &Path, files: &[(u64, Vec<u8>)]) -> Result<(), String> {
     // 1. fsck: a typed rejection at scan is admissible; a report must
     //    never panic. (fsck must never abort on one bad record.)
@@ -341,6 +486,14 @@ fn run_store_oracle(dir: &Path, files: &[(u64, Vec<u8>)]) -> Result<(), String> 
 /// store's own root, materializes to bytes whose content id binds to a
 /// chunk-index entry that materializes to the same bytes (the §33
 /// binding, checked store-side so the view is self-consistent).
+///
+/// The authenticated-bytes clause's precondition: for each extent, decode
+/// its descriptor, materialize it, hash the output, look the hash up in
+/// the store's own chunk index, and materialize the index entry — the
+/// two materializations must be byte-identical. ANY step failing (missing
+/// inode, undecodable descriptor, unmaterializable, unindexed, or
+/// mismatched bytes) makes the view NOT authenticated, and the oracle
+/// then only demands bounded behavior, not byte-exact reads.
 fn store_view_is_authenticated(store: &Store, files: &[(u64, Vec<u8>)]) -> Result<bool, String> {
     let limits = *store.limits();
     let mut all_ok = true;
@@ -413,6 +566,12 @@ fn store_view_is_authenticated(store: &Store, files: &[(u64, Vec<u8>)]) -> Resul
 /// Apply a physical mutation to a segment's raw bytes (CRC left broken:
 /// the envelope must reject). The 4-byte segment magic is preserved (it is
 /// structural, not a record): positions clamp to `>= 4`.
+///
+/// The four op kinds (kind % 4): flip one byte, truncate (magic kept),
+/// overwrite a 1..=24-byte range with pseudo-random bytes, or duplicate a
+/// 1..=16-byte range (shifting everything after it). No op recomputes any
+/// CRC — the physical court's whole point is that the broken envelope is
+/// what gets tested.
 fn apply_physical(bytes: &mut Vec<u8>, op: (u8, u8, u8), seed: u64) {
     let (kind, a, b) = op;
     if bytes.len() <= 4 {
@@ -458,6 +617,15 @@ fn apply_physical(bytes: &mut Vec<u8>, op: (u8, u8, u8), seed: u64) {
 /// Interpret a proptest op tuple as a whole-store mutation: a semantic
 /// mutation (recomputed envelope) or a physical one (broken CRC),
 /// selected by the `semantic` bit. Returns the op kind name for evidence.
+///
+/// The semantic recipes (op.1 % 5): rewrite one record's payload with
+/// random bytes of the SAME length (record shape kept; envelope
+/// recomputed), alter one record's length (payload 0..=63 bytes),
+/// replace one record's tag (payload kept, envelope recomputed),
+/// duplicate one record, or swap two records' payloads. When an earlier
+/// op already left the segment unscannable, `try_records_in` returns
+/// `None` and the op reports itself "skipped-corrupt" — the recipe's
+/// earlier damage stands, and the oracle still runs.
 fn apply_mutation(dir: &Path, op: (u8, u8, u8), seed: u64, semantic: bool) -> String {
     let seqs = segment_seqs(dir);
     let seq = seqs[(op.0 as usize) % seqs.len()];
@@ -538,6 +706,11 @@ fn apply_mutation(dir: &Path, op: (u8, u8, u8), seed: u64, semantic: bool) -> St
 
 /// Reorder two records' positions in a segment (the whole record bodies
 /// move; every envelope is recomputed with valid CRCs).
+///
+/// Semantic recipe for the ORDER dimension: a valid store whose record
+/// order changed — the record content is untouched, only positions swap,
+/// so any rejection must come from order-sensitive logic (B-tree key
+/// order, root selection, replay order).
 fn apply_reorder(dir: &Path, a: usize, b: usize) -> String {
     for seq in segment_seqs(dir) {
         let Some(mut records) = try_records_in(dir, seq) else {
@@ -559,6 +732,10 @@ fn apply_reorder(dir: &Path, a: usize, b: usize) -> String {
 
 /// Duplicate one mutation-log envelope record (append a copy): recovery
 /// must detect the duplicate sequence (a typed rejection).
+///
+/// The recovery duplicate invariant (Phase-10G): two envelopes with the
+/// same `seq` is unreachable in a correct store, so open must reject
+/// typed rather than replay twice.
 fn apply_duplicate_envelope(dir: &Path) -> String {
     for seq in segment_seqs(dir) {
         let mut records = records_in(dir, seq);
@@ -578,6 +755,11 @@ fn apply_duplicate_envelope(dir: &Path) -> String {
 /// Patch every mutation-log envelope's sequence number to `new_seq`
 /// (recomputed envelopes): recovery skips envelopes with `seq <=
 /// root.log_seq` (an admissible bounded state).
+///
+/// The first 8 payload bytes of a MutationLog record ARE the envelope
+/// sequence; rewriting them with a valid re-encode produces a store
+/// whose replay range is rolled back — recovery must treat it as an
+/// already-consumed tail, never a panic.
 fn apply_patch_envelope_seqs(dir: &Path, new_seq: u64) -> String {
     for seq in segment_seqs(dir) {
         let mut records = records_in(dir, seq);
@@ -600,6 +782,12 @@ fn apply_patch_envelope_seqs(dir: &Path, new_seq: u64) -> String {
 }
 
 /// Patch a superblock slot field (semantic: the slot CRC is recomputed).
+///
+/// The superblock is a pair of 512-byte slots; the ACTIVE slot is the
+/// higher-generation one. Replacing `root_object_id` (with a caller id or
+/// random bytes) and re-encoding the slot recomputes the slot CRC — the
+/// store must reject typed or open to an admissible (possibly empty)
+/// state, never panic. The slot offset follows the generation parity.
 fn apply_patch_superblock(
     dir: &Path,
     root_object_id: Option<crate::core::extent::ChunkId>,
@@ -642,6 +830,12 @@ fn apply_patch_superblock(
 /// Physical court 1: a flip strictly inside a record's PAYLOAD region must
 /// break the envelope — open AND fsck both reject typed (never a silent
 /// acceptance, never a panic).
+///
+/// The assertion IS the physical oracle arm: three payload positions per
+/// record (first, middle, last byte), each on a fresh copy. A payload
+/// flip corrupts the payload CRC (and the content-id binding), so
+/// `record::decode` fails `Malformed` at the envelope and both open and
+/// fsck must reject typed.
 #[test]
 fn physical_payload_flips_are_integrity_rejected() {
     let image = build_tiny_image();
@@ -674,6 +868,12 @@ fn physical_payload_flips_are_integrity_rejected() {
 /// panic; open and fsck must return typed results (a torn-tail recovery —
 /// the complete previous state — is an admissible crash-consistency
 /// outcome).
+///
+/// Header flips (length, flags, CRC fields) may DEGRADE the segment to a
+/// torn tail instead of a hard error: the crash-consistency design
+/// admits falling back to the complete previous state. The court asserts
+/// boundedness — a typed result from open and fsck, never a panic, never
+/// a hang.
 #[test]
 fn physical_header_flips_and_truncation_are_bounded() {
     let image = build_tiny_image();
@@ -708,6 +908,10 @@ fn physical_header_flips_and_truncation_are_bounded() {
 
 /// Physical court 3: splice and duplicate-range mutations must never
 /// panic; open and fsck must return typed results.
+///
+/// The splice/duplicate ops SHIFT bytes, so record boundaries move: the
+/// scan must still terminate boundedly and every result must be typed.
+/// The segment magic is asserted to survive every op.
 #[test]
 fn physical_splices_are_bounded() {
     let image = build_tiny_image();
@@ -738,6 +942,11 @@ fn physical_splices_are_bounded() {
 /// (envelope CRC + content id recomputed) must never panic; open and fsck
 /// return typed results; and when the store opens AND fsck is clean under
 /// full materialization, the reads return the authenticated bytes.
+///
+/// The assertion site is the full `run_store_oracle` contract — the
+/// semantic arm's point is that the hostile payloads REACH the deep
+/// parsers, so the oracle (including the authenticated-bytes clause) runs
+/// on every rewritten record.
 #[test]
 fn semantic_payload_rewrites_are_bounded() {
     let image = build_tiny_image();
@@ -758,6 +967,10 @@ fn semantic_payload_rewrites_are_bounded() {
 
 /// Semantic court 2: record tag replacement, length alteration, record
 /// duplication, and payload swap — all with recomputed envelopes.
+///
+/// Each of the five `apply_mutation` semantic recipes (op.1 % 5 = 0..=4)
+/// runs over the first 12 records of every segment, each on a fresh
+/// copy, through the full store oracle.
 #[test]
 fn semantic_record_mutations_are_bounded() {
     let image = build_tiny_image();
@@ -787,6 +1000,10 @@ fn semantic_record_mutations_are_bounded() {
 
 /// Semantic court 3: superblock slot patching (root object id replaced,
 /// slot CRC recomputed) must be bounded.
+///
+/// A valid-CRC slot pointing at a random root id: open must reject typed
+/// (the referenced root record does not exist / does not match) or open
+/// to an admissible state — never panic.
 #[test]
 fn semantic_superblock_patch_is_bounded() {
     let image = build_tiny_image();
@@ -799,6 +1016,12 @@ fn semantic_superblock_patch_is_bounded() {
 /// unsorted keys, and duplicate keys are rejected typed at the node
 /// codec; and the whole crafted tree (valid-CRC root record + valid-CRC
 /// superblock slot) is bounded through open.
+///
+/// The 4096/4097 edge is the default `max_fanout` boundary: 4096 is the
+/// largest legal node, 4097 must be a typed rejection. The store-level
+/// exhibit replaces the chunk-index root with a crafted over-fanout node
+/// behind VALID envelopes — open's `verify_root` tree walk must hit the
+/// node codec and reject typed.
 #[test]
 fn btree_fanout_and_key_exhibits() {
     use crate::store::index::{Entry, Node};
@@ -939,6 +1162,12 @@ fn btree_fanout_and_key_exhibits() {
 /// descriptor (valid envelope, valid slot CRC) — resolving it through the
 /// store's own DecoderContext must terminate with a typed error (the
 /// depth cap), never a panic or a loop.
+///
+/// This is the semantic arm's sharpest exhibit: EVERY envelope check
+/// passes (the tree is structurally valid and the store opens) — the
+/// hostile descriptor reaches the materializer through the store's own
+/// `DecoderContext`, and the reference-depth cap (not the envelope) must
+/// bound it. The untouched files must still read byte-exact.
 #[test]
 fn valid_crc_envelope_containing_malicious_descriptor() {
     use crate::core::materialize::materialize_to_vec;
@@ -1025,6 +1254,13 @@ fn valid_crc_envelope_containing_malicious_descriptor() {
 /// Mutation-log exhibits: a duplicate envelope sequence must be a typed
 /// rejection at open (the recovery duplicate invariant); a non-monotonic
 /// (rolled-back) sequence is skipped — an admissible bounded state.
+///
+/// On the UN-CHECKPOINTED tail image: replay at open must process
+/// `seq > root.log_seq` envelopes. A duplicated sequence is unreachable
+/// in a correct store, so open must reject typed (never replay twice); a
+/// rolled-back sequence makes replay skip the whole tail — the store
+/// opens to the pre-tail state and reads of the skipped file are typed
+/// errors.
 #[test]
 fn mutation_log_duplicate_and_nonmonotonic_sequences() {
     let image = build_log_tail_image();
@@ -1067,6 +1303,15 @@ fn mutation_log_duplicate_and_nonmonotonic_sequences() {
 /// Built as a real store: entry -> SharedDict{dict: A, shared: B} where
 /// A -> C -> X -> Y (the deep route) and B -> X (shallow); chain_depth
 /// must report the deepest path through X.
+///
+/// A first-visit-wins walk would under-count (X is first reached at
+/// depth 3 via the shallow branch), which was the Phase-10E diamond-depth
+/// bug class. This is built as a REAL store (crafted chunk-index tree,
+/// valid envelopes, patched superblock) so the materializer's own depth
+/// accounting is what is exercised; the entry materialization must then
+/// reject typed with `DepthExceeded { depth: 5, max: 4 }` — the
+/// dictionary branch legitimately exceeds the default cap — never a
+/// panic, never a loop.
 #[test]
 fn diamond_deepest_path_chain_depth() {
     use crate::core::representation::Representation;
@@ -1280,6 +1525,14 @@ fn diamond_deepest_path_chain_depth() {
 
 // ---------------------------------------------------------------------------
 // Whole-store mutator (proptest)
+//
+// The in-package coverage-guided harness (ADR-0001: one package; the
+// driver is proptest rather than a `fuzz/` Cargo package; `PROPTEST_CASES`
+// scales the run — the sealed court ran 30k cases per target). The
+// mutator applies seeded recipes over the tiny-store image in BOTH CRC
+// flavors and runs the store oracle: never panic, never hang, never an
+// invariant violation, and authenticated bytes when the opened view
+// binds.
 // ---------------------------------------------------------------------------
 
 use proptest::prelude::*;
@@ -1289,6 +1542,10 @@ proptest! {
     /// (physical: broken envelope → integrity rejection; semantic:
     /// recomputed envelope → deep parsers). The oracle: never panic,
     /// never hang, never an invariant violation.
+    ///
+    /// Each case: 1..=6 semantic-or-physical ops, then a record reorder
+    /// (whole bodies move; valid envelopes) — one fresh image copy per
+    /// case, driven through `run_store_oracle`.
     #[test]
     fn whole_store_mutator(
         ops in prop::collection::vec(any::<(u8, u8, u8)>(), 1..=6),
@@ -1317,6 +1574,10 @@ proptest! {
 
     /// Superblock-directed mutations: root object id replacement with a
     /// recomputed slot CRC, plus the whole-store recipe on top.
+    ///
+    /// Each case: superblock patched first, then 0..=4 semantic ops — the
+    /// interaction of a repointed root with hostile records is exactly
+    /// the adversarial surface a constrained deployment would hit.
     #[test]
     fn superblock_mutator(
         ops in prop::collection::vec(any::<(u8, u8, u8)>(), 0..=4),

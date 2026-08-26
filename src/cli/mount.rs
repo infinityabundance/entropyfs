@@ -3,6 +3,40 @@
 //! Preflights the environment (§47), opens the store, spawns the fuser
 //! session, and parks until the mount is unmounted or SIGINT/SIGTERM
 //! arrives (then unmounts cleanly).
+//!
+//! # PURPOSE
+//!
+//! Translate the CLI into a [`StoreConfig`] (foreground policy, io
+//! backend, worker pool), open the store, and hand it to
+//! [`crate::fuse::mount::mount`]; then own the daemon lifecycle: park,
+//! react to signals, unmount-and-join, and stop the Phase-11E worker
+//! pool so the process exits cleanly.
+//!
+//! # BOUNDARY
+//!
+//! KNOWS: the CLI flags and how each maps onto [`StoreConfig`] /
+//! [`MountParams`]. NEVER KNOWS: FUSE request handling, the store's
+//! internals, or any persistence logic — those live in `crate::fuse` and
+//! `crate::store`. The daemon must not read or write store bytes itself.
+//!
+//! # MODEL
+//!
+//! One process, one mount session. `run` blocks until the session's
+//! guard finishes (unmount elsewhere) or a signal flips the `AtomicBool`
+//! stop flag, polling every 100 ms; then `umount_and_join` performs the
+//! clean teardown. The worker pool (Phase-11E, off by default) is
+//! disabled only after the session ends so no worker outlives the store.
+//!
+//! # KEY INVARIANTS
+//!
+//! - Unknown `--foreground` / `--io-backend` values are rejected before
+//!   any store is opened (fail fast, no partial state).
+//! - `--read-only` and `--allow-other` are passed through verbatim to
+//!   the session parameters; the store open itself is unaffected.
+//! - `--no-background-optimize` disables the idle densifier; the default
+//!   (on) matches the measured A8 ladder step.
+//! - Signal handling is best-effort (`ctrlc`); the loop also exits when
+//!   the session guard finishes, so a killed daemon still unmounts.
 
 #![forbid(unsafe_code)]
 

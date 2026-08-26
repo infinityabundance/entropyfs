@@ -1,5 +1,50 @@
 # EntropyFS changelog
 
+## Unreleased
+
+**Ultra-verbose commentary doctrine — applied repository-wide.** The
+implementation is research evidence; the commentary standard
+(`docs/architecture/commentary-standard.md`) is now enforced across the
+entire source tree (~59 400 lines, every module):
+
+- Every substantial module carries the full template — PURPOSE, BOUNDARY,
+  MODEL, PERSISTENT AUTHORITY, CORRECTNESS INVARIANTS, CONCURRENCY,
+  DURABILITY, RESOURCE BOUNDS, PERFORMANCE, FAILURE MODES, HISTORY /
+  EVIDENCE — and every architecturally significant function answers
+  what / why / how / guarantees (inputs-and-authority, algorithm,
+  invariants, concurrency, durability, resource bounds, failure behavior,
+  evidence).
+- Long systems functions are stage-numbered so a future engineer can
+  navigate a 500-line state machine without reverse-engineering it.
+- Every evidence-sensitive choice in the doctrine's §7 list now carries
+  its causal history and sealed measurement in place: the writeback-cache
+  removal (Phase-10G), mutation-log sequence monotonicity, checkpoint
+  compare-and-remove (not `mem::take`), staged-payload resolution, the
+  exclusive read-window bound and conditional predecessor inclusion
+  (Phase-11C regression), physical-scan occupancy (Phase-9H 2.66 MB
+  dead-BtreeNode finding), chunk-index `bulk_load`, DSFB zero decoding
+  authority, anchor survival through GC reference closure, longest-path
+  reference depth (Phase-10E), rANS model-cost-in-selection (Phase-9G0
+  277.6→74.3 KB), random-data→RAW convergence, the background optimizer's
+  CAS-against-incumbent gate, io_uring unsafe isolation, the durability
+  barrier's commit-lock hold (the 11B/11C fsync convoy), decode-validates-
+  before-allocation (Phase-11A layering gap), and semantic hostile-media
+  mutation recomputing CRCs so hostile payloads reach the deep parsers.
+- The last three files were completed in this pass: `core/materialize.rs`
+  (the bounded materializer — validate-before-allocation + the
+  budget/depth/allocation counters in place), `optimizer/search.rs` (the
+  guided search — the Phase-10B/10C/11C/11E seams and the DSFB authority
+  separation), and `tests/hostile_media/graph_court.rs` (the
+  materialization-graph court — the no-CRC contrast with the store court
+  and the Phase-10E/10G graph-bomb history).
+- Stale comments that contradicted the code were corrected to describe
+  the code that exists now (doctrine §9) while their historical rationale
+  stays in the changelog/evidence.
+
+Comment-only pass: `cargo check --all-targets` clean (pre-existing
+warnings only), full 421-test lib suite green, no measurement or on-disk
+behavior changed — no evidence updates, no version bump.
+
 ## v0.7.4 (2026-08-26)
 
 **11E — the persistent fair worker pool (probe-sealed, KEPT).** The 11D

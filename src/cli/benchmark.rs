@@ -12,6 +12,51 @@
 //! representation distributions, physical allocation, result hashes,
 //! p50/p95/p99, fsync latency, device writes, GC traffic, baselines and raw
 //! outputs, archived under `<out-root>/campaign-<ts>-<rev>/`.
+//!
+//! # PURPOSE
+//!
+//! Produce attributable, reproducible numbers: (1) a single-mode run on a
+//! given store, (2) a single leave-one-out or ladder ablation step on a
+//! fresh store, (3) both ablation tables at once (`--ablation-all`), or
+//! (4) the full evidence-sealing campaign (`--campaign`). Every mode that
+//! makes a claim measures physical bytes the same way — the REACHABLE
+//! footprint after GC, not `physical_used` (methodology §2).
+//!
+//! # BOUNDARY
+//!
+//! KNOWS: `Store`'s public write/read/GC APIs, `OptimizeOptions` ablation
+//! tables, and the campaign driver. NEVER KNOWS: representation encoding,
+//! transaction internals, or any on-disk format. It must be impossible
+//! for this frontend to make the store produce bytes it could not produce
+//! through the mount.
+//!
+//! # MODEL
+//!
+//! A benchmark is one synthetic corpus written through one
+//! [`OptimizeOptions`] configuration (or the default full pipeline). The
+//! corpus is deterministic (text / zeros / low-cardinality / random-ish
+//! 64 KiB chunks rotating per MiB — the Phase-4 ablation corpus, kept
+//! byte-identical in `src/evidence/corpus.rs::structured`). Single-ablation
+//! and ladder runs always use a FRESH store (`tempfile`), so no mode can
+//! inherit another mode's artifacts; the default store run keeps the
+//! original reproducible-write semantics.
+//!
+//! # KEY INVARIANTS
+//!
+//! - Attribution: leave-one-out gates (marginal necessity) and the
+//!   cumulative ladder A0–A8 (cumulative contribution) are never
+//!   substituted for each other (methodology §4); `--ablation-all` prints
+//!   both tables.
+//! - Fresh-store isolation per ablation row; the campaign additionally
+//!   runs repeated runs on fresh stores under a scratch dir that must
+//!   live on the backing storage device, not tmpfs.
+//! - Physical = reachable-after-GC bytes (the permanent footprint);
+//!   `run_corpus` runs GC before measuring so append-only COW garbage
+//!   does not masquerade as footprint (the old per-chunk-transaction
+//!   ablation looked like a RAW loss for exactly this reason).
+//! - The default store run performs a durability barrier before
+//!   reporting, so deferred writes are durable before the numbers leave
+//!   the process.
 
 #![forbid(unsafe_code)]
 

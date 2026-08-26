@@ -1,9 +1,90 @@
 //! Representation descriptors and the residual algebra.
 //!
+//! # PURPOSE
+//!
 //! The defining equation: `X = Materialize(D)` where `X` is the exact
 //! logical byte sequence and `D` is the persisted representation descriptor.
 //! This module defines `D` (in-memory form) and the exact, bounded,
 //! non-Turing-complete descriptor language (ADR-0005).
+//!
+//! # BOUNDARY
+//!
+//! This module owns the descriptor LANGUAGE (what a descriptor may say)
+//! and the structural VALIDATOR (what a descriptor may PERSIST). It knows
+//! nothing about the store, the segment format, or the encoder search —
+//! encoders construct `Representation` values; the store persists them
+//! (via `format::descriptor`); the materializer interprets them
+//! (`core::materialize`).
+//!
+//! # PERSISTENT AUTHORITY — validate-before-allocation
+//!
+//! Descriptor bytes are PERSISTENT, therefore UNTRUSTED. The reader of
+//! this module must hold one ordering invariant:
+//!
+//! ```text
+//! persistent bytes
+//!     -> bounded parse          (format::descriptor, with Limits)
+//!     -> structural validation  (Representation::validate, with Limits)
+//!     -> resource preflight     (materializer, with Limits)
+//!     -> materialization
+//! ```
+//!
+//! A syntactically readable length field is never an allocation authority
+//! on its own: [`Representation::validate`] establishes the structural
+//! invariants (lengths within `Limits`, palette consistency, periodic
+//! arithmetic, reference sanity, encoded size within
+//! `max_descriptor_bytes`) BEFORE the materializer allocates against the
+//! declared lengths. Reversing that order would let a
+//! malformed-but-parseable descriptor influence allocation before its
+//! semantic bounds were established. The hostile-media court
+//! (`src/tests/hostile_media/`) deliberately exercises this boundary
+//! (decode-OK implies validate-OK and a byte-exact canonical re-encode).
+//!
+//! # MODEL
+//!
+//! `X = Materialize(D)`: the descriptor references objects (by content id)
+//! and/or embeds small payloads; the materializer resolves references
+//! through a `DecoderContext` and applies the residual algebra. A
+//! descriptor is exact: it must materialize to ONE byte sequence, and the
+//! chunk index maps a content id to the descriptor that materializes it.
+//!
+//! # CORRECTNESS INVARIANTS
+//!
+//! - `len()` (the exact materialized length) and `encoded_size()` (the
+//!   exact persisted descriptor size) are the two accounting authorities;
+//!   `format::descriptor` mirrors `encoded_size` byte-for-byte (a test
+//!   pins the mirror).
+//! - `validate` rejects: lengths over `Limits`, zero object ids,
+//!   out-of-range `scale_bits`, inconsistent palettes/periods, an
+//!   `ExactRef` whose window is unsatisfiable, a descriptor whose
+//!   `encoded_size` exceeds `max_descriptor_bytes` (it could win on raw
+//!   byte cost yet be undecodable — every persisted descriptor must
+//!   decode).
+//! - References must never form a cycle that defeats bounded
+//!   materialization (depth-capped; see `core::materialize` and the
+//!   hostile-media materialization graph court).
+//!
+//! # RESOURCE BOUNDS
+//!
+//! Every length a descriptor can name is checked against `Limits` at
+//! validation: `max_chunk_size`, `max_descriptor_bytes`, `max_inline_bytes`,
+//! `max_reference_depth`, `max_decode_work` (the materializer's budget).
+//! No allocation in the materializer trusts a persisted length before
+//! validation.
+//!
+//! # FAILURE MODES
+//!
+//! Typed [`ReprError`]s only — never a panic from malformed input. The
+//! hostile-media court proves the oracle across the whole descriptor
+//! space: bounded-valid result OR typed rejection.
+//!
+//! # HISTORY / EVIDENCE
+//!
+//! ADR-0005 defined the language; Phase 1 built it; the hostile-media
+//! court (11A, `evidence/hostile-media/court-1787750784-a2983dc/`)
+//! hardened the parse/validate ordering against untrusted backing bytes;
+//! `decode` now takes `&Limits` and validates internally, closing the
+//! read-path layering gap the court found.
 
 #![forbid(unsafe_code)]
 

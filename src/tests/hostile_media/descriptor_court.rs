@@ -2,6 +2,23 @@
 //! byte string through `format::descriptor::decode` under deliberately
 //! tight limits AND the real defaults.
 //!
+//! # Purpose
+//!
+//! Prove the bounded-valid-or-typed-rejection oracle over the descriptor
+//! codec alone: the deepest parsers' entry point. This is the first of the
+//! three layers the hostile-media court attacks (codec → graph → store).
+//!
+//! # Boundary
+//!
+//! The court MAY feed any bounded byte string to `descriptor::decode` and
+//! re-encode the result. It may NEVER assume hostile bytes must be
+//! rejected — some random inputs legitimately describe valid content — so
+//! the oracle is `Either` unless the format's outcome is fully
+//! determined. It never touches the store or the materializer; graph and
+//! store layers are the other two courts' territory.
+//!
+//! # Model
+//!
 //! The oracle (`run_descriptor_oracle`) is the user-specified contract:
 //!
 //! - decode-OK ⇒ `rep.validate(&limits)` must succeed (enforced inside
@@ -21,6 +38,30 @@
 //! day discovering valid tags and lengths), and seeds plus trailing
 //! garbage. Deterministic companions: truncation at every byte boundary of
 //! every canonical descriptor, and the 8192/8193 descriptor-cap boundary.
+//!
+//! # Resource bounds
+//!
+//! Fuzz inputs cap at `MAX_FUZZ_INPUT` (1024 bytes); mutations apply
+//! 0..=8 ops per seed; every strategy is bounded by the seed corpus size.
+//! Each case runs under BOTH limit sets (`LIMIT_SETS`), so allocations,
+//! decode work, fanout, and model size are enforced by the codec itself
+//! before they can grow.
+//!
+//! # Failure modes
+//!
+//! Expected: any typed decode error — the admissible rejection arm.
+//! Never: panic, OOM, a decode-OK-but-validate-fail, an over-cap encoded
+//! size, or a non-canonical (non-byte-exact) re-encode — each is an
+//! `Err(description)` that fails the court.
+//!
+//! # History / evidence
+//!
+//! Phase 11A (v0.7.0). The court's decode-OK ⇒ validate-OK oracle
+//! exposed a layering gap: `decode` used to accept descriptors that
+//! `validate` rejects (see `docs/security/hostile-media-court.md` §4) —
+//! `decode` now takes `&Limits` and validates internally. Sealed evidence:
+//! `evidence/hostile-media/court-1787750784-a2983dc/` (revision
+//! `a2983dc`): 200k descriptor cases per proptest target in release mode.
 
 #![forbid(unsafe_code)]
 
@@ -34,10 +75,26 @@ use crate::tests::hostile_media::{ExhibitKind, Expect, LIMIT_SETS, tight_limits}
 /// The maximum fuzz-input size for the descriptor court: `decode` rejects
 /// inputs longer than `max_descriptor_bytes` instantly, so inputs beyond
 /// the descriptor cap add nothing but noise.
+///
+/// Unit: bytes. 1024 sits above the tight cap (512 bytes) so the tight
+/// set is exercised with over-cap noise, and below the default cap (8192
+/// bytes) so default-limit cases actually exercise the codec; the exact
+/// 8192/8193 cap boundary is pinned deterministically by
+/// `descriptor_cap_boundary` instead of being left to the fuzzer.
 const MAX_FUZZ_INPUT: usize = 1024;
 
 /// The descriptor court oracle. Returns `Err(description)` on any
 /// invariant violation; the courts turn that into a test failure.
+///
+/// The oracle contract (bounded-valid OR typed rejection), asserted
+/// clause by clause at the check sites below:
+/// - a decode `Err` is the admissible rejection arm (`Ok(())`);
+/// - decode-OK ⇒ `validate` OK (the codec's own gate since Phase-11A);
+/// - encoded size within `max_descriptor_bytes`;
+/// - logical length within `max_chunk_size`;
+/// - canonical re-encode: byte-for-byte identical to the input;
+/// - never panic: every `Vec` growth is bounded by the input size before
+///   the codec allocates.
 pub fn run_descriptor_oracle(bytes: &[u8], limits: &Limits) -> Result<(), String> {
     let decoded = descriptor::decode(bytes, limits);
     match decoded {
@@ -83,6 +140,9 @@ pub fn run_descriptor_oracle(bytes: &[u8], limits: &Limits) -> Result<(), String
 }
 
 /// Short hex tail of an input, for failure messages.
+///
+/// Diagnostic only: never affects the oracle outcome. Unit: up to 16
+/// bytes of the input's head, suffixed with `…` when truncated.
 fn hex_tail(bytes: &[u8]) -> String {
     let n = bytes.len().min(16);
     let mut s = String::with_capacity(n * 2);
@@ -95,7 +155,8 @@ fn hex_tail(bytes: &[u8]) -> String {
     s
 }
 
-/// The limits for a named limit set.
+/// The limits for a named limit set (`"tight"` → `tight_limits()`, any
+/// other name → `Limits::default()`).
 pub fn limits_for(set: &str) -> Limits {
     match set {
         "tight" => tight_limits(),
@@ -109,6 +170,9 @@ pub fn limits_for(set: &str) -> Limits {
 
 /// Every family seed decodes, validates, and re-encodes byte-exactly under
 /// the default limits (the corpus contract).
+///
+/// This pins the corpus's own validity: a seed that fails here would
+/// poison every mutation strategy built on top of it.
 #[test]
 fn seeds_are_canonical_and_valid() {
     let limits = Limits::default();
@@ -126,6 +190,10 @@ fn seeds_are_canonical_and_valid() {
 /// Under the tight limits the seeds must decode-or-reject typed (a
 /// tight-mount rejection of an over-cap descriptor is correct behavior),
 /// and never panic.
+///
+/// Note the asymmetry: default limits accept every seed; tight limits may
+/// reject an over-cap seed typed — that is the oracle's admissible
+/// rejection arm, not a corpus bug.
 #[test]
 fn seeds_bounded_under_tight_limits() {
     let limits = tight_limits();
@@ -143,6 +211,10 @@ fn seeds_bounded_under_tight_limits() {
 /// Truncation at every byte boundary of every canonical descriptor must
 /// fail with a typed error — never panic, never silently succeed on a
 /// prefix.
+///
+/// The oracle's "no silent wrong bytes" arm: a prefix that decodes as a
+/// complete descriptor would mean the codec accepted bytes the encoder
+/// never produced (non-canonical input).
 #[test]
 fn truncation_at_every_boundary_of_every_seed() {
     let limits = Limits::default();
@@ -165,6 +237,11 @@ fn truncation_at_every_boundary_of_every_seed() {
 
 /// The descriptor-cap boundary: a descriptor of exactly 8192 bytes decodes
 /// under the default cap; 8193 bytes is rejected typed.
+///
+/// The 8192/8193 edge is the format's hard encoded-size limit (default
+/// `max_descriptor_bytes` = 8192 bytes): 8192 must decode (with the
+/// canonical re-encode asserted by the oracle), 8193 must be a typed
+/// rejection at the entry length gate.
 #[test]
 fn descriptor_cap_boundary() {
     let limits = Limits::default();
@@ -190,6 +267,12 @@ fn descriptor_cap_boundary() {
 /// Every descriptor exhibit under both limit sets: MustReject exhibits
 /// must fail, MustAccept must succeed, Either accepts both — and nothing
 /// may panic.
+///
+/// The assertion sites ARE the oracle: `MustReject` asserts
+/// `decode(...).is_err()`; `MustAccept` requires the full
+/// `run_descriptor_oracle` contract (validate-OK + in-cap + canonical);
+/// `Either` swallows the outcome — bounded-valid or typed-reject, either
+/// is admissible.
 #[test]
 fn descriptor_exhibits_pass() {
     for set in LIMIT_SETS {
@@ -220,6 +303,9 @@ fn descriptor_exhibits_pass() {
 
 /// Hand-assembled boundary bytes that must never panic, exercised directly
 /// (the exhibit runner covers them; this is the explicit no-panic sweep).
+///
+/// A panic here is the oracle's cardinal failure — hostile bytes must
+/// produce typed results, never an unwind.
 #[test]
 fn exhibits_never_panic() {
     for ex in exhibits() {
@@ -234,10 +320,16 @@ fn exhibits_never_panic() {
 // ---------------------------------------------------------------------------
 // Fuzz targets (proptest; the in-package coverage-guided harness — ADR-0001
 // keeps one package, so the driver is proptest rather than a `fuzz/`
-// Cargo package; `PROPTEST_CASES` scales the run for the release court).
+// Cargo package; `PROPTEST_CASES` scales the run for the release court —
+// the sealed court ran 200k cases per target; the default test run is
+// the proptest default).
 // ---------------------------------------------------------------------------
 
-/// One byte-level mutation op over a seed.
+/// One byte-level mutation op over a seed: op % 6 selects the kind
+/// (0 flip, 1 set, 2 insert, 3 delete, 4 truncate, 5 overwrite-range),
+/// `a` selects the position (clamped into the current length), `b` is the
+/// byte value or range-fill seed. Deterministic: the same op tuple always
+/// produces the same mutation, so a failing recipe is reproducible.
 fn apply_op(bytes: &mut Vec<u8>, op: u8, a: usize, b: u8) {
     match op % 6 {
         0 => {
@@ -295,6 +387,11 @@ fn apply_op(bytes: &mut Vec<u8>, op: u8, a: usize, b: u8) {
 
 /// A strategy that starts from a real family seed and applies 0..=8 random
 /// mutation ops (flip/set/insert/delete/truncate/overwrite).
+///
+/// Corpus-penetration target: the seeds are one canonical descriptor per
+/// family, so mutation drifts fields of an OTHERWISE VALID structure —
+/// the fuzzer spends its budget on hostile field values rather than on
+/// discovering valid tags and lengths.
 fn mutated_seed_strategy() -> impl Strategy<Value = Vec<u8>> {
     let seeds = descriptor_seeds();
     let seed_bytes: Vec<Vec<u8>> = seeds.iter().map(|(_, b)| b.clone()).collect();
@@ -320,11 +417,18 @@ fn mutated_seed_strategy() -> impl Strategy<Value = Vec<u8>> {
 }
 
 /// Uniform noise: every possible bounded byte string.
+///
+/// The "no assumptions" arm of the strategy mix: pure arbitrary bytes
+/// (0..=MAX_FUZZ_INPUT bytes), independent of the corpus.
 fn noise_strategy() -> impl Strategy<Value = Vec<u8>> {
     prop::collection::vec(any::<u8>(), 0..=MAX_FUZZ_INPUT)
 }
 
 /// A valid seed with a trailing garbage blob (the `r.done()` gate).
+///
+/// A valid prefix plus 1..=16 garbage bytes: the codec's end-of-input
+/// gate must reject the trailing bytes typed (never accept a valid prefix
+/// and silently ignore the tail).
 fn trailing_garbage_strategy() -> impl Strategy<Value = Vec<u8>> {
     let seeds = descriptor_seeds();
     let seed_bytes: Vec<Vec<u8>> = seeds.iter().map(|(_, b)| b.clone()).collect();
@@ -339,6 +443,10 @@ fn trailing_garbage_strategy() -> impl Strategy<Value = Vec<u8>> {
 }
 
 /// A random sub-slice of a seed (cut into the middle of the fields).
+///
+/// Truncation inside field data: the sliced window starts and ends
+/// anywhere in the seed, so length and rank fields are left pointing at
+/// bytes that are not there — the codec must reject typed, never panic.
 fn slice_strategy() -> impl Strategy<Value = Vec<u8>> {
     let seeds = descriptor_seeds();
     let seed_bytes: Vec<Vec<u8>> = seeds.iter().map(|(_, b)| b.clone()).collect();
@@ -362,7 +470,8 @@ proptest! {
     }
 
     /// Mutated family seeds: 0..=8 byte-level ops over one real descriptor
-    /// of every family (the corpus-penetration target).
+    /// of every family (the corpus-penetration target). The oracle is
+    /// unchanged: bounded-valid or typed-reject, never a panic.
     #[test]
     fn mutated_seeds_oracle(bytes in mutated_seed_strategy()) {
         for set in LIMIT_SETS {

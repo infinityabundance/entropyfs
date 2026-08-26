@@ -1,6 +1,8 @@
 //! Phase-10D metadata writeback epochs: the recoverable dirty state
 //! between checkpoints (ADR pending, `docs/architecture/transaction-model.md`).
 //!
+//! # PURPOSE
+//!
 //! The foreground write path accumulates acknowledged namespace/writeback
 //! mutations in an ACTIVE EPOCH instead of committing one immutable
 //! transaction per operation. Each op's data objects (inodes, model/enc
@@ -16,12 +18,108 @@
 //! global inode index and the chunk index — and ONE root publication
 //! carries the merged state plus the consumed log sequence.
 //!
-//! Recovery replays every `MutationLog` envelope with
-//! `seq > root.log_seq` (in seq order) against the checkpoint root, so an
-//! acknowledged op survives a process crash exactly as the deferred-commit
-//! path always guaranteed: the envelope and its objects were flushed to
-//! the segment's page cache before the ack. Power loss is bounded by the
-//! same [`Store::durability_barrier`] contract as every other commit.
+//! # BOUNDARY
+//!
+//! This module owns the OVERLAY data structure (what concurrent readers
+//! observe) and the ENVELOPE codec (what recovery replays). It knows
+//! nothing about the search, the candidate families, or the B-tree
+//! mechanics — the checkpoint merge lives in `store/mod.rs`
+//! (`epoch_checkpoint`), which consumes the overlay and the envelopes.
+//!
+//! # MODEL: TWO DIFFERENT KINDS OF STATE
+//!
+//! An [`Epoch`] contains two related-but-not-interchangeable kinds of
+//! state:
+//!
+//! 1. **Semantic overlay state** — what concurrent readers must observe:
+//!    pending inodes/entries/extents/chunks, removals, the staged-object
+//!    dedup set, the inode allocator high-water mark.
+//! 2. **Mutation-log state** — what recovery needs if the process dies
+//!    before the next checkpoint: the envelopes (sequence + op) plus the
+//!    staged object PAYLOADS the envelopes reference.
+//!
+//! Clearing the live overlay merely because a checkpoint has taken a
+//! snapshot creates a VISIBILITY HOLE (concurrent epoch ops would see an
+//! empty overlay + a stale committed root mid-commit). Phase 10G exposed
+//! exactly that bug under parallel workloads; the checkpoint therefore
+//! SNAPSHOTS the overlay and compare-and-removes its own entries only
+//! after the merged root commits (see `epoch_checkpoint`).
+//!
+//! # PERSISTENT AUTHORITY
+//!
+//! The overlay itself is NOT persisted. The persisted authority is the
+//! sequence of `MutationLog` envelopes (each referencing its staged
+//! objects by content id); the overlay is a cache of the envelope log's
+//! effect, rebuilt by replay at recovery. An op is acknowledged only
+//! after its envelope + objects are flushed to the segment's page cache
+//! (`epoch_append`), so the overlay and the log never disagree about
+//! acknowledged state.
+//!
+//! # CORRECTNESS INVARIANTS
+//!
+//! - **Sequence monotonicity**: `Epoch::seq` is GLOBALLY MONOTONIC across
+//!   checkpoints — only ever bumped, never reset. Recovery replays
+//!   envelopes with `seq > root.log_seq`; a reset would make an
+//!   acknowledged mutation appear older than the root and be silently
+//!   discarded, and two epochs could emit duplicate sequences (the
+//!   recovery duplicate invariant). The checkpoint `max`es the frozen
+//!   sequence against the pre-commit root so overlapping checkpoints
+//!   cannot regress it. Phase 10G found the reset form of this bug.
+//! - **Overlay vs committed**: a pending entry shadows a committed entry;
+//!   a removal shadows both. Overlay reads consult pending → removed →
+//!   committed in that order (see the `overlay_*` accessors).
+//! - **Staged payloads resolve pending descriptors**: an overlay read may
+//!   resolve a pending descriptor BEFORE its op's append lands; the
+//!   object index only knows appended records, so the read falls back to
+//!   [`Epoch::staged_payloads`]. Clearing them while a pending descriptor
+//!   still references them would make acknowledged state unfetchable.
+//! - **The inode allocator is monotonic**: `max_ino` never resets at a
+//!   checkpoint (a reset would make the next create re-scan the
+//!   committed index — stale while this checkpoint's root is mid-commit —
+//!   and hand out a duplicate ino).
+//!
+//! # CONCURRENCY
+//!
+//! The [`Epoch`] is guarded by the store's single `epoch` mutex
+//! (`Store::epoch()`); every accessor here runs under that guard.
+//! Phase-11C added a lock-free mirror (`Store::epoch_pending`) for the
+//! checkpoint-threshold COUNT so the per-write check does not acquire the
+//! guard — the mirror is written under the guard and read without it, and
+//! it never replaces the guarded state, only the count.
+//!
+//! # DURABILITY
+//!
+//! An op's ack means: envelope + objects flushed to the segment page
+//! cache (process-crash safe; recovery replays `seq > root.log_seq`).
+//! Power loss is bounded by the same [`Store::durability_barrier`]
+//! contract as every other commit (a barrier's cut includes the
+//! checkpoint that consumes these envelopes).
+//!
+//! # RESOURCE BOUNDS
+//!
+//! The overlay grows with acknowledged-but-uncheckpointed ops; the
+//! checkpoint-threshold cap (`EPOCH_MAX_OPS` in `maybe_checkpoint_epoch`)
+//! bounds both the log tail (recovery scope) and the in-memory overlay.
+//! Envelope payloads are bounded by the op's own record sizes; the codec
+//! reads are bounded by the store's descriptor limits.
+//!
+//! # FAILURE MODES
+//!
+//! Expected: nothing here fails at runtime (the accessors are infallible
+//! lookups; the codec returns typed `CodecError`s that the callers map to
+//! [`StoreError::Descriptor`]). Must never happen: a non-monotonic
+//! sequence, a pending descriptor whose staged payloads were cleared, a
+//! duplicate envelope sequence, an overlay read seeing a half-merged
+//! checkpoint state.
+//!
+//! # HISTORY / EVIDENCE
+//!
+//! Phase 10D introduced the epoch (the 10D court pair: src tiny-file
+//! writes 10.4 → 36.5 MiB/s). Phase 10G hardened it under parallel
+//! workloads (the five bugs listed in the invariants; the parallel court
+//! `court-threads-parallel-1787745479/`). Phase 11C removed the epoch
+//! guard from the checkpoint-threshold check (the 11B oracle measured
+//! `epoch_wait` at 20% of 16-thread request time).
 
 #![forbid(unsafe_code)]
 
@@ -462,6 +560,55 @@ impl crate::core::materialize::DecoderContext for PrefetchContext<'_> {
 /// sees earlier epoch mutations) and the CHECKPOINT source (the frozen
 /// overlay is merged into the trees once).
 #[derive(Debug, Default)]
+/// The process-visible mutation overlay between canonical checkpoints.
+///
+/// # Why this exists
+///
+/// Persisting every namespace or extent mutation directly into the
+/// immutable B-tree DAG made small-file workloads pay the full
+/// COW/root-publication cost per syscall. Phase 10D introduced the epoch
+/// as a recoverable writeback layer: mutations become visible immediately
+/// through this overlay, while canonical immutable trees are constructed
+/// in batches at the checkpoint.
+///
+/// # Two different kinds of state
+///
+/// An epoch contains:
+///
+/// 1. **semantic overlay state** — what concurrent readers must observe
+///    (the `pending_*`/`removed_*` maps, the staged-object dedup set, the
+///    inode allocator);
+/// 2. **mutation-log state** — what recovery needs if the process dies
+///    before the next checkpoint (the envelopes and the staged PAYLOADS
+///    they reference, [`Epoch::staged_payloads`]).
+///
+/// These are related but are not interchangeable. In particular, clearing
+/// the live overlay merely because a checkpoint has taken a snapshot
+/// creates a visibility hole: concurrent epoch ops would see an EMPTY
+/// overlay + a STALE committed root mid-commit and report spurious
+/// "inode missing" invariants. Phase 10G exposed exactly that bug under
+/// parallel workloads; the checkpoint therefore snapshots the overlay and
+/// compare-and-removes its own entries only after the commit SUCCEEDS
+/// (`Store::epoch_checkpoint`).
+///
+/// # Sequence invariant
+///
+/// [`Epoch::seq`] is globally monotonic across checkpoints. It MUST NOT
+/// restart when an epoch is checkpointed. Recovery uses the committed
+/// root's `log_seq` as a high-water mark, so reusing an earlier sequence
+/// can make an acknowledged mutation appear older than the root and be
+/// silently discarded at recovery; two epochs emitting the same sequence
+/// would also trip the recovery duplicate-sequence invariant. Phase 10G
+/// found the reset form of this bug. The checkpoint `max`es the frozen
+/// sequence against the pre-commit root so overlapping checkpoints cannot
+/// regress it.
+///
+/// # Inode allocator invariant
+///
+/// [`Epoch::max_ino`] is monotonic the same way. A reset to 0 would make
+/// the next create re-scan the committed index — STALE while this
+/// checkpoint's root is mid-commit — and hand out an inode number another
+/// (already-merged) create allocated: two files, one ino (Phase 10G).
 pub struct Epoch {
     /// Next log sequence number (1-based; the checkpoint root records the
     /// highest consumed sequence). GLOBALLY MONOTONIC: it is only ever

@@ -1,5 +1,85 @@
 //! Transactions: the commit protocol with crash-court injection points
 //! (ADR-0008, `docs/architecture/transaction-model.md`).
+//!
+//! # PURPOSE
+//!
+//! One logical mutation of the store's immutable trees, staged as a set of
+//! new content-addressed records plus a new ROOT object, applied and made
+//! durable as a unit. The [`Tx`] type owns the commit-coordinator lock for
+//! its whole lifetime, so transaction application and root publication are
+//! serialized process-wide while candidate encoding (the expensive part of
+//! a write) happens before `begin_tx` and runs concurrently (Phase 8,
+//! ADR-0013).
+//!
+//! # BOUNDARY
+//!
+//! This module owns the commit SEQUENCE and the durability BARRIER
+//! contract. It knows nothing about the search, the epoch overlay, or the
+//! candidate families — it appends records, builds a root, publishes it,
+//! and (on the full path) makes it power-durable. The epoch's checkpoint
+//! is a transaction that happens to consume the mutation-log overlay.
+//!
+//! # PERSISTENT AUTHORITY
+//!
+//! The append-only segment records + the root object + the dual superblock
+//! slots. A commit's linearization point is its root publication (in
+//! memory) followed by the superblock flip (on disk); the crash-court
+//! injection points below are exactly the boundaries where a power loss
+//! may split the sequence, and recovery must observe either the complete
+//! old or the complete new transaction — never an impossible hybrid
+//! (ADR-0008).
+//!
+//! # DURABILITY SEMANTICS
+//!
+//! - `commit` (full): records appended, root published, `durability_barrier`
+//!   run — power-durable before it returns.
+//! - `commit_deferred` (the write path): records appended + flushed to the
+//!   segment page cache + root published in memory — process-crash safe;
+//!   power-durable only after a later barrier (POSIX: only fsync'd data is
+//!   power-durable). `fsync`/`syncfs` on the mount run the barrier.
+//!
+//! # CONCURRENCY
+//!
+//! The commit-coordinator mutex (`Store::commit_lock`) is held from
+//! `begin_tx` through `commit_deferred` AND by the durability barrier
+//! across `[fdatasync -> superblock fsync]`. The barrier's hold is a
+//! LINEARIZABILITY requirement, not a convenience: a commit that
+//! completed mid-barrier would ack after the fsync started but before its
+//! cut, and a subsequent fsync would then report durable data that is not
+//! (the crash courts pin this). Consequence: concurrent fsyncs queue on
+//! the lock — the "fsync convoy" the 11B/11C reconciliation measured as
+//! `commit_lock_wait` (34.7% of 16-thread request time pre-11C). It is
+//! contract-inherent: removing the hold requires a new durability
+//! contract, and 11C deliberately shrank it indirectly (writes no longer
+//! stall behind it) rather than weakening the barrier. A future "group
+//! durability" (amortize the physical barrier across concurrent fsyncs,
+//! each waiter completing only after a cut that includes its writes)
+//! could preserve linearizability while amortizing the barrier.
+//!
+//! # RESOURCE BOUNDS
+//!
+//! A transaction's record payloads are bounded by the caller's own sizes
+//! (chunk payloads are <= `max_chunk_size`; tree nodes are bounded by the
+//! B-tree order/fanout); the store re-encodes each record with its
+//! envelope at append time, so nothing here trusts a persisted length as
+//! an allocation authority.
+//!
+//! # FAILURE MODES
+//!
+//! Typed [`StoreError`]s: IO failures, `CrashSimulated` at the armed
+//! injection point (crash-court), invariant violations. Must never happen:
+//! a published root whose records are not appended before it, a superblock
+//! flip without the segment fdatasync, a recovery state that mixes two
+//! transactions.
+//!
+//! # HISTORY / EVIDENCE
+//!
+//! ADR-0008 defined the protocol; the crash courts
+//! (`src/tests/crash_recovery.rs`) exercise every injection point against
+//! both storage backends (the io_uring parity harness asserts byte-
+//! identical store directories at every crash point). Phase 6 deferred
+//! durability (logical commit + fsync barrier); Phase 11B/C measured and
+//! documented the fsync convoy.
 
 #![forbid(unsafe_code)]
 

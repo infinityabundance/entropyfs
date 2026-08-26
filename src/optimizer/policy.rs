@@ -19,6 +19,82 @@
 //!   methodology's A1 step is RAW + byte rANS; SequenceRans is a
 //!   post-registration extension (ladder step E1) so A1 never silently
 //!   includes the match finder.
+//!
+//! PURPOSE
+//!     The single authority for which candidate families and channels a
+//!     search may evaluate — the ablation gate set (spec §43). Every
+//!     search (write path, background passes, ablation CLI) reads its
+//!     gates from a single `OptimizeOptions` value, so a benchmark can
+//!     flip exactly one mechanism and know what changed.
+//!
+//! BOUNDARY
+//!     Knows only what EXISTS (families/channels); never how a search
+//!     spends CPU or which candidate wins. The write-path CPU budget is
+//!     `optimizer::foreground::ForegroundPolicy`, deliberately a separate
+//!     gate. This module never touches the store or persistent data.
+//!
+//! MODEL
+//!     Leave-one-out gates: every toggle defaults on, and each ablation
+//!     configuration flips exactly ONE of them off, so every claimed
+//!     benefit is attributable to a single mechanism. The cumulative
+//!     ladder (A0–A8, E1–E4) adds mechanisms one at a time in the
+//!     opposite direction. Gates are advisory to the encoder only —
+//!     nothing on disk records which gates were on.
+//!
+//! PERSISTENT AUTHORITY
+//!     Indirect but load-bearing: what the gates admit is what may be
+//!     committed, so `representation_allowed` also gates canonical
+//!     descriptor REUSE — otherwise the RAW-only ablation would silently
+//!     store ZERO/PERIODIC descriptors and the ladder steps would
+//!     conflate. Content-addressed object sharing is a store invariant
+//!     and is never gated.
+//!
+//! CORRECTNESS INVARIANTS
+//!     - one gate per mechanism (the ablation discipline): ablations flip
+//!       one gate at a time;
+//!     - CAS object sharing (identical payload → one `ChunkId`) is never
+//!       disabled by any gate;
+//!     - `channel_allowed` composes gates where a channel needs two
+//!       mechanisms (Adjacent/PrevInFile/FamilyBase need bases AND
+//!       temporal bases; the Rans channel admits byte OR sequence rANS);
+//!     - the ladder steps are strictly cumulative — each step toggles
+//!       exactly one mechanism over the previous step.
+//!
+//! CONCURRENCY
+//!     `OptimizeOptions` is a `Copy` value with no interior state; every
+//!     search snapshots the options it runs with. No locks.
+//!
+//! DURABILITY
+//!     None.
+//!
+//! RESOURCE BOUNDS
+//!     The gate set is fixed: 11 toggles. `ablation_modes()` returns the
+//!     15 leave-one-out configurations and `cumulative_ladder_modes()`
+//!     the 13 ladder steps (constant vectors the CLI and the campaign
+//!     iterate).
+//!
+//! PERFORMANCE
+//!     The gates are the attribution instrument, not a performance
+//!     mechanism: each campaign row is one gate set, and the sealed
+//!     campaigns (`evidence/performance/INDEX.md`) are the measurements.
+//!     (The foreground CPU gate is a separate module on purpose.)
+//!
+//! FAILURE MODES
+//!     The failure this module exists to prevent is a CONFLATED ablation:
+//!     two mechanisms behind one gate (or one mechanism behind two),
+//!     which makes a claimed benefit unattributable. The Phase-8C
+//!     attribution correction (below) is the historical instance.
+//!
+//! HISTORY / EVIDENCE
+//!     Phase-8A: the strict cumulative ladder was added beside the
+//!     nine-row leave-one-out table (the first campaign's table was
+//!     amended as the leave-one-out table, never rewritten). Phase-8C:
+//!     `allow_exact_ref` re-gated to the EXACT_REF representation only
+//!     (object sharing is a store invariant) and `allow_rans` split into
+//!     byte rANS (A1) + SequenceRans (E1, post-registration). Later gates
+//!     were added the same way: `allow_sequence_rans_deep` (Phase-9E) and
+//!     the 9G0 stream gate keep the fast floor (E1) and deep floor (E4)
+//!     attributable separately.
 
 #![forbid(unsafe_code)]
 
@@ -26,7 +102,15 @@ use crate::dsfb::features::Channel;
 
 /// Which candidate families and channels are enabled for a search.
 ///
-/// All toggles default to on; ablation runs flip them off one at a time.
+/// Role: the family-authority for every search — the write path, the
+/// background passes, and the ablation CLI all read their gates from a
+/// single `OptimizeOptions` value, so an ablation flips one mechanism and
+/// nothing else changes.
+///
+/// Invariants: all toggles default to on; ablation runs flip them off one
+/// at a time. No gate can disable content-addressed object sharing (a
+/// store invariant); gates affect only which REPRESENTATIONS and channels
+/// may be produced or reused (see `representation_allowed`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OptimizeOptions {
     /// EXACT_REF aliasing (P2) via the chunk index: a duplicate logical
@@ -214,6 +298,11 @@ impl OptimizeOptions {
 
     /// Every ablation configuration (spec §43): leave-one-out gates — the
     /// single source of truth for the CLI and the evidence campaign.
+    ///
+    /// The ablation discipline: each row flips exactly ONE gate off (or
+    /// is a pure baseline), so every claimed benefit in the evidence is
+    /// attributable to a single mechanism. The CLI and the campaign
+    /// iterate this exact vector, never a private copy.
     pub fn ablation_modes() -> Vec<(&'static str, OptimizeOptions)> {
         vec![
             ("full", OptimizeOptions::default()),
@@ -313,6 +402,11 @@ impl OptimizeOptions {
     /// A0–A8 follow the ORIGINAL methodology (A1 = RAW + byte rANS);
     /// SequenceRans is a post-registration extension, E1 (the current
     /// production pipeline = full + background pass).
+    ///
+    /// Strictly cumulative: nothing is removed between steps, and each
+    /// step toggles exactly one mechanism over the previous one — the
+    /// same one-gate-at-a-time discipline as `ablation_modes`, in the
+    /// adding direction.
     ///
     /// The engine has one base gate for the in-hand previous-version
     /// residual coding (A3) and one for the temporal base channels that

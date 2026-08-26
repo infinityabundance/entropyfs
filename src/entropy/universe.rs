@@ -10,6 +10,91 @@
 //! v1 ships exactly one control universe: [`UniformXofV1`] — the negative
 //! control establishing that a random implicit dictionary cannot create
 //! free compression once selector cost is included (ADR-0005 §9).
+//!
+//! # PURPOSE
+//!
+//! Two things: (1) the versioned, deterministic materialization functions
+//! ("universes") that generate bytes from a small persisted state, and
+//! (2) the ENTROPY_REF candidate family (tag `0x0A`) that proposes
+//! `universe + seed + coordinate + transform + residual` descriptors.
+//!
+//! # BOUNDARY
+//!
+//! Knows only `blake3`, the format's [`UniverseId`], and the residual
+//! derivation machinery. It never touches the store and never searches
+//! seeds — brute-force seed search over astronomical seed spaces is
+//! prohibited (ADR-0005).
+//!
+//! # MODEL
+//!
+//! `E = Universe(version, seed/state, coordinate, requested_range)`. For
+//! [`UniformXofV1`]:
+//!
+//! ```text
+//! stream = concat_i BLAKE3(domain ‖ universe_id ‖ seed ‖ coordinate ‖ i)
+//! ```
+//!
+//! each block 32 bytes (one BLAKE3-256 output); `materialize_range`
+//! returns `stream[start..end]` by skipping within the first block and
+//! then emitting whole blocks. The candidate encodes the target as
+//! `X = transform(E(seed, coordinate)) ⊕ residual` — in v1 exactly the
+//! identity transform plus an XOR_SPARSE residual.
+//!
+//! # PERSISTENT AUTHORITY
+//!
+//! Yes: the universe specification is part of the format version
+//! (`docs/theory/entropy-medium.md`), and the descriptor persists
+//! `universe_id, seed (16 bytes), coordinate (8 bytes), transform,
+//! residual` (`docs/format/ondisk-v1.md`, tag `0x0A`). The XOF output is
+//! *generated*, not stored — the stored entropy is the descriptor
+//! (seed 128 bits + coordinate + residual), which is exactly why the
+//! family cannot create free compression (entropy-medium.md §3).
+//!
+//! # CORRECTNESS INVARIANTS
+//!
+//! - deterministic: the same `(seed, coordinate, range)` always yields the
+//!   same bytes (pinned by the `deterministic` and `range_matches_full`
+//!   tests);
+//! - the seed is derived deterministically from the chunk's content id
+//!   (first 16 bytes), so the decoder needs nothing beyond the descriptor
+//!   — and no seed search is ever performed;
+//! - every residual byte is accounted; a candidate whose residual is not
+//!   small loses honestly to RAW (the negative control);
+//! - materialization is byte-exact — enforced by the §32 candidate
+//!   validation gate.
+//!
+//! # CONCURRENCY
+//!
+//! Stateless encoder and pure materializer; safe to call from any thread.
+//!
+//! # RESOURCE BOUNDS
+//!
+//! `n ≤ max_chunk_size`; retained residuals are XOR_SPARSE with
+//! `edits ≤ max_fanout`; materialization is `O(ceil(len/32))` BLAKE3
+//! calls — at most 8192 blocks for a 256 KiB chunk. The encoder generates
+//! the full stream once (n bytes) on the write path.
+//!
+//! # PERFORMANCE
+//!
+//! Blockwise materialization gives range reads: a sub-range is produced
+//! from `⌊start/32⌋` blocks with a first-block skip, without generating
+//! the whole stream. For random input the family self-limits (the diff
+//! count is ~n, exceeding the fanout cap or the cost) so the write path
+//! does not waste time on winning-less candidates.
+//!
+//! # FAILURE MODES
+//!
+//! An inverted range is an asserted programmer contract, not persistent
+//! input. Otherwise: residuals that fail validation or exceed the fanout
+//! cap are skipped; for arbitrary input the family simply produces no
+//! winning candidate and RAW wins. Nothing here panics on persistent
+//! data.
+//!
+//! # HISTORY / EVIDENCE
+//!
+//! ADR-0005 (the negative control; the prohibited seed search);
+//! `docs/theory/entropy-medium.md` §3 (the `UniformXofV1` accounting);
+//! ondisk-v1.md tag `0x0A`.
 
 #![forbid(unsafe_code)]
 
@@ -44,13 +129,26 @@ impl UniformXofV1 {
     pub const ID: UniverseId = UniverseId::UniformXofV1;
 
     /// Materialize `range` bytes of the stream for `(seed, coordinate)`.
+    ///
+    /// The range is normalized, then filled blockwise: skip within the
+    /// first block, then emit whole 32-byte XOF blocks until `len` bytes
+    /// are produced. A sub-range therefore costs only the blocks it
+    /// touches, not the whole stream.
     pub fn materialize_range(
         seed: [u8; 16],
         coordinate: u64,
         range: std::ops::Range<u64>,
     ) -> Vec<u8> {
+        // -------------------------------------------------------------------
+        // Stage 1: normalize the range (asserted programmer contract —
+        // inverted ranges are call bugs, not persistent input).
+        // -------------------------------------------------------------------
         assert!(range.start <= range.end, "inverted range");
         let len = range.end - range.start;
+        // -------------------------------------------------------------------
+        // Stage 2: blockwise fill — skip `skip` bytes in the first block,
+        // then stream whole blocks until `len` bytes are emitted.
+        // -------------------------------------------------------------------
         let mut out = Vec::with_capacity(len as usize);
         let first_block = range.start / XOF_BLOCK;
         let skip = (range.start % XOF_BLOCK) as usize;
@@ -103,17 +201,33 @@ impl Encoder for UniverseEncoder {
     }
 
     fn encode(&self, input: &[u8], ctx: &CandidateContext<'_>) -> Vec<Candidate> {
+        // -------------------------------------------------------------------
+        // Stage 1: bounds gate.
+        // -------------------------------------------------------------------
         let n = input.len() as u64;
         if n == 0 || n > ctx.limits.max_chunk_size {
             return Vec::new();
         }
-        // Deterministic seed derivation from the content id (first 16 bytes)
-        // — stored in the descriptor, so the decoder needs nothing else.
+        // -------------------------------------------------------------------
+        // Stage 2: deterministic seed derivation from the content id (first
+        // 16 bytes) — stored in the descriptor, so the decoder needs
+        // nothing else; no seed search (ADR-0005).
+        // -------------------------------------------------------------------
         let cid = ctx.content_id;
         let seed: [u8; 16] = cid.as_bytes()[..16].try_into().expect("32 > 16");
         let coordinate: u64 = 0;
+        // -------------------------------------------------------------------
+        // Stage 3: generate the stream and derive every residual kind
+        // against it.
+        // -------------------------------------------------------------------
         let generated = UniformXofV1::materialize_range(seed, coordinate, 0..n);
         let mut residuals = derive_residuals(input, &generated, ctx.limits.max_fanout);
+        // -------------------------------------------------------------------
+        // Stage 4: residual filter — only XOR_SPARSE edits within the
+        // fanout cap are admissible for entropy-ref v1 (RANGE_REPLACE /
+        // RANS_CODED / BASE_SEQUENCE are not used here). For random input
+        // the diff count is ~n, so the family self-limits and RAW wins.
+        // -------------------------------------------------------------------
         // Keep only residuals that are actually small: for random input the
         // diff count is ~n which exceeds the fanout cap or the cost, so the
         // family self-limits. Keep the empty (exact match) residual too.
@@ -123,6 +237,11 @@ impl Encoder for UniverseEncoder {
             Residual::RansCoded { .. } => false,
             Residual::BaseSequence { .. } => false, // not valid for entropy ref
         });
+        // -------------------------------------------------------------------
+        // Stage 5: per-residual descriptor construction, validation, and
+        // honest accounting (residual bytes + 16-byte seed + 8-byte
+        // coordinate). The cost function decides from here.
+        // -------------------------------------------------------------------
         let mut out = Vec::new();
         for residual in residuals {
             let rep = Representation::EntropyRef {

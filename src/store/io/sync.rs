@@ -2,6 +2,120 @@
 //! preserved byte-for-byte as the crash-consistency oracle. `SyncIo` is
 //! what every crash court is measured against; `UringIo` must reproduce
 //! its store-directory bytes at every injection point.
+//!
+//! # PURPOSE
+//!
+//! Provide the store's storage transport with every syscall issued
+//! directly and synchronously (open / `pwrite` / `pread` / `truncate` /
+//! `fsync` / `fdatasync` through `rustix`), exactly as the pre-10F
+//! `SegmentWriter` / `write_slot` code issued them. This is NOT a legacy
+//! path to be drifted away from: it is the crash-consistency ORACLE, the
+//! authority the io_uring parity harness is asserted against
+//! (`src/tests/io_backend_parity.rs`). The 10F court pair
+//! (`fuse-court-*-10f-sync/uring`) is a relative comparison; the sync
+//! engine remains the default (`--io-backend sync`) until real-device
+//! (NVMe, queue-depth) evidence flips it.
+//!
+//! # BOUNDARY
+//!
+//! KNOWS: the store directory layout (segment file naming via
+//! [`crate::store::segment::segment_path`], the `superblock` file, the
+//! `segments` directory), the record header size (payloads begin at
+//! `offset + RECORD_HEADER_SIZE`), and the [`IoBackend`] contract.
+//! NEVER KNOWS: record format semantics, transaction / epoch
+//! orchestration, recovery, or any policy — those live above the seam.
+//!
+//! # MODEL
+//!
+//! A synchronous engine with offset-based I/O: every segment operation
+//! addresses `(segment_seq, offset, length)` where offsets and lengths
+//! are in bytes within the segment file. Concurrent operations therefore
+//! never share a seek position and never serialize on the fd map. Each
+//! [`IoBackend`] method completes its durability work before returning;
+//! the store's orchestration — and its crash-court injection points
+//! between calls (`CrashPoint`) — is unchanged from pre-10F, which is
+//! exactly why this engine can be byte-authoritative for crash states.
+//!
+//! # PERSISTENT AUTHORITY
+//!
+//! This module writes the persistent-data surface: segment bytes,
+//! torn-tail truncation, superblock slots + `fsync`, and GC unlinks. Its
+//! byte output at every crash injection point IS the definition of a
+//! correct crash state. The parity harness asserts the store directories
+//! are canonically byte-identical between the backends at every crash
+//! point (inode wall-clock times canonicalized; every other byte —
+//! record structure, order, lengths, superblock, layout — compared
+//! verbatim).
+//!
+//! # CORRECTNESS INVARIANTS
+//!
+//! - Short writes and reads loop to completion: advance the offset by
+//!   the completed byte count and re-issue on the remainder; a 0-byte
+//!   completion is an error (a closed/truncated file must never
+//!   silently pass as success).
+//! - `read_payload` verifies `offset + RECORD_HEADER_SIZE` with
+//!   `checked_add` before reading (the payload begins after the 58-byte
+//!   record header).
+//! - `delete_segment` tolerates a missing file (idempotent GC) and
+//!   evicts the cached fd handle after the unlink.
+//! - `open_segment` delegates to `open_segment_common` (fresh magic made
+//!   durable; torn tail truncated and made durable) so both backends
+//!   share the identical open-time state machine.
+//!
+//! # CONCURRENCY
+//!
+//! One `Mutex<HashMap<seq, Arc<File>>>`; the Phase-10E/10E1 discipline
+//! is that the mutex is held only to clone the `Arc`, never across a
+//! `pread` / `pwrite`. All I/O is offset-based, so concurrent ops have
+//! no shared seek position: reads execute concurrently and the map
+//! serializes only handle lookup, not I/O.
+//!
+//! # DURABILITY
+//!
+//! Identical acknowledgement semantics to the pre-10F engine: `write_at`
+//! returns when the bytes are accepted into the kernel page cache;
+//! `fdatasync_segment` / `sync_segment_file` make record / fresh-magic
+//! data durable; `sync_segments_dir` makes a new segment's directory
+//! entry durable; `fsync_superblock` makes the commit durable. The store
+//! above the seam composes these into the ADR-0008 recovery contract.
+//!
+//! # RESOURCE BOUNDS
+//!
+//! `read_payload` allocates `stored_len` bytes (units: bytes). The
+//! length originates in a persistent record header (`stored_len` is a
+//! `u32` field) and the callers above this seam pass only validated
+//! lengths; the transport itself does not re-validate, so any future
+//! caller must apply the read-path `Limits` before allocating.
+//!
+//! # PERFORMANCE
+//!
+//! `read_many` is the reference sequential path: one `pread` per
+//! request, exactly the pre-10F single-read behavior, in request order.
+//! The sealed 10F court pair (tmpfs-backed; relative comparison)
+//! measured `UringIo` trailing by 5–27% on writes and 7–12% on reads
+//! (e.g. 4K buffered writes 189.5 vs 139.0 MiB/s; warm sequential read
+//! 2219.8 vs 1959.7 MiB/s) — the ~2.3 µs ring submit/wait floor on
+//! sub-µs tmpfs I/O, not a defect in either engine.
+//!
+//! # FAILURE MODES
+//!
+//! Expected: `StoreError::Io` on syscall failure (with the path in the
+//! message); `NotFound` tolerated where the pre-10F code tolerated it
+//! (delete, stat/read of an absent segment). Must never happen: silent
+//! short I/O, or a fd-map poison (panic while holding the map — the
+//! discipline forbids doing work under it).
+//!
+//! # HISTORY / EVIDENCE
+//!
+//! Phase 10F (v0.6.2, ADR-0021): `SyncIo` preserved byte-for-byte as
+//! the oracle while `UringIo` was added; the crash and durability courts
+//! are parameterized over both backends (`src/tests/io_backend_parity.rs`)
+//! and the sealed pair is `fuse-court-*-10f-sync/uring`. Phase 10E1
+//! established the `Arc<File>` fd-cache shape
+//! (`fuse-court-*-10e1-before/after`): the 10E map mutex previously
+//! spanned the whole `pread` loop; the A/B showed no latency movement
+//! on serial workloads but removed a real serialization point and is
+//! the shape 10F's `read_many` needs.
 
 #![forbid(unsafe_code)]
 
@@ -70,6 +184,14 @@ fn open_rw(path: &Path) -> Result<File, StoreError> {
 
 /// Write the full buffer at an absolute offset (pwrite; loops on short
 /// writes — the pre-10F `write_all` equivalent for offset-based I/O).
+///
+/// Units: `offset` is an absolute byte position within the segment file
+/// and `buf.len()` is the byte count to write. The kernel may legally
+/// complete a pwrite short (signals, partial-page acceptance); the loop
+/// advances `offset` by the completed count and re-issues on the
+/// remainder. A 0-byte completion is an error: a write that makes no
+/// progress would loop forever, and silently accepting it would
+/// desynchronize the store's belief about what is durable.
 fn pwrite_full(file: &File, mut offset: u64, mut buf: &[u8]) -> Result<(), StoreError> {
     while !buf.is_empty() {
         let n = rustix::io::pwrite(file, buf, offset).map_err(|e| StoreError::Io(e.to_string()))?;
@@ -84,6 +206,12 @@ fn pwrite_full(file: &File, mut offset: u64, mut buf: &[u8]) -> Result<(), Store
 
 /// Read the full buffer from an absolute offset (pread; loops on short
 /// reads — the pre-10F `read_exact` equivalent for offset-based I/O).
+///
+/// Units: `offset` is an absolute byte position within the segment file
+/// and `buf.len()` is the byte count to read. `pread` on a regular file
+/// returns short only at EOF or on signals; a 0-byte read before the
+/// buffer is full means the file is shorter than the caller believes —
+/// an error, never a silent zero-filled payload.
 fn pread_full(file: &File, offset: u64, buf: &mut [u8]) -> Result<(), StoreError> {
     let mut filled = 0usize;
     while filled < buf.len() {
@@ -129,6 +257,9 @@ impl IoBackend for SyncIo {
     }
 
     fn write_at(&self, seq: u64, offset: u64, bytes: &[u8]) -> Result<(), StoreError> {
+        // Page-cache accept, not durability: the caller (or the commit
+        // barrier) follows with `fdatasync_segment`. `offset`/`bytes`
+        // are byte units within the segment file.
         let file = self.segment_file(seq)?;
         pwrite_full(&file, offset, bytes)
     }
@@ -155,6 +286,11 @@ impl IoBackend for SyncIo {
     }
 
     fn delete_segment(&self, seq: u64) -> Result<(), StoreError> {
+        // NotFound is tolerated (GC is idempotent; the segment may
+        // already be gone). The cached handle is evicted AFTER the
+        // unlink so no later open resurrects a deleted file through the
+        // cache; a concurrent reader holding its own `Arc` keeps the
+        // inode alive until it is done, which is safe.
         let path = crate::store::segment::segment_path(self.dir(), seq);
         match std::fs::remove_file(&path) {
             Ok(()) => {}
@@ -171,6 +307,11 @@ impl IoBackend for SyncIo {
     }
 
     fn read_payload(&self, seq: u64, offset: u64, stored_len: u64) -> Result<Vec<u8>, StoreError> {
+        // `offset` is the record start; the payload begins after the
+        // 58-byte header, and the addition is checked because `offset`
+        // comes from persistent (attacker-visible) bytes. `stored_len`
+        // is in bytes; the allocation is bounded by the caller's
+        // validated record length (see the module doc).
         let file = self.segment_file(seq)?;
         let start = offset
             .checked_add(RECORD_HEADER_SIZE)

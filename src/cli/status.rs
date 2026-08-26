@@ -1,6 +1,42 @@
 //! `entropyfs status <store-dir>`: store accounting and health summary
 //! (§22, §42). Works when unmounted (reads raw); reports "mounted" when
 //! the lock is held.
+//!
+//! # PURPOSE
+//!
+//! Print the store's health and accounting at a glance: mount state,
+//! uuid / generation, physical capacity vs used vs free, logical bytes
+//! across inodes, snapshot count, a full fsck health summary (with GC
+//! reclaimable bytes), the Phase-9H physical reconciliation, and DSFB
+//! statistics.
+//!
+//! # BOUNDARY
+//!
+//! KNOWS: `Store`'s public accounting accessors, `crate::fsck`, and
+//! `crate::store::physical::physical_report`. NEVER KNOWS: any write
+//! path. If the store is mounted, it reports the lock state and stops —
+//! it must not open a mounted store read-write.
+//!
+//! # MODEL
+//!
+//! Try-lock first: if `ensure_unmounted` fails, the store is mounted and
+//! `status` says so (reading a live store could observe a torn
+//! mid-checkpoint state). Otherwise it opens the store read-only and
+//! composes the accounting from four authorities: the store's own
+//! counters (capacity/used/logical), the fsck report (health + leaks),
+//! the physical reconciliation (independent of the derived index, Phase
+//! 9H), and the DSFB stats.
+//!
+//! # KEY INVARIANTS
+//!
+//! - Mounted store → lock-state report only; never a read of a live
+//!   store (the crash-court's torn states are the reason).
+//! - The Phase-9H reconciliation is reported independently of the
+//!   derived index so index-vs-physical drift is visible, not
+//!   self-confirming.
+//! - Bytes are always labeled (capacity/used/free, logical, reclaimable,
+//!   live/dead-indexed/index-hidden/unindexed/overhead) and never mixed
+//!   across unit types.
 
 #![forbid(unsafe_code)]
 

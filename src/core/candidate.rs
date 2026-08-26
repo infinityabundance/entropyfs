@@ -5,6 +5,90 @@
 //! pipeline collects candidates, **validates each one** (materialize and
 //! compare against the target bytes — §32, non-negotiable), and commits the
 //! cheapest valid one.
+//!
+//! # PURPOSE
+//!
+//! The proposal type and correctness floor of the encode side: encoders
+//! propose, the §32 gate admits, the cost function (ADR-0010) ranks, and
+//! the store commits. Also homes the always-available escape-hatch
+//! candidates — RAW / ZERO / FILL / INLINE / EXACT_REF — that keep the
+//! pipeline total for every input class.
+//!
+//! # BOUNDARY
+//!
+//! Pure algebra: no store, no disk format. Encoders are pure (no I/O):
+//! bases and dedup hits arrive materialized via [`CandidateContext`].
+//! Authority separation (dsfb-selection.md §4): DSFB decides the *search
+//! order*, exact cost decides the *winner*, validation decides
+//! *admissibility*.
+//!
+//! # MODEL
+//!
+//! `Candidate = (representation descriptor, new objects to persist,
+//! exact cost, content id of the target bytes)`. `objects` contains only
+//! objects this candidate would newly persist — the marginal-bytes rule
+//! (existing objects cost zero) is applied by the optimizer at ordering
+//! time (cost.rs module doc).
+//!
+//! # PERSISTENT AUTHORITY
+//!
+//! Yes: the committed candidate becomes the persisted extent descriptor
+//! plus its objects. The §32 gate is the correctness floor that makes
+//! every family safe to propose.
+//!
+//! # CORRECTNESS INVARIANTS
+//!
+//! - **RAW always exists**: [`raw_candidate`] is total over inputs
+//!   `≤ max_chunk_size`. Random data must converge to RAW — a success
+//!   condition, not a failure (README; commentary standard §7) — and this
+//!   fallback is what bounds worst-case storage at ~1.0× (plus
+//!   descriptor/record overhead; the Phase-9A physical floor measured
+//!   ~1.00× on urandom). `NoCandidate` must therefore never occur.
+//! - **§32 gate**: a candidate is admissible iff it materializes EXACTLY
+//!   to the target bytes — length and content
+//!   (`materialize(candidate) == X`; ADR-0011). [`validate_candidate`]
+//!   checks the content id first (cheap hash pre-filter), then
+//!   materializes under `Limits` and byte-compares. A candidate that
+//!   fails is a bug in its encoder — the pipeline falls through to RAW.
+//! - **P2 exact-dedup semantics**: a [`DedupHit`] is a *verified* existing
+//!   identical chunk (length + content id + byte-exact materialization by
+//!   the caller); two candidates are proposed for a hit (canonical
+//!   descriptor reuse — zero marginal objects — and the EXACT_REF alias)
+//!   and the marginally cheapest wins (dsfb-selection.md §7). The alias
+//!   is configuration-gated (`allow_exact_ref`) and refuses the ZERO
+//!   sentinel as a target.
+//! - ZERO / FILL / INLINE guards reject non-matching inputs.
+//! - `Candidate.content_id` must equal `ChunkId::of(target)` — identity
+//!   is over materialized bytes (ADR-0011).
+//!
+//! # CONCURRENCY
+//!
+//! Encoders are stateless and pure, so parallel chunk preparation
+//! (Phase-10C) runs candidate search concurrently; nothing here shares
+//! mutable state.
+//!
+//! # RESOURCE BOUNDS
+//!
+//! `max_chunk_size` gates RAW / ZERO / FILL / INLINE / EXACT_REF;
+//! `max_inline_bytes` gates INLINE; validation materializes under
+//! `Limits` (decode-work budget, allocation cap, reference depth), so an
+//! attacker-shaped candidate cannot spend unbounded CPU or memory in the
+//! gate.
+//!
+//! # FAILURE MODES
+//!
+//! [`CandidateError`] distinguishes bad chunk classes, missing candidates
+//! (impossible by the RAW invariant), validation failures (encoder bugs),
+//! materialization errors, and budget exhaustion. The write path treats
+//! validation failure of an otherwise-cheap candidate as a hard fall-
+//! through to RAW.
+//!
+//! # HISTORY / EVIDENCE
+//!
+//! §32 (dsfb-selection.md §4; ADR-0011); Phase-8C (the batch's pending
+//! descriptors/objects are visible to the validator, and marginal reuse
+//! of committed objects is the write-path rule); Phase-10C (parallel
+//! preparation); Phase-9A (~1.00× incompressible floor).
 
 #![forbid(unsafe_code)]
 
@@ -24,6 +108,13 @@ pub enum ObjectKind {
 }
 
 /// A new object a candidate requires the store to persist.
+///
+/// The id is the content address (BLAKE3 of the payload), so the store
+/// CAS-dedups identical payloads — object sharing is a store invariant
+/// (Phase-8C attribution: CAS sharing is separate from the gated EXACT_REF
+/// alias representation). The kind affects cost accounting: Data payloads
+/// are charged via [`account_objects`], model payloads via `estimate`'s
+/// `model_bytes` parameter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectRecord {
     /// Content id (BLAKE3 of `payload`).
@@ -57,6 +148,11 @@ impl ObjectRecord {
 }
 
 /// A candidate representation with its objects and cost.
+///
+/// `cost` is the FULL per-extent accounting (cost.rs); the foreground's
+/// marginal reduction (existing objects cost zero) is applied by the
+/// optimizer at ordering time, not here. `objects` holds only the NEW
+/// objects this candidate would persist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     /// The representation descriptor.
@@ -72,6 +168,10 @@ pub struct Candidate {
 /// A candidate family encoder: proposes zero or more candidates for an
 /// input chunk. Encoders are pure (no I/O): bases and dedup hits arrive
 /// materialized via [`CandidateContext`].
+///
+/// Encoders must be stateless: the optimizer calls them concurrently
+/// (parallel chunk preparation, Phase-10C) and never holds a lock across
+/// an encode.
 pub trait Encoder {
     /// Encoder name (for explain output and DSFB channel attribution).
     fn name(&self) -> &'static str;
@@ -101,6 +201,10 @@ pub struct BaseChunk {
 
 /// A verified deduplication hit: an existing logical chunk with identical
 /// content (length + content id verified, bytes verified by the caller).
+///
+/// P2 (exact/shared content) semantics: the hit is only as good as the
+/// caller's verification — the write path materializes the existing chunk
+/// and compares exact bytes before proposing (dsfb-selection.md §7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DedupHit {
     /// Content id of the existing identical chunk.
@@ -148,6 +252,18 @@ impl std::error::Error for CandidateError {}
 /// Validate a candidate by materializing it and comparing against the
 /// target bytes (§32). The candidate's own objects plus any context bases
 /// and dedup targets must be resolvable through `ctx`.
+///
+/// # Stages
+///
+/// 1. Content-id pre-check: `candidate.content_id == ChunkId::of(target)`
+///    — a cheap hash filter that catches most lying candidates before any
+///    materialization work.
+/// 2. Materialize the candidate's representation under `limits` (its own
+///    new objects plus context bases/dedup targets resolve through
+///    `resolver`).
+/// 3. Byte-exact compare: length AND bytes must equal `target`. Anything
+///    else is [`CandidateError::ValidationFailed`] — an encoder bug — and
+///    the write path falls through to RAW.
 pub fn validate_candidate(
     candidate: &Candidate,
     target: &[u8],
@@ -175,6 +291,15 @@ pub fn pick_cheapest<'a>(candidates: &'a [Candidate], policy: &Policy) -> Option
 /// The always-available RAW candidate for arbitrary bytes.
 ///
 /// The raw payload becomes a Data object; the descriptor references it.
+///
+/// RAW is the escape hatch that makes the candidate pipeline total
+/// (`docs/adr/0005-representation-set.md`: "RAW — literal bytes (universal
+/// escape hatch)"). Random/encrypted/incompressible data must converge to
+/// RAW — a success condition, not a failure (README; commentary standard
+/// §7) — and this fallback is what bounds worst-case storage at ~1.0×
+/// (plus descriptor/record overhead; the Phase-9A physical floor measured
+/// ~1.00× on urandom). `NoCandidate` must therefore never occur: for any
+/// input `≤ max_chunk_size` this function returns a valid candidate.
 pub fn raw_candidate(input: &[u8], content_id: ChunkId, limits: &Limits) -> Option<Candidate> {
     if input.len() as u64 > limits.max_chunk_size {
         return None;
@@ -257,6 +382,16 @@ pub fn inline_candidate(input: &[u8], content_id: ChunkId, limits: &Limits) -> O
 }
 
 /// The EXACT_REF candidate for a verified deduplication hit.
+///
+/// P2 (exact/shared content) semantics: the hit is a *verified* existing
+/// logical chunk (length + content id + byte-exact materialization by the
+/// caller; see [`DedupHit`]). For a hit the search proposes two
+/// candidates — canonical descriptor reuse (zero marginal objects) and
+/// this alias — and the marginally cheapest wins (dsfb-selection.md §7).
+/// The alias is configuration-gated (`allow_exact_ref`); the ZERO
+/// sentinel is refused as a target (never a real chunk); `len` must not
+/// exceed the target's length. EXACT_REF contributes one reference-depth
+/// level (cost.rs), so alias chains are capped by `max_reference_depth`.
 pub fn exact_ref_candidate(
     target: ChunkId,
     content_id: ChunkId,
@@ -289,6 +424,12 @@ pub fn exact_ref_candidate(
 /// cost (§15: every persistent bit necessary to decode the extent is
 /// accounted). Data payloads count as [`CostBreakdown::object_payload_bytes`];
 /// model payloads are accounted separately by the encoders.
+///
+/// This charges the FULL payload of the candidate's own NEW objects. The
+/// marginal rule — an object that already exists (committed CAS or batch
+/// pending) costs zero — is applied by the optimizer at ordering time in
+/// the foreground; the background regime uses the full total. Both regimes
+/// build on this honest per-candidate accounting (cost.rs module doc).
 pub fn account_objects(mut cost: CostBreakdown, objects: &[ObjectRecord]) -> CostBreakdown {
     for o in objects {
         if o.kind == ObjectKind::Data {

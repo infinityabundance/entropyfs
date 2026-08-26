@@ -9,6 +9,90 @@
 //! streams (popcounts, ranks as u64 LE, literals) use the shared
 //! rANS/raw stream codec, so the whole family is bounded,
 //! popcount-friendly, and random-accessible per word.
+//!
+//! # PURPOSE
+//!
+//! The SPARSE_BLOCK64 candidate family (tag `0x0E`, feature bit 11):
+//! sparse chunks with *any* marked-byte count are representable, closing
+//! the plain-SPARSE `u128` cliff at 64 KiB (`10 ≤ k ≤ n−10`;
+//! `docs/format/ondisk-v1.md` §7).
+//!
+//! # BOUNDARY
+//!
+//! A pure candidate encoder. It proposes the model + enc objects via the
+//! shared rANS/raw stream codec ([`encode_streams`]); it never touches the
+//! store and never decides whether the family wins (the honest gate
+//! below, the cost function, and the §32 validation decide). It delegates
+//! `k ≤ 9` back to plain SPARSE (no stream overhead needed) and skips
+//! dense input outright.
+//!
+//! # MODEL
+//!
+//! The chunk is split into 64-bit words (`words = ceil(n/8)`). Per word:
+//! popcount `k` (one byte), the subset rank among `C(64, k)` as `u64 LE`
+//! (8 bytes), and the literal values (one byte per marked position). The
+//! three streams (popcounts, ranks, literals) are rANS-coded with one
+//! shared model (`SCALE_BITS = 14`, `Interleaved2`) — or stored raw by
+//! the stream codec when that is cheaper. `nonzero` = words with `k > 0`;
+//! the rank stream decodes to `nonzero × 8` bytes; `lit_out` = total
+//! marked bytes. The descriptor references the model and enc objects by
+//! `ChunkId`; materialization is random-accessible per word.
+//!
+//! # PERSISTENT AUTHORITY
+//!
+//! Yes: the descriptor and its two content-addressed objects (model + enc)
+//! are persisted when this candidate wins (`docs/format/ondisk-v1.md`,
+//! tag `0x0E`). Every rank fits a `u64` because `C(64, 32) < 2^63`, so
+//! there is no `u128` cliff anywhere in the family. Feature bit 11 gates
+//! format compatibility (v0.2.0 changelog).
+//!
+//! # CORRECTNESS INVARIANTS
+//!
+//! - each word's popcount equals the number of marked positions in that
+//!   word, and its rank is `< C(64, k)` (checked by the rank functions);
+//! - the descriptor's `pc_len/rank_len/lit_len` equal the encoded stream
+//!   lengths, and `rank_len` decodes to `nonzero × 8` bytes
+//!   (`docs/format/ondisk-v1.md` §7);
+//! - the honest gate `descriptor + model + enc < n` must hold — a
+//!   candidate that cannot beat raw is not proposed;
+//! - materialization is byte-exact — enforced by the §32 candidate
+//!   validation gate (the round-trip test covers the whole overflow
+//!   range, `k ∈ {10, 37, 200, 4096, 8192}` at 64 KiB).
+//!
+//! # CONCURRENCY
+//!
+//! Stateless encoder; safe to call from any thread (parallel chunk
+//! preparation, Phase-10C).
+//!
+//! # RESOURCE BOUNDS
+//!
+//! `n ≤ max_chunk_size`; the density pre-gate (`k·2 ≥ n` ⇒ skip) and the
+//! small-`k` delegation (`k ≤ 9` and `k ≤ max_fanout` ⇒ plain SPARSE)
+//! bound the CPU spent building streams; per-word ranks are `u64`-sized
+//! by construction. Encode is `O(n)` for the scan plus one stream encode.
+//!
+//! # PERFORMANCE
+//!
+//! The density pre-gate exists for throughput: without it the write path
+//! builds doomed streams on dense/random chunks. Phase-8 M5 caught a ~3×
+//! write-throughput regression from exactly that; the `k ≥ n/2` gate
+//! fixed it and is regression-tested (`dense_and_zero_skip`). The honest
+//! gate is the final word on proposing, but the pre-gates keep the CPU
+//! out of the way before the streams exist.
+//!
+//! # FAILURE MODES
+//!
+//! A rank error, a failed `encode_streams`, or a failed honest gate
+//! yields an empty candidate list — the family skips itself and plain
+//! SPARSE / rANS / RAW handle the chunk. Nothing here panics; a wrong
+//! candidate would be caught by the §32 gate.
+//!
+//! # HISTORY / EVIDENCE
+//!
+//! Phase-8 directive §6 / ADR-0005 tag `0x0E`; the campaign caught and
+//! fixed the dense-input write-throughput regression (CHANGELOG phase
+//! 8-M5, sealed `campaign-1787666589-e895fcf`); the overflow-range
+//! round-trips are pinned by `overflow_range_roundtrips`.
 
 #![forbid(unsafe_code)]
 
@@ -23,6 +107,9 @@ const SCALE_BITS: u8 = 14;
 const CODEC: RansCodec = RansCodec::Interleaved2;
 
 /// The blockwise-64 sparse candidate family.
+///
+/// Proposes at most one candidate; delegates small-`k` and dense inputs
+/// to the families that handle them better (plain SPARSE, rANS, RAW).
 #[derive(Debug, Default)]
 pub struct SparseBlock64Encoder;
 
@@ -32,10 +119,18 @@ impl Encoder for SparseBlock64Encoder {
     }
 
     fn encode(&self, input: &[u8], ctx: &CandidateContext<'_>) -> Vec<Candidate> {
+        // -------------------------------------------------------------------
+        // Stage 1: bounds gate.
+        // -------------------------------------------------------------------
         let n = input.len();
         if n == 0 || n as u64 > ctx.limits.max_chunk_size {
             return Vec::new();
         }
+        // -------------------------------------------------------------------
+        // Stage 2: k-family gates — ZERO / RAW delegation, the density
+        // pre-gate, and plain-SPARSE delegation. These keep the streams
+        // from being built when a cheaper family already covers the chunk.
+        // -------------------------------------------------------------------
         let k = input.iter().filter(|&&b| b != 0).count();
         if k == 0 || k == n {
             return Vec::new(); // ZERO / RAW territory
@@ -58,6 +153,10 @@ impl Encoder for SparseBlock64Encoder {
             // SPARSE handles k <= 9 at 64 KiB (C(65536,9) < u128); skip.
             return Vec::new();
         }
+        // -------------------------------------------------------------------
+        // Stage 3: per-word scan — popcounts, per-word subset ranks, and
+        // literals, one 8-byte window at a time.
+        // -------------------------------------------------------------------
         let words = n.div_ceil(8);
         let mut popcounts: Vec<u8> = Vec::with_capacity(words);
         let mut ranks: Vec<u8> = Vec::new();
@@ -84,6 +183,9 @@ impl Encoder for SparseBlock64Encoder {
                 literals.extend_from_slice(&vals);
             }
         }
+        // -------------------------------------------------------------------
+        // Stage 4: encode the three streams into the model + enc objects.
+        // -------------------------------------------------------------------
         let nonzero = popcounts.iter().filter(|&&k| k > 0).count() as u32;
         let streams = SequenceStreams {
             commands: popcounts,
@@ -109,6 +211,13 @@ impl Encoder for SparseBlock64Encoder {
             lit_out: enc.lit_out,
             len: n as u64,
         };
+        // -------------------------------------------------------------------
+        // Stage 5: honest gate and accounting. The family must actually
+        // beat raw (descriptor + model + enc < n) to be proposed. The
+        // ByteSplit counts the two content ids as reference bytes; the
+        // model payload is charged via `estimate`'s model_bytes and the
+        // enc payload via `account_objects`.
+        // -------------------------------------------------------------------
         // Honest gate: descriptor + model + enc must beat raw.
         let total = rep
             .encoded_size()

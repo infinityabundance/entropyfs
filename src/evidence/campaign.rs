@@ -18,6 +18,125 @@
 //! Nothing in this module has any decoding authority and nothing here can
 //! weaken the methodology: a claim is admitted only when the archived
 //! evidence satisfies `docs/performance/methodology.md` §8.
+//!
+//! # PURPOSE
+//!
+//! This module IS the honesty machinery: it runs the filesystem through
+//! its own measurement rules and refuses to let a number leave the
+//! process unless the archived artifact can re-verify it. The campaign
+//! covers the methodology's nine sections: complete context (§1), exact
+//! byte accounting with a cross-check (§2), baselines or waivers (§3),
+//! BOTH ablation tables — leave-one-out and the strict cumulative ladder
+//! A0–A8, kept forever (§4), negative controls (§5), required metrics
+//! (§6), statistical practice — repeated runs, medians and tail
+//! percentiles (§7), and the admission checklist (§8), archived under
+//! `evidence/performance/` (§9).
+//!
+//! # BOUNDARY
+//!
+//! KNOWS: the store's public write/read/GC APIs, `OptimizeOptions`
+//! ablation tables, the corpus generators, and the environment capture.
+//! NEVER KNOWS: representation encoding, transaction internals, or any
+//! on-disk format. Crucially, it has NO decoding authority — it never
+//! interprets store bytes as anything other than what the store's own
+//! public APIs return. Evidence is serde JSON (human-readable); the
+//! filesystem format is explicit byte codecs elsewhere.
+//!
+//! # MODEL
+//!
+//! A campaign is a sequence of self-contained runs, each on a FRESH
+//! store in a scratch directory on the backing storage device (never
+//! tmpfs): repeated throughput/accounting runs per corpus, the two
+//! ablation tables on the structured corpus, the DSFB search-budget
+//! investigation, the H2 versioned experiment with its shuffled
+//! negative control (plus post-GC footprints), GC + optimizer traffic,
+//! the Phase-9C real-tree court, external baselines, and device-level
+//! write/read deltas around the whole window. Everything lands in one
+//! timestamped directory whose name embeds the git revision.
+//!
+//! # PERSISTENT AUTHORITY
+//!
+//! None over the filesystem format — but full authority over evidence
+//! admission: a directory under `evidence/performance/` is the only
+//! thing that can make a claim admissible. Withdrawn or superseded
+//! artifacts are REPLACED, never kept as claims (the discipline that
+//! retired the inflated `campaign-…-d90772c` run, whose GC walk
+//! under-counted SEQUENCE_RANS objects); failed experiments and
+//! falsified hypotheses are recorded in the CHANGELOG phase ledger, not
+//! hidden.
+//!
+//! # CORRECTNESS INVARIANTS
+//!
+//! - Every full run re-reads the written bytes and requires the BLAKE3
+//!   result hash to equal the corpus content hash (`hash_matches_input`);
+//!   admission rule 6 fails the whole campaign otherwise.
+//! - The per-extent byte decomposition plus metadata must equal the
+//!   reachable total (`Accounting::check == "ok"`); admission rule 2
+//!   fails on any mismatch — an accounting hole can never hide inside
+//!   an admitted number.
+//! - Ablation rows always come from fresh stores; no mode inherits
+//!   another mode's artifacts.
+//! - The negative controls are structural: urandom must measure near
+//!   RAW (ratio < 1.5x is the admission gate), already-compressed and
+//!   shuffled-history corpora are always run, never skipped silently.
+//! - Baselines are either run or explicitly waived (`Baselines::waived`);
+//!   a missing zstd or rANS baseline fails admission rule 3.
+//!
+//! # CONCURRENCY
+//!
+//! None by design: the campaign is deliberately single-threaded and
+//! sequential (one store, one run, one measurement at a time) so that
+//! CPU time, device deltas and latencies are attributable to the run
+//! being measured. `cpu_ticks()` samples /proc per run for the same
+//! reason.
+//!
+//! # DURABILITY
+//!
+//! The campaign measures durability rather than providing it: fsync
+//! latency is sampled via `durability_barrier` (5 samples per run) and
+//! reported as p50/p95/p99. Its own output artifacts are plain files
+//! (JSON/CSV/MD) in the archive directory; a campaign that crashes
+//! midway leaves a partial directory that is simply not admitted.
+//!
+//! # RESOURCE BOUNDS
+//!
+//! Runtime is bounded by `CampaignOptions` (corpus sizes, `runs`
+//! repetition count, the fixed ablation table sizes); scratch usage is
+//! one fresh store per run, removed when the run's `TempDir` drops. The
+//! `src` corpus packs the entire source tree in memory; the structured
+//! corpus is `size_mib` MiB. All byte figures are exact `u64` counters
+//! (bytes, not approximations) except `integrity_bytes_est`, which is
+//! labeled an estimate.
+//!
+//! # PERFORMANCE
+//!
+//! The campaign IS the performance evidence: repeated runs produce
+//! median throughput per corpus and p50/p95/p99 write/read/fsync
+//! latency; CPU user+sys time is recorded per run (wall and CPU answer
+//! different questions — methodology §7, and the 11D oracle made the
+//! distinction concrete). Device-level sectors written/read (×512 =
+//! bytes) bound the whole window so write amplification is visible.
+//!
+//! # FAILURE MODES
+//!
+//! Expected: `Err(String)` from any failing store op, corpus generator
+//! (e.g. missing `zstd` — the compressed control is skipped by the
+//! caller), or environment capture. Admission failures are NOT errors:
+//! they are the point — the checklist reports `met: false` with a note
+//! and the campaign still archives, so a non-admissible run is evidence
+//! about what is missing, never a silent success.
+//!
+//! # HISTORY / EVIDENCE
+//!
+//! The sealed lineage lives in `evidence/performance/INDEX.md`:
+//! `campaign-1787658658-67d977a` (first sealed store campaign),
+//! `…-a6641d1` (SequenceRans floor; withdrawal of the inflated
+//! predecessor), `…-43bf17e` (BASE_SEQUENCE), `…-e895fcf`
+//! (SPARSE_BLOCK64, regression caught), `…-d04227f` (8A/8B ladder +
+//! post-GC footprint), `…-b165d60` (8C in-batch dedup), `…-923df7b`
+//! (attribution correction + CAS canonicalization), `…-4892644` (9A
+//! pruning), the 9C tree-court amendment, and the 10F court pair
+//! `fuse-court-*-10f-sync/uring`.
 
 #![forbid(unsafe_code)]
 
@@ -519,6 +638,34 @@ pub struct AdmissionItem {
 // ---------------------------------------------------------------------------
 
 /// Run the full campaign; returns the created evidence directory.
+///
+/// # What
+///
+/// Executes the nine methodology sections in order (context capture,
+/// corpus manifest, per-corpus repeated runs, both ablation tables, DSFB
+/// investigation, H2 versioned experiment, GC/optimizer traffic, post-GC
+/// footprints, tree court, baselines, device deltas), then evaluates the
+/// §8 admission checklist, archives every artifact under
+/// `<out_root>/campaign-<ts>-<rev>/`, and prints the log.
+///
+/// # Why
+///
+/// A claim is admissible only when this function's archive exists and
+/// passes the checklist; running it is the only way evidence enters
+/// `evidence/performance/`.
+///
+/// # Invariants
+///
+/// Every run uses a fresh store in the scratch dir (never tmpfs); the
+/// archive name embeds the capture timestamp and git revision; nothing
+/// is admitted before the checklist runs; a failing checklist is
+/// archived as `met: false`, not as success.
+///
+/// # Failure behavior
+///
+/// `Err(String)` on any failing step (store op, corpus generation,
+/// missing baseline tool). A midway crash leaves a partial directory
+/// that is simply never admitted.
 pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&opts.scratch_dir).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&opts.out_root).map_err(|e| e.to_string())?;
@@ -1173,6 +1320,30 @@ pub fn run(opts: &CampaignOptions) -> Result<PathBuf, String> {
 // Per-run measurement
 // ---------------------------------------------------------------------------
 
+/// Repeated full runs of one corpus/mode on fresh stores; returns the
+/// per-group summary.
+///
+/// # What
+///
+/// Runs `runs` full write→fsync→read-back→account cycles, each on its
+/// own fresh store under the scratch dir, pooling per-chunk write/read
+/// latencies and per-run throughput / CPU / physical bytes.
+///
+/// # Why
+///
+/// Methodology §7: performance is noisy, correctness is deterministic.
+/// Medians over repeated runs (with p50/p95/p99) are the project's
+/// statistical floor, and the pooled per-chunk latencies give the tail
+/// percentiles the courts quote.
+///
+/// # Invariants
+///
+/// - Each run is byte-verified: `hash_matches_input` is set here by
+///   comparing the run's BLAKE3 result hash to the corpus content hash.
+/// - The group's `physical_median` / `ratio_median` come from the
+///   per-run reachable bytes (exact `u64` byte counts).
+/// - No state is shared between runs except the warm page cache (the
+///   `cache_state` the campaign declares), which is itself recorded.
 fn run_repeated(
     opts: &CampaignOptions,
     corpus: &Corpus,
@@ -2414,6 +2585,34 @@ fn csv(results: &CampaignResults) -> String {
     out
 }
 
+/// Evaluate the methodology §8 admission rules against the results.
+///
+/// # What
+///
+/// Checks the seven admission rules (context complete; every byte
+/// counted — per-run `Accounting::check == "ok"`; baselines run or
+/// waived; both ablation tables present, ≥8 leave-one-out rows and ≥9
+/// ladder rows; negative controls — urandom ≤ 1.5x, compressed present,
+/// shuffled present; materialized hashes match inputs; raw artifacts
+/// archived) and returns one [`AdmissionItem`] per rule.
+///
+/// # Why
+///
+/// The admission rules are the line between "exploratory" and "claim".
+/// Encoding them here — rather than in prose — makes them executable,
+/// and the archived checklist lets a reader see exactly which rule a
+/// campaign failed and why.
+///
+/// # Invariants
+///
+/// - The byte-accounting rule fails unless EVERY run's cross-check is
+///   "ok" and the counted categories are non-zero (an all-zero table is
+///   not an accounting).
+/// - The ablation rule requires both tables, never one: cumulative
+///   contribution and marginal necessity answer different questions and
+///   are never substituted (methodology §4).
+/// - A `met: false` item is a finding, not a crash: the campaign still
+///   archives so the gap is visible.
 fn admission_checklist(results: &CampaignResults, corpora: &[Corpus]) -> Vec<AdmissionItem> {
     let mut items = Vec::new();
 
@@ -2533,6 +2732,22 @@ fn admission_checklist(results: &CampaignResults, corpora: &[Corpus]) -> Vec<Adm
     items
 }
 
+/// Render the human-readable campaign report (`report.md`).
+///
+/// # What
+///
+/// A Markdown summary: campaign dir, creation time, the §8 admission
+/// checklist with checkboxes, one line per corpus/mode group (median
+/// throughput, p50/p95/p99 write and fsync latency, physical median,
+/// ratio), device write/read bytes over the window, and the full raw
+/// log verbatim.
+///
+/// # Why
+///
+/// The admission checklist must be readable without parsing JSON; the
+/// raw log must be archived so any number in the tables can be traced
+/// to the output that produced it (methodology §9: raw artifacts are
+/// part of the evidence).
 fn report(results: &CampaignResults, log: &str) -> String {
     let mut s = String::new();
     s.push_str("# EntropyFS evidence campaign\n\n");

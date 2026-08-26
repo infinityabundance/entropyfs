@@ -1,5 +1,7 @@
 //! SequenceRans: the local-match + entropy compression floor (Phase-8
-//! directive §4; ADR-0005).
+//! directive §4; ADR-0005), plus its dictionary and deep extensions.
+//!
+//! # PURPOSE
 //!
 //! An LZ77-style hash-chain match finder turns a chunk into three byte
 //! streams — *commands*, *literals*, *offsets* — each of which is either
@@ -7,6 +9,21 @@
 //! rANS is an entropy coder, not a match finder; this family supplies the
 //! sequence matching that gives general-purpose compressors (zstd-class)
 //! most of their power, keeping `ryg-rans-rs` as the entropy backend.
+//! The module hosts the local family (`SequenceRans`), the cross-chunk
+//! dictionary extensions (`SequenceDict`, `SequenceSharedDict`), and the
+//! deep background matcher (`SequenceDeep`).
+//!
+//! # BOUNDARY
+//!
+//! - Knows: byte chunks, the command languages, per-stream rANS coding,
+//!   and the candidate/object accounting it proposes into (`ObjectRecord`,
+//!   `ByteSplit`).
+//! - Never knows: base/delta semantics (`delta.rs`), entropy model
+//!   construction (`model.rs`) or serialization (`metadata.rs`) internals,
+//!   store/segment layout, the FUSE layer. The entropy backend is
+//!   `residual.rs` (`encode_stream`); this module never forks the coder.
+//!
+//! # MODEL
 //!
 //! Command encoding (one byte per command):
 //!
@@ -20,23 +37,11 @@
 //! RLE and arbitrarily long matches representable by repeated copies at
 //! one distance. The only validity constraint is `d <= p`.
 //!
-//! Model object layout (three slots, one per stream):
+//! A parse is a deterministic walk: every command carries its own length
+//! (or derives it from the model-coded streams), so materialization is a
+//! single forward pass.
 //!
-//! ```text
-//! slot: [kind u8][len u16 LE][bytes]
-//!   kind 0x00 = rANS model   (bytes = encode_model output)
-//!   kind 0x01 = raw stream   (no bytes in the slot; the raw stream lives
-//!                             in the enc object)
-//!   kind 0x02 = empty stream (len must be 0)
-//! ```
-//!
-//! The enc object is the three streams concatenated; `seq_len + lit_len +
-//! off_len` (descriptor fields) must equal the enc object length. A stream
-//! is rANS-encoded or raw per its slot. Everything is content-addressed
-//! and counted in the candidate's persisted byte total — the raw fallback
-//! inside the family never hides bytes.
-//!
-//! # SequenceDict (Phase-9B): cross-chunk dictionary context
+//! ## SequenceDict (Phase-9B): cross-chunk dictionary context
 //!
 //! `SEQUENCE_DICT` extends the same command semantics with a fourth stream:
 //! the *copy-source* stream, one byte per copy command, saying whether the
@@ -56,7 +61,121 @@
 //! `max_reference_depth`, so cross-chunk dictionary chains can never
 //! defeat bounded random access. SequenceDict stays a *distinct* family
 //! from `BaseSequence` (temporal deltas) and `SequenceRans` (local-only)
-//! to preserve the attribution boundary.
+//! to preserve the attribution boundary. `SequenceSharedDict` (Phase-9C)
+//! adds a third source symbol `SRC_SHARED` (0x02) for a shared cross-file
+//! dictionary, with the same depth accounting.
+//!
+//! ## SequenceDeep (Phase-9E): repcodes + extended lengths
+//!
+//! `SEQUENCE_DEEP` extends the command language with recent-distance
+//! repcodes (REP0/REP1 copies carry no offset symbol) and extended length
+//! codes (one XCOPY/XLIT command plus a u16 extra instead of a run of
+//! 131-byte continuation commands); see the SEQUENCE_DEEP command-language
+//! block below. The decoder semantics are explicit and bounded: every
+//! command carries its own length, and the rep history is a fixed
+//! two-slot register (REP0/REP1), so materialization is a single
+//! deterministic walk.
+//!
+//! # PERSISTENT AUTHORITY
+//!
+//! Model object layout (three slots, one per stream):
+//!
+//! ```text
+//! slot: [kind u8][len u16 LE][bytes]
+//!   kind 0x00 = rANS model   (bytes = encode_model output)
+//!   kind 0x01 = raw stream   (no bytes in the slot; the raw stream lives
+//!                             in the enc object)
+//!   kind 0x02 = empty stream (len must be 0)
+//! ```
+//!
+//! The enc object is the three streams concatenated; `seq_len + lit_len +
+//! off_len` (descriptor fields) must equal the enc object length. A stream
+//! is rANS-encoded or raw per its slot. Everything is content-addressed
+//! and counted in the candidate's persisted byte total — the raw fallback
+//! inside the family never hides bytes. Model-object bytes are bounded by
+//! `max_model_object_bytes_n` (per-model cap × slots + headers).
+//!
+//! # CORRECTNESS INVARIANTS
+//!
+//! - Copy lengths are `4..=131`; the tail remainder after 131-byte
+//!   chunking is never `1..=3` — a tail of that size would encode into the
+//!   literal-command range (`0x80 + 3 - 4 = 0x7F`, decoded as a 128-byte
+//!   literal run). Phase 8 M3 found this as the `0x7F` corruption of
+//!   1–3-byte copy tails (H2 campaign; sealed
+//!   `campaign-1787671040-923df7b/`); all encoders clip the tail to the
+//!   literal path, preserving byte-exactness.
+//! - Stream-level gate (Phase 9G0): a stream is rANS-coded only when
+//!   `enc + model < raw` — the persisted model must pay for itself.
+//! - Candidate-level gate: descriptor + model object + enc object must
+//!   beat the raw bytes, else the family yields no candidate.
+//! - Decode validates every length (streams compose exactly to the enc
+//!   object; decoded counts match the descriptor fields) and rejects
+//!   reserved command bytes, malformed slots, and unknown slot kinds with
+//!   typed errors — never a panic.
+//! - Dictionary chains are depth-capped (`dict_depth + 1 <=
+//!   max_reference_depth`) so cross-chunk references can never defeat
+//!   bounded random access.
+//! - Match selection is deterministic: equal lengths prefer LOCAL, then
+//!   DICT, then SHARED (identical stream cost, cheapest decoder state);
+//!   chain walks break ties toward the most recent candidate.
+//!
+//! # CONCURRENCY
+//!
+//! All parse/decode functions are pure and deterministic over their
+//! inputs; the encoders read only `ctx` and their own fields. No locks,
+//! no shared mutable state — safe for concurrent encode/decode.
+//!
+//! # RESOURCE BOUNDS
+//!
+//! - Hash-chain tables: `2^16` heads + `input.len()` (or dict length)
+//!   chain slots; each chain walk is depth-capped (`CHAIN_DEPTH`,
+//!   `DICT_CHAIN_DEPTH`, `DEEP_CHAIN_DEPTH`).
+//! - Offsets/distances are u16 (≤ 65535); dictionaries are ≤ 64 KiB
+//!   (`MAX_DICT`).
+//! - Every parse loop is length-bounded by `input.len()`; extended (deep)
+//!   lengths are clamped by the input.
+//! - Decode checks the enc total and per-stream decoded sizes against
+//!   `limits.max_alloc_bytes` and `max_model_object_bytes_n` before
+//!   allocating.
+//!
+//! # PERFORMANCE
+//!
+//! - Phase 8 M3: src corpus 1.633× (pure byte rANS) → **3.556×**
+//!   (SequenceRans), within 5% of zstd -1 per-64 KiB (3.739×); the
+//!   residual gap to whole-file zstd is cross-chunk context, which the
+//!   dictionary families target.
+//! - Phase 9E: standalone deep floor 3.786× vs the fast floor 3.736× on
+//!   the src pack (deep wins all chunks).
+//! - Phase 9F measured the remaining gap: ~2/3 per-extent persistence
+//!   overhead (descriptors + multi-stream rANS model objects 277,556 B =
+//!   26.5% of the footprint), ~1/3 coder quality.
+//! - Phase 9G0: model-cost-aware stream selection cut the sequence
+//!   families' model objects on the real tree 277.6 KB → 74.3 KB
+//!   (per-extent overhead 26.5% → 11.1% of footprint; tree court 2.388× →
+//!   2.775×; src corpus 4.327×).
+//!
+//! # FAILURE MODES
+//!
+//! Typed `SequenceError` for model-object parse failures (too large,
+//! truncated, unknown slot kind, malformed lengths, trailing bytes, rANS
+//! failures, empty command stream). Materialize surfaces
+//! `InvalidDescriptor` for length mismatches and reserved deep command
+//! bytes. Hostile input must produce typed errors, never panics or
+//! over-allocation.
+//!
+//! # HISTORY / EVIDENCE
+//!
+//! - Phase 8 M3 — SequenceRans (tag 0x0D, feature bit 10): the `0x7F`
+//!   tail-remainder corruption (H2 campaign) and the §32
+//!   flatten-on-write validation gap; sealed `campaign-1787671040-923df7b/`.
+//! - Phase 9B — SequenceDict (previous same-file chunk; v1); Phase 9C —
+//!   SequenceSharedDict (shared cross-file dictionary).
+//! - Phase 9E — SequenceDeep (tag 0x11, feature bit 14): repcodes +
+//!   extended length codes + deep background matcher; sealed
+//!   `campaign-1787681660-9be6bd3/`.
+//! - Phase 9F — gap decomposition sealed `campaign-1787683904-da26c75/`.
+//! - Phase 9G0 — model-cost-aware stream selection; sealed
+//!   `campaign-1787684918-80e36c8/`.
 
 #![forbid(unsafe_code)]
 
@@ -139,6 +258,12 @@ pub const DEEP_XLIT: u8 = 0xF1;
 // Reserved command bytes (`DEEP_XLIT + 1..=0xFF`) are malformed.
 
 /// The four raw streams of a SequenceDeep parse (Phase-9E).
+///
+/// Invariants: `offsets` holds one u16 LE per NEW-distance copy command
+/// (COPY, XCOPY — 2 bytes × that count); `lengths` holds one u16 LE per
+/// extended command (XCOPY length extra, XLIT run extra). All lengths are
+/// in bytes; `commands` carries the rep history implicitly (the decoder
+/// maintains the two-slot REP0/REP1 register as it walks).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeepStreams {
     /// One command byte per command (LIT/COPY/REP0/REP1/XCOPY/XLIT).
@@ -158,6 +283,12 @@ const SLOT_RAW: u8 = 0x01;
 const SLOT_EMPTY: u8 = 0x02;
 
 /// The three raw streams before entropy coding.
+///
+/// Invariants: one command byte per command; `literals` holds the
+/// literal-run bytes in command order (its length equals the sum of the
+/// literal runs, i.e. the descriptor's `lit_out`); `offsets` holds one
+/// u16 LE distance per copy command (its length is 2 × the number of
+/// copy commands). All lengths are in bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SequenceStreams {
     /// One command byte per command.
@@ -170,6 +301,11 @@ pub struct SequenceStreams {
 
 /// The fully encoded family: model object, enc object, and the descriptor
 /// stream lengths.
+///
+/// Invariants: `seq_len + lit_len + off_len == enc_obj.len()` — the
+/// descriptor's three encoded lengths (bytes) compose exactly to the enc
+/// object; `cmds` is the decoded command count and `lit_out` the decoded
+/// literal byte count that the descriptor carries for the decode side.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodedSequence {
     /// Model object payload (three slots).
@@ -190,6 +326,9 @@ pub struct EncodedSequence {
 
 /// The fully encoded N-stream family (Phase-9B generalization): model
 /// object, enc object, and one encoded length per stream.
+///
+/// Invariants: `lens` (bytes, in stream order) sums exactly to
+/// `enc_obj.len()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodedStreams {
     /// Model object payload (N slots).
@@ -237,7 +376,11 @@ impl std::error::Error for SequenceError {}
 /// The raw LZ77 streams for `input` (greedy, hash-chain matcher).
 ///
 /// Deterministic and bounded: chain depth capped, offsets capped at 16
-/// bits, every loop length-bounded by `input.len()`.
+/// bits, every loop length-bounded by `input.len()`. The output is the
+/// full copy/literal recipe — the decoder reproduces `input` byte-exactly
+/// from these streams.
+///
+/// Stage 1 builds the hash-chain tables, Stage 2 runs the greedy parse.
 pub fn encode_sequence(input: &[u8]) -> SequenceStreams {
     let n = input.len();
     let mut commands = Vec::new();
@@ -250,27 +393,50 @@ pub fn encode_sequence(input: &[u8]) -> SequenceStreams {
             offsets,
         };
     }
+    // ---------------------------------------------------------------------
+    // Stage 1: Build the hash-chain tables over the input (as consumed).
+    //
+    // `head` maps the 16-bit hash of a 4-byte window to the most recent
+    // position with that hash; `chain` links each position to the next
+    // older one. `CHAIN_DEPTH` caps every walk, so a hash-collision storm
+    // degrades to a bounded scan, never an O(n) linear search per lookup.
+    // ---------------------------------------------------------------------
     let hsize = 1usize << 16;
     let mut head = vec![u32::MAX; hsize];
     let mut chain = vec![u32::MAX; n];
     let mut pos = 0usize;
+    // ---------------------------------------------------------------------
+    // Stage 2: Greedy parse — at each position take the longest match, or
+    // emit a literal run. Positions covered by a copy are registered in
+    // the chain tables so later positions can match into them.
+    // ---------------------------------------------------------------------
     while pos < n {
         // A match starting at pos?
         if pos + MIN_MATCH <= n {
             if let Some((dist, len)) = find_match(input, pos, &head, &chain) {
+                // -----------------------------------------------------------------
+                // Stage 2a: Copy emission with the tail-remainder clip.
+                //
                 // A copy command encodes 4..=131 bytes; clip the match so
                 // the tail remainder after 131-byte chunks never lands in
                 // 1..=3 (that would encode as `0x80 + 3 - 4 = 0x7F`, which
                 // the decoder reads as a 128-byte literal run — a corrupt
                 // stream). The clipped tail is emitted as literals by the
                 // next iteration; byte-exactness is preserved.
+                //
+                // Phase 8 M3: the H2 campaign found this as the `0x7F`
+                // corruption of 1–3-byte copy tails; the fix is sealed in
+                // `campaign-1787671040-923df7b/`. Every encoder in the
+                // family (and `delta.rs`) applies the same clip.
+                // -----------------------------------------------------------------
                 let mut len = len;
                 let rem = len % MAX_COPY;
                 if rem > 0 && rem < MIN_MATCH {
                     len -= rem;
                 }
-                // Emit copy command(s); a long match continues at the same
-                // distance (byte-progressive copy makes this exact).
+                // Stage 2b: Emit copy command(s); a long match continues
+                // at the same distance (byte-progressive copy makes this
+                // exact).
                 let mut remaining = len;
                 while remaining > 0 {
                     let take = remaining.min(MAX_COPY);
@@ -279,7 +445,8 @@ pub fn encode_sequence(input: &[u8]) -> SequenceStreams {
                     offsets.extend_from_slice(&(dist as u16).to_le_bytes());
                     remaining -= take;
                 }
-                // Hash every covered position for future matches.
+                // Stage 2c: Register every covered position for future
+                // matches.
                 let end = pos + len;
                 while pos < end {
                     if pos + MIN_MATCH <= n {
@@ -292,7 +459,8 @@ pub fn encode_sequence(input: &[u8]) -> SequenceStreams {
                 continue;
             }
         }
-        // Literal run: consume positions with no match, capped at 128.
+        // Stage 2d: Literal run — consume positions with no match, capped
+        // at 128 bytes per command.
         let start = pos;
         let mut run = 0usize;
         while pos < n && run < MAX_LIT_RUN {
@@ -323,6 +491,11 @@ pub fn encode_sequence(input: &[u8]) -> SequenceStreams {
 
 /// The four raw streams of a SequenceDict parse (Phase-9B): the usual
 /// commands/literals/offsets plus one copy-source byte per copy command.
+///
+/// Invariants: `offsets` holds one u16 LE offset per copy command (2
+/// bytes × copy count); `sources` holds exactly one byte per copy
+/// command — `SRC_LOCAL` (0x00, backward distance) or `SRC_DICT` (0x01,
+/// absolute dictionary offset).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DictStreams {
     /// One command byte per command (same semantics as SequenceRans).
@@ -345,6 +518,9 @@ pub struct DictStreams {
 /// bounded: both chain walks are depth-capped, offsets/distances are u16,
 /// every loop is length-bounded by `input.len()`. Returns `None` for an
 /// empty input or an unusable dictionary.
+///
+/// Stage 1 builds the chain tables (local + dictionary), Stage 2 runs the
+/// greedy parse.
 pub fn encode_sequence_dict(input: &[u8], dict: &[u8]) -> Option<DictStreams> {
     let n = input.len();
     if n == 0 || dict.is_empty() || dict.len() > MAX_DICT {
@@ -354,6 +530,12 @@ pub fn encode_sequence_dict(input: &[u8], dict: &[u8]) -> Option<DictStreams> {
     let mut literals = Vec::new();
     let mut offsets = Vec::new();
     let mut sources = Vec::new();
+    // ---------------------------------------------------------------------
+    // Stage 1: Build the chain tables. Local chains grow over the input as
+    // consumed; dictionary chains are built once over the whole dictionary
+    // (immutable for the duration of the parse). Both walks are capped by
+    // `CHAIN_DEPTH` / `DICT_CHAIN_DEPTH`.
+    // ---------------------------------------------------------------------
     let hsize = 1usize << 16;
     // Local hash chains over the input (as consumed).
     let mut head = vec![u32::MAX; hsize];
@@ -368,28 +550,35 @@ pub fn encode_sequence_dict(input: &[u8], dict: &[u8]) -> Option<DictStreams> {
         *slot = d_head[h];
         d_head[h] = p as u32;
     }
+    // ---------------------------------------------------------------------
+    // Stage 2: Greedy parse — longest local-or-dictionary match, or a
+    // literal run.
+    // ---------------------------------------------------------------------
     let mut pos = 0usize;
     while pos < n {
         if pos + MIN_MATCH <= n {
             if let Some((dist, len, source)) =
                 best_match(input, pos, dict, &head, &chain, &d_head, &d_chain)
             {
-                // Same copy-clipping contract as SequenceRans: a tail
-                // remainder of 1..=3 bytes would decode as a 128-byte
-                // literal run — clip it so the remainder lands in the
-                // literal path (byte-exactness preserved).
+                // Stage 2a: Copy emission with the SEQUENCE_RANS
+                // tail-remainder clip (Phase 8 M3, sealed
+                // `campaign-1787671040-923df7b/`). Same contract as
+                // SequenceRans: a tail remainder of 1..=3 bytes would
+                // decode as a 128-byte literal run — clip it so the
+                // remainder lands in the literal path (byte-exactness
+                // preserved).
                 let mut len = len;
                 let rem = len % MAX_COPY;
                 if rem > 0 && rem < MIN_MATCH {
                     len -= rem;
                 }
                 let mut remaining = len;
-                // A LOCAL copy is byte-progressive (continuation commands
-                // repeat the same distance over the growing output); a
-                // DICT copy reads a contiguous dict range, so each
-                // continuation command must carry the ADVANCED absolute
-                // offset (dict[off + i*131 ..]) — the decoder reads every
-                // command's u16 independently.
+                // Stage 2b: Continuation emission. A LOCAL copy is
+                // byte-progressive (continuation commands repeat the same
+                // distance over the growing output); a DICT copy reads a
+                // contiguous dict range, so each continuation command must
+                // carry the ADVANCED absolute offset (dict[off + i*131 ..])
+                // — the decoder reads every command's u16 independently.
                 let mut cur_off = dist;
                 while remaining > 0 {
                     let take = remaining.min(MAX_COPY);
@@ -414,7 +603,8 @@ pub fn encode_sequence_dict(input: &[u8], dict: &[u8]) -> Option<DictStreams> {
                 continue;
             }
         }
-        // Literal run: consume positions with no match, capped at 128.
+        // Stage 2c: Literal run — consume positions with no match, capped
+        // at 128 bytes per command.
         let start = pos;
         let mut run = 0usize;
         while pos < n && run < MAX_LIT_RUN {
@@ -456,6 +646,8 @@ pub fn encode_sequence_dict(input: &[u8], dict: &[u8]) -> Option<DictStreams> {
 /// Deterministic and bounded: all chain walks are depth-capped, offsets are
 /// u16, every loop is length-bounded by `input.len()`. Returns `None` for
 /// an empty input or an unusable shared dictionary.
+///
+/// Stage 1 builds the three chain tables, Stage 2 runs the greedy parse.
 pub fn encode_sequence_shared(
     input: &[u8],
     file_dict: &[u8],
@@ -469,6 +661,11 @@ pub fn encode_sequence_shared(
     let mut literals = Vec::new();
     let mut offsets = Vec::new();
     let mut sources = Vec::new();
+    // ---------------------------------------------------------------------
+    // Stage 1: Build the three chain tables. Local chains grow over the
+    // input as consumed; file-dictionary and shared-dictionary chains are
+    // built once (immutable for the parse).
+    // ---------------------------------------------------------------------
     let hsize = 1usize << 16;
     // Local hash chains over the input (as consumed).
     let mut head = vec![u32::MAX; hsize];
@@ -491,27 +688,35 @@ pub fn encode_sequence_shared(
         *slot = s_head[h];
         s_head[h] = p as u32;
     }
+    // ---------------------------------------------------------------------
+    // Stage 2: Greedy parse — longest local / file-dict / shared-dict
+    // match, or a literal run.
+    // ---------------------------------------------------------------------
     let mut pos = 0usize;
     while pos < n {
         if pos + MIN_MATCH <= n {
             if let Some((dist, len, source)) = best_match_shared(
                 input, pos, file_dict, shared, &head, &chain, &f_head, &f_chain, &s_head, &s_chain,
             ) {
-                // Same copy-clipping contract as SequenceRans: a tail
-                // remainder of 1..=3 bytes would decode as a 128-byte
-                // literal run — clip it so the remainder lands in the
-                // literal path (byte-exactness preserved).
+                // Stage 2a: Copy emission with the SEQUENCE_RANS
+                // tail-remainder clip (Phase 8 M3, sealed
+                // `campaign-1787671040-923df7b/`). Same contract as
+                // SequenceRans: a tail remainder of 1..=3 bytes would
+                // decode as a 128-byte literal run — clip it so the
+                // remainder lands in the literal path (byte-exactness
+                // preserved).
                 let mut len = len;
                 let rem = len % MAX_COPY;
                 if rem > 0 && rem < MIN_MATCH {
                     len -= rem;
                 }
                 let mut remaining = len;
-                // A LOCAL copy is byte-progressive (continuation commands
-                // repeat the same distance over the growing output); a
-                // DICT/SHARED copy reads a contiguous dict range, so each
-                // continuation command must carry the ADVANCED absolute
-                // offset (dict[off + i*131 ..]) — the decoder reads every
+                // Stage 2b: Continuation emission. A LOCAL copy is
+                // byte-progressive (continuation commands repeat the same
+                // distance over the growing output); a DICT/SHARED copy
+                // reads a contiguous dict range, so each continuation
+                // command must carry the ADVANCED absolute offset
+                // (dict[off + i*131 ..]) — the decoder reads every
                 // command's u16 independently.
                 let mut cur_off = dist;
                 while remaining > 0 {
@@ -537,7 +742,8 @@ pub fn encode_sequence_shared(
                 continue;
             }
         }
-        // Literal run: consume positions with no match, capped at 128.
+        // Stage 2c: Literal run — consume positions with no match, capped
+        // at 128 bytes per command.
         let start = pos;
         let mut run = 0usize;
         while pos < n && run < MAX_LIT_RUN {
@@ -580,11 +786,18 @@ pub fn encode_sequence_shared(
 /// are u16, every loop is length-bounded by `input.len()`, and extended
 /// lengths are clamped by the input. Returns `None` only for an empty
 /// input.
+///
+/// Stage 1 builds the chain tables and rep register, Stage 2 runs the
+/// greedy parse with lazy deferral.
 pub fn encode_sequence_deep(input: &[u8]) -> Option<DeepStreams> {
     let n = input.len();
     if n == 0 {
         return None;
     }
+    // ---------------------------------------------------------------------
+    // Stage 1: Chain tables over the input (as consumed) and the empty
+    // rep register (REP0/REP1, the two most recent copy distances).
+    // ---------------------------------------------------------------------
     let hsize = 1usize << 16;
     let mut head = vec![u32::MAX; hsize];
     let mut chain = vec![u32::MAX; n];
@@ -594,15 +807,21 @@ pub fn encode_sequence_deep(input: &[u8]) -> Option<DeepStreams> {
     let mut lengths = Vec::new();
     let mut rep0 = 0usize;
     let mut rep1 = 0usize;
+    // ---------------------------------------------------------------------
+    // Stage 2: Greedy parse with lazy deferral — rep distances are coded
+    // cheapest, so the deep matcher checks them first (see
+    // `find_match_deep`); a match is deferred one position only when the
+    // next position's match is longer by at least `MIN_LAZY_GAIN`.
+    // ---------------------------------------------------------------------
     let mut pos = 0usize;
     while pos < n {
         if pos + MIN_MATCH <= n {
             if let Some((dist, len)) = find_match_deep(input, pos, &head, &chain, rep0, rep1) {
-                // Lazy parsing: defer only when the match one position
-                // ahead is LONGER BY AT LEAST `MIN_LAZY_GAIN` bytes — a
-                // naive strictly-longer defer trades a 2-byte literal for
-                // a 1-byte match gain, which loses. (Emit one literal and
-                // let the next iteration take the longer match.)
+                // Stage 2a: Lazy-deferral check — defer only when the match one
+                // position ahead is LONGER BY AT LEAST `MIN_LAZY_GAIN` bytes (a
+                // naive strictly-longer defer trades a 2-byte literal for a 1-byte
+                // match gain, which loses). Emit one literal and let the next
+                // iteration take the longer match.
                 let lazy = pos + 1 + MIN_MATCH <= n
                     && find_match_deep(input, pos + 1, &head, &chain, rep0, rep1)
                         .map(|(_, l2)| l2 >= len + MIN_LAZY_GAIN)
@@ -641,8 +860,8 @@ pub fn encode_sequence_deep(input: &[u8]) -> Option<DeepStreams> {
                 continue;
             }
         }
-        // Literal run: consume positions with no match, capped at 128 per
-        // command; longer runs use XLIT.
+        // Stage 2c: Literal run — consume positions with no match, capped
+        // at 128 bytes per command; longer runs use XLIT.
         let start = pos;
         let mut run = 0usize;
         while pos < n && run < MAX_LIT_RUN {
@@ -713,6 +932,12 @@ fn push_deep_copy(
 /// (cheapest to code) are checked first and win length ties; the hash-chain
 /// walk (depth `DEEP_CHAIN_DEPTH`) only replaces with a strictly longer
 /// match. Returns `(dist, len)` with `len >= MIN_MATCH`.
+///
+/// Stage 1 checks the rep distances byte-progressively against the
+/// already-produced prefix (exactly how the decoder will reproduce them);
+/// Stage 2 walks the hash chain, keeping only strictly longer matches
+/// (equal-length chain candidates are never cheaper than a repcode) and
+/// stopping early when a match reaches the input end.
 fn find_match_deep(
     input: &[u8],
     pos: usize,
@@ -773,6 +998,10 @@ fn find_match_deep(
 /// The longest of the local, file-dictionary, and shared-dictionary
 /// matches at `pos` (deterministic: equal lengths prefer LOCAL, then
 /// DICT).
+///
+/// Combines the three hash-chain searches and picks the deterministic
+/// winner: LOCAL first, then DICT on strictly longer, then SHARED on
+/// strictly longer.
 #[allow(clippy::too_many_arguments)]
 fn best_match_shared(
     input: &[u8],
@@ -816,7 +1045,8 @@ fn best_match_shared(
 }
 
 /// The longer of the local match and the dictionary match at `pos`
-/// (deterministic: equal lengths prefer LOCAL).
+/// (deterministic: equal lengths prefer LOCAL — identical stream cost,
+/// cheaper decoder state).
 fn best_match(
     input: &[u8],
     pos: usize,
@@ -845,6 +1075,11 @@ fn best_match(
 /// Find the longest dictionary match at `pos`, capped by `DICT_CHAIN_DEPTH`
 /// chain walks. Returns `(offset, len)` with `len >= MIN_MATCH`. The match
 /// cannot extend past the dictionary end or the input end.
+///
+/// Hash-chain search: walk the chain of dictionary positions sharing the
+/// 4-byte window hash, compare bytewise against the input (bounded by the
+/// dictionary end and the input end), keep the longest match, and stop
+/// early when a match reaches the input end (nothing can be longer).
 fn find_dict_match(
     input: &[u8],
     pos: usize,
@@ -888,6 +1123,11 @@ fn find_dict_match(
 /// Returns `(dist, len)` with `len >= MIN_MATCH`. Deterministic tie-break:
 /// longer wins; equal lengths keep the most recent candidate (first in the
 /// chain).
+///
+/// Hash-chain search: walk the chain of positions sharing the 4-byte
+/// window hash, skip candidates beyond `MAX_DIST` (a u16 distance cannot
+/// encode them), compare bytewise, keep the longest match, and stop early
+/// when a match reaches the input end.
 fn find_match(input: &[u8], pos: usize, head: &[u32], chain: &[u32]) -> Option<(usize, usize)> {
     let n = input.len();
     let h = hash_at(input, pos);
@@ -929,6 +1169,12 @@ pub(crate) fn hash_at(input: &[u8], pos: usize) -> usize {
 }
 
 /// Which encoding a stream uses.
+///
+/// The kind is persisted in the model object (slot byte), so the decode
+/// side must never assume a stream is rANS-coded: `Rans` carries the
+/// serialized model bytes for the slot, `Raw` stores the stream verbatim
+/// in the enc object (no model bytes in the slot), `Empty` has a zero
+/// decoded length (and a zero slot length).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamSlot {
     /// rANS-coded; holds the encoded model bytes.
@@ -965,6 +1211,10 @@ pub fn encode_streams(streams: &SequenceStreams) -> Option<EncodedSequence> {
 /// Encode N raw streams (Phase-9B generalization; N in 1..=4): per-stream
 /// histogram, degenerate streams stored raw, rANS where it wins. Returns
 /// `None` when any stream cannot be represented.
+///
+/// Stage 1 decides each stream's slot (Empty / Raw / rANS), Stage 2
+/// serializes the slots into the model object, Stage 3 concatenates the
+/// payloads into the enc object and records the per-stream lengths.
 pub fn encode_streams_n(streams: &[Vec<u8>]) -> Option<EncodedStreams> {
     if streams.is_empty() {
         return None;
@@ -973,7 +1223,10 @@ pub fn encode_streams_n(streams: &[Vec<u8>]) -> Option<EncodedStreams> {
     let mut enc_obj = Vec::new();
     let mut lens = Vec::with_capacity(streams.len());
     for stream in streams {
+        // Stage 1: per-stream slot decision (train-and-compare path).
         let (slot, payload) = encode_one_stream(stream)?;
+        // Stage 2: serialize the slot into the model object (kind byte +
+        // u16 LE length + model bytes for rANS slots).
         match &slot {
             StreamSlot::Rans(model_bytes) => {
                 model_obj.push(SLOT_RANS);
@@ -989,6 +1242,8 @@ pub fn encode_streams_n(streams: &[Vec<u8>]) -> Option<EncodedStreams> {
                 model_obj.extend_from_slice(&0u16.to_le_bytes());
             }
         }
+        // Stage 3: concatenate payloads; the descriptor lengths (bytes)
+        // compose exactly to the enc object.
         lens.push(payload.len() as u32);
         enc_obj.extend_from_slice(&payload);
     }
@@ -1064,10 +1319,16 @@ pub(crate) fn encode_streams_n_with_models(
 /// per-stream train-and-compare path (`encode_one_stream`); `Some` = the
 /// amortized-model path (rANS iff encoded < raw — the model is already
 /// paid by the cohort).
+///
+/// Stage 1 classifies the stream by distinct symbols; Stage 2 applies the
+/// external-model coverage check (a zero-frequency symbol would panic the
+/// rANS encoder); Stage 3 compares the external-model encoding against
+/// RAW.
 fn encode_one_stream_external(
     stream: &[u8],
     external: Option<&RansModel>,
 ) -> Option<(StreamSlot, Vec<u8>)> {
+    // Stage 1: histogram + distinct-symbol classification.
     let mut hist = [0u32; 256];
     for &b in stream {
         hist[b as usize] += 1;
@@ -1077,15 +1338,19 @@ fn encode_one_stream_external(
         0 => Some((StreamSlot::Empty, Vec::new())),
         1 => Some((StreamSlot::Raw, stream.to_vec())),
         _ => match external {
-            // Phase-9G: an external cohort model may not cover this
-            // member's symbol set (a model trained on other members'
-            // streams). A zero-frequency symbol would panic the rANS
-            // encoder; the stream is stored RAW instead — the correct
-            // accounting for a bundle that does not apply to this member
-            // (the greedy pool selection then sees the true gain).
+            // Stage 2: Phase-9G coverage check — an external cohort model
+            // may not cover this member's symbol set (a model trained on
+            // other members' streams). A zero-frequency symbol would panic
+            // the rANS encoder; the stream is stored RAW instead — the
+            // correct accounting for a bundle that does not apply to this
+            // member (the greedy pool selection then sees the true gain).
             Some(model) if stream.iter().any(|&b| model.freqs[b as usize] == 0) => {
                 Some((StreamSlot::Raw, stream.to_vec()))
             }
+            // Stage 3: external-model encode vs RAW. The model is
+            // amortized across the cohort (counted once), so its bytes do
+            // NOT gate this per-stream choice — that is the distinction
+            // from the Phase-9G0 per-stream gate in `encode_one_stream`.
             Some(model) => match encode_stream(stream, model) {
                 Ok(enc) if enc.len() < stream.len() => {
                     Some((StreamSlot::Rans(metadata::encode_model(model)), enc))
@@ -1100,7 +1365,11 @@ fn encode_one_stream_external(
 /// Encode one stream: histogram decides Empty / Raw / rANS (rANS only when
 /// strictly smaller than the raw stream). Returns the slot and the stored
 /// stream payload (raw bytes or the rANS encoding).
+///
+/// Stage 1 classifies the stream by distinct symbols; Stage 2 trains the
+/// canonical per-stream model and applies the Phase-9G0 gate.
 fn encode_one_stream(stream: &[u8]) -> Option<(StreamSlot, Vec<u8>)> {
+    // Stage 1: histogram + distinct-symbol classification.
     let mut hist = [0u32; 256];
     for &b in stream {
         hist[b as usize] += 1;
@@ -1110,6 +1379,8 @@ fn encode_one_stream(stream: &[u8]) -> Option<(StreamSlot, Vec<u8>)> {
         0 => Some((StreamSlot::Empty, Vec::new())),
         1 => Some((StreamSlot::Raw, stream.to_vec())),
         _ => {
+            // Stage 2: train the per-stream model and compare against RAW
+            // with the persisted model bytes included (Phase-9G0).
             let model: RansModel = normalize_histogram(&hist, SCALE_BITS, CODEC)?;
             match encode_stream(stream, &model) {
                 Ok(enc) => {
@@ -1119,7 +1390,10 @@ fn encode_one_stream(stream: &[u8]) -> Option<(StreamSlot, Vec<u8>)> {
                     // saves a few encoded bytes while requiring a large
                     // persisted model is not a win; without this the
                     // sequence encoders persisted models for streams whose
-                    // rANS gain was smaller than the model itself.
+                    // rANS gain was smaller than the model itself — the
+                    // model could never pay for itself. Measured on the
+                    // real tree: sequence model objects 277.6 KB -> 74.3
+                    // KB (sealed campaign-1787684918-80e36c8).
                     if enc.len() + model_bytes.len() < stream.len() {
                         Some((StreamSlot::Rans(model_bytes), enc))
                     } else {
@@ -1200,6 +1474,10 @@ pub fn parse_model_object(bytes: &[u8], max_bytes: u64) -> Result<[StreamSlot; 3
 
 /// The descriptor stream-length fields shared by SEQUENCE_RANS, the
 /// BASE_SEQUENCE residual, and SPARSE_BLOCK64.
+///
+/// Units: `seq_len` / `lit_len` / `off_len` are encoded stream lengths in
+/// bytes and must compose exactly to the enc object; `cmds` is the decoded
+/// command count; `lit_out` the decoded literal byte count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThreeStreams {
     /// Encoded command-stream length.
@@ -1214,7 +1492,8 @@ pub struct ThreeStreams {
     pub lit_out: u32,
 }
 
-/// The three decoded streams.
+/// The three decoded streams (all byte vectors; lengths already validated
+/// against the descriptor fields).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedStreams {
     /// Decoded command bytes.
@@ -1226,6 +1505,10 @@ pub struct DecodedStreams {
 }
 
 /// The object references shared by the three-stream families.
+///
+/// `model` / `enc_obj` are content ids of the persisted objects;
+/// `scale_bits` is the frequency scale of every slot model (14 here);
+/// `codec` the rANS codec used for every rANS slot.
 #[derive(Debug, Clone, Copy)]
 pub struct StreamRefs {
     /// Content id of the model object.
@@ -1249,6 +1532,12 @@ pub struct StreamRefs {
 /// `copies_override` pins the copy count (SPARSE_BLOCK64's nonzero-word
 /// count); `None` derives it from the decoded command stream (the
 /// SequenceRans/BaseSequence/SequenceDict convention).
+///
+/// Stage 1 validates the encoded-length composition, Stage 2 parses the
+/// model slots, Stage 3 decodes the command stream (the copy count derives
+/// from it), Stages 4–6 decode the remaining streams with exact expected
+/// lengths. Every length check runs before the matching allocation is
+/// trusted; hostile descriptors surface as typed errors.
 #[allow(clippy::too_many_arguments)] // the arguments are the format's own field set
 pub fn decode_streams_n(
     ctx: &dyn crate::core::materialize::DecoderContext,
@@ -1273,6 +1562,10 @@ pub fn decode_streams_n(
         scale_bits,
         codec,
     } = refs;
+    // ---------------------------------------------------------------------
+    // Stage 1: Validate the encoded-length composition against the alloc
+    // bound — stream lengths must compose exactly to the enc object.
+    // ---------------------------------------------------------------------
     // Stream lengths must compose exactly to the enc object.
     let enc_total: u64 = encoded_lens.iter().map(|&l| l as u64).sum();
     if enc_total > limits.max_alloc_bytes {
@@ -1281,6 +1574,10 @@ pub fn decode_streams_n(
             max: limits.max_alloc_bytes,
         });
     }
+    // ---------------------------------------------------------------------
+    // Stage 2: Fetch and parse the model slots, then slice the enc object
+    // by the descriptor lengths.
+    // ---------------------------------------------------------------------
     let model_bytes = ctx.fetch_object(&model)?;
     let slots = parse_model_object_slots(
         &model_bytes,
@@ -1301,6 +1598,10 @@ pub fn decode_streams_n(
         p += l as usize;
     }
 
+    // ---------------------------------------------------------------------
+    // Stage 3: Decode stream 0 (commands) — the copy count derives from it
+    // unless the caller pinned it.
+    // ---------------------------------------------------------------------
     // Stream 0: commands (decoded first; the copy count derives from it
     // unless the caller pinned it).
     let commands: Vec<u8> = match &slots[0] {
@@ -1340,6 +1641,9 @@ pub fn decode_streams_n(
         });
     }
 
+    // ---------------------------------------------------------------------
+    // Stage 4: Decode stream 1 (literals).
+    // ---------------------------------------------------------------------
     // Stream 1: literals.
     let literals: Vec<u8> = match &slots[1] {
         StreamSlot::Rans(m) => {
@@ -1368,6 +1672,9 @@ pub fn decode_streams_n(
         ));
     }
 
+    // ---------------------------------------------------------------------
+    // Stage 5: Decode stream 2 (offsets).
+    // ---------------------------------------------------------------------
     // Stream 2: offsets.
     let offsets: Vec<u8> = match &slots[2] {
         StreamSlot::Rans(m) => ctx.decode_rans(m, slices[2], scale_bits, codec, off_out)?,
@@ -1396,6 +1703,9 @@ pub fn decode_streams_n(
 
     let mut out = vec![commands, literals, offsets];
     if n == 4 {
+        // -----------------------------------------------------------------
+        // Stage 6: Decode stream 3 (copy sources, one byte per copy).
+        // -----------------------------------------------------------------
         // Stream 3: copy sources (one byte per copy command).
         let sources: Vec<u8> = match &slots[3] {
             StreamSlot::Rans(m) => ctx.decode_rans(m, slices[3], scale_bits, codec, copies)?,
@@ -1462,6 +1772,11 @@ pub fn decode_three_streams(
 
 /// The descriptor stream-length fields of the SEQUENCE_DICT family
 /// (four streams: commands, literals, offsets, copy sources).
+///
+/// Units: `seq_len` / `lit_len` / `off_len` / `src_len` are encoded
+/// stream lengths in bytes (composing exactly to the enc object); `cmds`
+/// is the decoded command count; `lit_out` the decoded literal byte
+/// count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FourStreams {
     /// Encoded command-stream length.
@@ -1507,6 +1822,11 @@ pub fn decode_four_streams(
 
 /// The descriptor stream-length fields of the SEQUENCE_DEEP family
 /// (four streams: commands, literals, offsets, extended lengths).
+///
+/// Units: `seq_len` / `lit_len` / `off_len` / `len_len` are encoded
+/// stream lengths in bytes (composing exactly to the enc object); `cmds`
+/// is the decoded command count; `lit_out` the decoded literal byte
+/// count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeepLens {
     /// Encoded command-stream length.
@@ -1529,6 +1849,11 @@ pub struct DeepLens {
 /// command bytes: COPY/XCOPY consume an offset, XCOPY/XLIT consume a
 /// length extra), so the expected stream lengths are computed by a command
 /// walk before decoding.
+///
+/// Stage 1 validates the enc composition, Stage 2 parses the model slots,
+/// Stage 3 decodes the command stream, Stage 4 walks it to count u16
+/// offsets/lengths and reject reserved bytes, Stage 5 decodes the
+/// remaining streams against those exact expected lengths.
 pub fn decode_deep_streams(
     ctx: &dyn crate::core::materialize::DecoderContext,
     limits: &crate::core::limits::Limits,
@@ -1543,6 +1868,9 @@ pub fn decode_deep_streams(
         scale_bits,
         codec,
     } = refs;
+    // ---------------------------------------------------------------------
+    // Stage 1: Validate the enc composition against the alloc bound.
+    // ---------------------------------------------------------------------
     let enc_total: u64 = (lens.seq_len as u64)
         .saturating_add(lens.lit_len as u64)
         .saturating_add(lens.off_len as u64)
@@ -1553,6 +1881,10 @@ pub fn decode_deep_streams(
             max: limits.max_alloc_bytes,
         });
     }
+    // ---------------------------------------------------------------------
+    // Stage 2: Fetch and parse the model slots, then slice the enc object
+    // by the descriptor lengths.
+    // ---------------------------------------------------------------------
     let model_bytes = ctx.fetch_object(&model)?;
     let slots = parse_model_object_slots(
         &model_bytes,
@@ -1573,6 +1905,10 @@ pub fn decode_deep_streams(
         p += l as usize;
     }
 
+    // ---------------------------------------------------------------------
+    // Stage 3: Decode stream 0 (commands) — the u16 consumption derives
+    // from the command bytes.
+    // ---------------------------------------------------------------------
     // Stream 0: commands (decoded first; the u16 consumption derives from
     // them).
     let commands: Vec<u8> = match &slots[0] {
@@ -1598,6 +1934,10 @@ pub fn decode_deep_streams(
             "command stream decoded length mismatch".into(),
         ));
     }
+    // ---------------------------------------------------------------------
+    // Stage 4: Command walk — count NEW-distance copies (u16 offsets) and
+    // extended commands (u16 lengths), and reject reserved command bytes.
+    // ---------------------------------------------------------------------
     // Command walk: count NEW-distance copies (u16 offsets) and extended
     // commands (u16 lengths), and reject reserved command bytes.
     let mut offset_count = 0u64;
@@ -1632,6 +1972,10 @@ pub fn decode_deep_streams(
         });
     }
 
+    // ---------------------------------------------------------------------
+    // Stage 5: Decode the remaining streams against the exact expected
+    // lengths computed above.
+    // ---------------------------------------------------------------------
     // Decode one stream by slot with an exact expected decoded length.
     fn decode_one(
         ctx: &dyn crate::core::materialize::DecoderContext,
@@ -1713,6 +2057,9 @@ impl Encoder for SequenceEncoder {
     }
 
     fn encode(&self, input: &[u8], ctx: &CandidateContext<'_>) -> Vec<Candidate> {
+        // -----------------------------------------------------------------
+        // Stage 1: Input guards.
+        // -----------------------------------------------------------------
         if input.is_empty() || input.len() as u64 > ctx.limits.max_chunk_size {
             return Vec::new();
         }
@@ -1721,7 +2068,14 @@ impl Encoder for SequenceEncoder {
         if input.len() < 128 {
             return Vec::new();
         }
+        // -----------------------------------------------------------------
+        // Stage 2: Greedy LZ77 parse into the three raw streams.
+        // -----------------------------------------------------------------
         let streams = encode_sequence(input);
+        // -----------------------------------------------------------------
+        // Stage 3: Per-stream entropy coding (rANS where it wins, RAW
+        // otherwise) and the descriptor field set.
+        // -----------------------------------------------------------------
         let enc = match encode_streams(&streams) {
             Some(e) => e,
             None => return Vec::new(),
@@ -1740,6 +2094,10 @@ impl Encoder for SequenceEncoder {
             lit_out: enc.lit_out,
             len: input.len() as u64,
         };
+        // -----------------------------------------------------------------
+        // Stage 4: Honest gate — descriptor + model object + enc object
+        // must beat the raw bytes, else RAW/RANS wins on cost anyway (§15).
+        // -----------------------------------------------------------------
         // Honest gate: descriptor + model object + enc object must beat
         // the raw bytes, else RAW/RANS wins on cost anyway (§15).
         let total = rep
@@ -1749,6 +2107,10 @@ impl Encoder for SequenceEncoder {
         if total >= input.len() as u64 {
             return Vec::new();
         }
+        // -----------------------------------------------------------------
+        // Stage 5: Exact persisted-byte cost accounting (reference ids +
+        // model + enc) and the candidate proposal.
+        // -----------------------------------------------------------------
         let split = ByteSplit {
             reference: 64, // model + enc content ids
             ..Default::default()
@@ -1789,6 +2151,12 @@ impl Encoder for SequenceDictEncoder {
     }
 
     fn encode(&self, input: &[u8], ctx: &CandidateContext<'_>) -> Vec<Candidate> {
+        // -----------------------------------------------------------------
+        // Stage 1: Input guards (empty/oversized/tiny inputs cannot win —
+        // four models + four streams + a dictionary reference; the depth
+        // cap refuses candidates that would defeat bounded random access
+        // at decode time).
+        // -----------------------------------------------------------------
         if input.is_empty() || input.len() as u64 > ctx.limits.max_chunk_size {
             return Vec::new();
         }
@@ -1806,10 +2174,20 @@ impl Encoder for SequenceDictEncoder {
         if self.dict_bytes.is_empty() || self.dict_bytes.len() > MAX_DICT {
             return Vec::new();
         }
+        // -----------------------------------------------------------------
+        // Stage 2: Greedy parse against the local history + dictionary.
+        // -----------------------------------------------------------------
         let streams = match encode_sequence_dict(input, &self.dict_bytes) {
             Some(s) => s,
             None => return Vec::new(),
         };
+        // -----------------------------------------------------------------
+        // Stage 3: Entropy coding + descriptor. A parse whose dictionary
+        // contributed nothing (no DICT copies) is strictly a SequenceRans
+        // parse with an extra 32-byte reference and a fourth stream: skip
+        // it so the local-only family wins on cost without the wasted
+        // descriptor.
+        // -----------------------------------------------------------------
         // When the dictionary contributed nothing (no DICT copies), the
         // parse is strictly a SequenceRans parse with an extra 32-byte
         // reference and a fourth stream: skip it so the local-only family
@@ -1845,6 +2223,12 @@ impl Encoder for SequenceDictEncoder {
             lit_out,
             len: input.len() as u64,
         };
+        // -----------------------------------------------------------------
+        // Stage 4: Honest gate — descriptor + model object + enc object
+        // (the dictionary chunk itself is counted as a reference, and its
+        // own persisted state is accounted wherever it is materialized)
+        // must beat the raw bytes, else RAW/SequenceRans wins on cost.
+        // -----------------------------------------------------------------
         // Honest gate: descriptor + model object + enc object (the
         // dictionary chunk itself is counted as a reference, and its own
         // persisted state is accounted wherever it is materialized) must
@@ -1856,6 +2240,10 @@ impl Encoder for SequenceDictEncoder {
         if total >= input.len() as u64 {
             return Vec::new();
         }
+        // -----------------------------------------------------------------
+        // Stage 5: Cost accounting — reference ids (dictionary + model +
+        // enc) plus the dictionary chain depth penalty.
+        // -----------------------------------------------------------------
         let split = ByteSplit {
             // dictionary + model + enc content ids.
             reference: 96,
@@ -1909,6 +2297,12 @@ impl Encoder for SequenceSharedDictEncoder {
     }
 
     fn encode(&self, input: &[u8], ctx: &CandidateContext<'_>) -> Vec<Candidate> {
+        // -----------------------------------------------------------------
+        // Stage 1: Input guards — empty/oversized/tiny inputs cannot win;
+        // the depth cap uses the DEEPER of the two dictionary chains
+        // (max(file-dict, shared) + 1) and refuses candidates that would
+        // defeat bounded random access at decode time.
+        // -----------------------------------------------------------------
         if input.is_empty() || input.len() as u64 > ctx.limits.max_chunk_size {
             return Vec::new();
         }
@@ -1930,10 +2324,21 @@ impl Encoder for SequenceSharedDictEncoder {
         {
             return Vec::new();
         }
+        // -----------------------------------------------------------------
+        // Stage 2: Greedy parse against local history + file dict + shared
+        // dict.
+        // -----------------------------------------------------------------
         let streams = match encode_sequence_shared(input, &self.dict_bytes, &self.shared_bytes) {
             Some(s) => s,
             None => return Vec::new(),
         };
+        // -----------------------------------------------------------------
+        // Stage 3: Entropy coding + descriptor. A parse where the shared
+        // dictionary contributed nothing (no SHARED copies) is at best a
+        // SequenceDict/SequenceRans parse with an extra 32-byte reference
+        // and fourth-stream entropy: skip it so the cheaper family wins on
+        // cost without the wasted descriptor.
+        // -----------------------------------------------------------------
         // When the shared dictionary contributed nothing (no SHARED
         // copies), the parse is at best a SequenceDict/SequenceRans parse
         // with an extra 32-byte reference and fourth-stream entropy: skip
@@ -1972,6 +2377,12 @@ impl Encoder for SequenceSharedDictEncoder {
             lit_out,
             len: input.len() as u64,
         };
+        // -----------------------------------------------------------------
+        // Stage 4: Honest gate — descriptor + model object + enc object
+        // (the dictionary chunks themselves are references; their persisted
+        // state is accounted where they are materialized) must beat the
+        // raw bytes, else RAW/SequenceRans wins on cost.
+        // -----------------------------------------------------------------
         // Honest gate: descriptor + model object + enc object (the
         // dictionary chunks themselves are references; their persisted
         // state is accounted where they are materialized) must beat the
@@ -1983,6 +2394,10 @@ impl Encoder for SequenceSharedDictEncoder {
         if total >= input.len() as u64 {
             return Vec::new();
         }
+        // -----------------------------------------------------------------
+        // Stage 5: Cost accounting — reference ids (file dict + shared +
+        // model + enc) plus the deeper dictionary chain depth penalty.
+        // -----------------------------------------------------------------
         let split = ByteSplit {
             // file dict + shared + model + enc content ids.
             reference: 128,
@@ -2019,6 +2434,10 @@ impl Encoder for SequenceDeepEncoder {
     }
 
     fn encode(&self, input: &[u8], ctx: &CandidateContext<'_>) -> Vec<Candidate> {
+        // -----------------------------------------------------------------
+        // Stage 1: Input guards — empty/oversized/tiny inputs cannot win
+        // (four models + four streams).
+        // -----------------------------------------------------------------
         if input.is_empty() || input.len() as u64 > ctx.limits.max_chunk_size {
             return Vec::new();
         }
@@ -2027,10 +2446,18 @@ impl Encoder for SequenceDeepEncoder {
         if input.len() < 128 {
             return Vec::new();
         }
+        // -----------------------------------------------------------------
+        // Stage 2: Deep greedy parse (repcodes + lazy parsing + extended
+        // lengths).
+        // -----------------------------------------------------------------
         let streams = match encode_sequence_deep(input) {
             Some(s) => s,
             None => return Vec::new(),
         };
+        // -----------------------------------------------------------------
+        // Stage 3: Per-stream entropy coding (rANS where it wins, RAW
+        // otherwise) and the descriptor field set.
+        // -----------------------------------------------------------------
         let cmds = streams.commands.len() as u32;
         let lit_out = streams.literals.len() as u32;
         let enc = match encode_streams_n(&[
@@ -2057,6 +2484,11 @@ impl Encoder for SequenceDeepEncoder {
             lit_out,
             len: input.len() as u64,
         };
+        // -----------------------------------------------------------------
+        // Stage 4: Honest gate — descriptor + model object + enc object
+        // must beat the raw bytes, else RAW/SequenceRans wins on cost
+        // anyway (§15).
+        // -----------------------------------------------------------------
         // Honest gate: descriptor + model object + enc object must beat
         // the raw bytes, else RAW/SequenceRans wins on cost anyway (§15).
         let total = rep
@@ -2066,6 +2498,10 @@ impl Encoder for SequenceDeepEncoder {
         if total >= input.len() as u64 {
             return Vec::new();
         }
+        // -----------------------------------------------------------------
+        // Stage 5: Exact persisted-byte cost accounting and the candidate
+        // proposal.
+        // -----------------------------------------------------------------
         let split = ByteSplit {
             reference: 64, // model + enc content ids
             ..Default::default()

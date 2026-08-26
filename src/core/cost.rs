@@ -12,6 +12,122 @@
 //! measurements at selection time). `persisted_bytes` is the full
 //! accountable persisted state for the extent
 //! (`docs/theory/information-accounting.md`).
+//!
+//! # PURPOSE
+//!
+//! The single objective `J` under which every representation is chosen
+//! (ADR-0010). A candidate's [`CostBreakdown`] is the auditable
+//! per-component accounting behind `J`; the policy `λ` tables define how
+//! the modes (`capacity`, `balanced`, `latency`, `archive`, `ram`) trade
+//! bytes against materialization cost.
+//!
+//! # BOUNDARY
+//!
+//! This module knows only [`Representation`], the limits, and the policy.
+//! It never touches the store, never measures wall clock, and never
+//! decides which candidates exist — the encoders propose, the optimizer
+//! orders and validates, and selection is by this exact function
+//! (ADR-0010 rules; DSFB only orders the candidate search, ADR-0004).
+//!
+//! # MODEL — units of every term
+//!
+//! - `persisted_bytes` — **bytes**; the sum of the disjoint per-category
+//!   byte counts (descriptor + model + residual + seed/state + reference +
+//!   configurational + integrity; attributable GC overhead at FS level).
+//!   The byte term has implicit weight 1.
+//! - `estimated_read_cycles` — deterministic **unit operations** (not
+//!   wall time), from the fixed per-family tables below; `λ_read` is
+//!   applied per 1024 cycles (the code computes `(λ_read * read_cycles) /
+//!   1024`).
+//! - `estimated_write_cycles` — same units; `λ_write` per 1024 cycles.
+//! - `dependent_physical_reads` — a **count** of physical objects fetched
+//!   to materialize (1 for a RAW/RANS object, per base/target/model/enc
+//!   object, 0 for self-contained families).
+//! - `reference_depth` — a **count** of chain levels (EXACT_REF /
+//!   BASE_RESIDUAL / dictionary chains); `λ_depth` per level.
+//!
+//! # MARGINAL vs FULL persisted bytes (evidence-sensitive)
+//!
+//! [`CostBreakdown`] and [`estimate`] account the FULL persisted state of
+//! an extent. The *selection regime* then applies one of two reductions:
+//!
+//! - **Foreground (write path) — MARGINAL bytes.** An object that already
+//!   exists — a committed CAS object, or one pending in the current batch
+//!   — costs **zero marginal payload bytes**; reusing it is the entire
+//!   point of the content-addressed store. Candidates carry only their own
+//!   NEW objects, and the foreground orders by marginal bytes so that
+//!   canonical reuse of a stored descriptor competes fairly with a fresh
+//!   encoding (Phase-8C: "duplicate chunks short-circuit ... marginally
+//!   cheapest (existing objects cost zero)").
+//! - **Background (optimizer) — FULL persisted bytes.** The background
+//!   must be able to REPLACE an incumbent with a denser representation,
+//!   so it orders by full persisted bytes: the incumbent's already-
+//!   existing objects must not make a denser replacement look expensive.
+//!   (Phase-9B: a chunk whose RAW object already exists would otherwise
+//!   look marginally free and block every re-encoding; the changelog
+//!   records the fix as "background full-byte candidate ordering".)
+//!
+//! The regime switch lives in the optimizer (`src/optimizer/search.rs`,
+//! `candidate_metric`); this module defines the full accounting both
+//! regimes build on.
+//!
+//! # PERSISTENT AUTHORITY
+//!
+//! Descriptors are persisted; cost estimates are not. The estimate is
+//! deterministic, so it can be recomputed later; a background pass may
+//! rewrite a representation only when
+//! `hash(materialize(old)) == hash(materialize(new))` (ADR-0010 rules).
+//!
+//! # CORRECTNESS INVARIANTS
+//!
+//! The [`ByteSplit`] categories are disjoint and derived so they sum
+//! exactly to the persisted total with no double counting:
+//!
+//! ```text
+//! persisted = descriptor + model + residual + seed + reference
+//!           + configurational + integrity
+//!           = encoded_size + model + integrity
+//! ```
+//!
+//! `persisted_bytes()` excludes GC overhead; `persisted_with_gc()`
+//! includes it — callers must state which they mean.
+//!
+//! # CONCURRENCY
+//!
+//! Pure deterministic functions; no locks, no shared state; safe to call
+//! from any thread (parallel candidate search, Phase-10C).
+//!
+//! # RESOURCE BOUNDS
+//!
+//! `total()` accumulates in `u128`; with `len ≤ 256 KiB`, `λ ≤ 8192`, and
+//! the fixed cycle tables, every term is far below overflow — no
+//! attacker-controlled size reaches an unchecked multiplication here.
+//!
+//! # PERFORMANCE
+//!
+//! The cycle tables are fixed heuristics (word-at-a-time `x/8` copies,
+//! per-byte decode multipliers) so selection is reproducible across
+//! machines. Per-component ablation reports keep `J` auditable
+//! (`docs/performance/methodology.md`).
+//!
+//! # FAILURE MODES
+//!
+//! None fallible: all accumulation is saturating (`u128` for `total()`).
+//! A policy or split that would mis-account shows up as a violated
+//! accounting invariant (tested), not a runtime error.
+//!
+//! # HISTORY / EVIDENCE
+//!
+//! - ADR-0010 (the objective, the λ tables, the persist-the-descriptor
+//!   rule).
+//! - `docs/theory/information-accounting.md` §1 (the per-component
+//!   categories and the no-double-counting rule).
+//! - Phase-8C (marginal reuse in the foreground) and Phase-9B
+//!   (full-byte background ordering) — the two regimes above.
+//! - Phase-9G0 (model-cost-aware stream selection): the stream-level
+//!   RAW/rANS gate includes persisted model bytes, so a model that cannot
+//!   pay for itself is not persisted — model bytes are real persisted
+//!   state and are counted here.
 
 #![forbid(unsafe_code)]
 
@@ -45,18 +161,25 @@ pub struct CostBreakdown {
     pub integrity_bytes: u64,
     /// Attributable GC overhead estimate (amortized).
     pub gc_overhead_bytes: u64,
-    /// Estimated read cycles (deterministic table).
+    /// Estimated read cycles (deterministic table; unit operations —
+    /// `λ_read` is applied per 1024).
     pub read_cycles: u64,
-    /// Estimated write cycles (deterministic table).
+    /// Estimated write cycles (deterministic table; unit operations —
+    /// `λ_write` is applied per 1024).
     pub write_cycles: u64,
-    /// Dependent physical object reads to materialize.
+    /// Dependent physical object reads to materialize (count).
     pub dependent_reads: u32,
-    /// Reference depth (base chains / exact-ref chains).
+    /// Reference depth in chain levels (count; `λ_depth` per level).
     pub depth: u8,
 }
 
 impl CostBreakdown {
     /// Total persisted bytes for this extent (excludes GC overhead).
+    ///
+    /// Units: bytes. The sum of all per-category byte counts (descriptor /
+    /// model / residual / seed / reference / configurational / integrity);
+    /// GC overhead is attributable at the FS level and excluded here (see
+    /// [`Self::persisted_with_gc`]).
     pub const fn persisted_bytes(&self) -> u64 {
         self.descriptor_bytes
             .saturating_add(self.model_bytes)
@@ -69,12 +192,18 @@ impl CostBreakdown {
     }
 
     /// Total persisted bytes including attributable GC overhead.
+    ///
+    /// Units: bytes; `persisted_bytes() + gc_overhead_bytes`. This is the
+    /// byte term the background optimizer orders by (full persisted
+    /// bytes — see the module doc's MARGINAL vs FULL section).
     pub const fn persisted_with_gc(&self) -> u64 {
         self.persisted_bytes()
             .saturating_add(self.gc_overhead_bytes)
     }
 
-    /// The objective `J` under a policy.
+    /// The objective `J` under a policy (u128, mixed units resolved by the
+    /// λ weights: bytes + weighted cycles + weighted counts; see the module
+    /// doc for the units of every term).
     pub fn total(&self, policy: &Policy) -> u128 {
         let persisted = self.persisted_with_gc() as u128;
         let read = ((policy.lambda_read as u128) * (self.read_cycles as u128)) / 1024;
@@ -90,30 +219,38 @@ impl CostBreakdown {
 }
 
 /// Policy mode names (ADR-0010).
+///
+/// Each mode is a point in the bytes-vs-materialization-cost trade:
+/// `capacity` minimizes persisted bytes, `latency` punishes expensive
+/// reads, `archive` accepts slow materialization for density, `ram`
+/// treats regeneration cost as dominant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum PolicyMode {
-    /// Physical bytes dominate.
+    /// Physical bytes dominate (minimal λ).
     Capacity,
     /// Conservative defaults.
     Balanced,
-    /// Cheap materialization dominates.
+    /// Cheap materialization dominates: reads are expensive (large
+    /// `λ_read`), so self-contained families win even at higher bytes.
     Latency,
-    /// Deep density; background optimization heavy.
+    /// Deep density; background optimization heavy (minimal λ).
     Archive,
-    /// RAM-mode: regeneration cost dominates.
+    /// RAM-mode: regeneration cost dominates (large read/write λ).
     Ram,
 }
 
 /// The λ table for one policy mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Policy {
-    /// Weight per 1024 read cycles.
+    /// Weight per 1024 read cycles (scalar; the code divides the product
+    /// by 1024).
     pub lambda_read: u64,
-    /// Weight per 1024 write cycles.
+    /// Weight per 1024 write cycles (scalar; the code divides the product
+    /// by 1024).
     pub lambda_write: u64,
-    /// Weight per dependent physical read.
+    /// Weight per dependent physical read (scalar per count).
     pub lambda_io: u64,
-    /// Weight per unit of reference depth.
+    /// Weight per unit of reference depth (scalar per chain level).
     pub lambda_depth: u64,
 }
 
@@ -302,6 +439,17 @@ pub struct ByteSplit {
 /// Build a [`CostBreakdown`] from a representation and its byte split.
 /// `model_bytes` is the encoded size of any rANS model object attributable
 /// to this extent.
+///
+/// `descriptor_bytes` is derived as `encoded_size` minus the split
+/// categories, so the categories sum exactly to the persisted total with
+/// no double counting. `object_payload_bytes` starts at zero — the
+/// candidate pipeline adds the candidate's own Data objects via
+/// `account_objects` (candidate.rs); `model_bytes` is passed explicitly
+/// by encoders whose model object is new (e.g. SPARSE_BLOCK64). Amortized
+/// models (Phase-9G) are charged once per unique payload at the cohort
+/// level by the background pass, not per extent. `integrity_bytes` is the
+/// constant 4-byte amortized CRC32C per record
+/// (`docs/theory/information-accounting.md` §1).
 pub fn estimate(rep: &Representation, split: &ByteSplit, model_bytes: u64) -> CostBreakdown {
     let encoded = rep.encoded_size();
     let descriptor = encoded

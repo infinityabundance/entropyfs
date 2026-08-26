@@ -1,5 +1,78 @@
 //! Periodic structure encoder: `input[i] == input[i % p]` for a small
 //! period `p` (pattern repeated, possibly truncated — tail handled).
+//!
+//! # PURPOSE
+//!
+//! The PERIODIC representation family (tag `0x09`): a chunk that is a
+//! pattern repeated `count` times plus a short tail. `len = p·count + tail`;
+//! FILL is the `p = 1` special case (`docs/theory/
+//! configurational-storage.md` §5).
+//!
+//! # BOUNDARY
+//!
+//! A pure candidate encoder: it searches for a period and proposes the
+//! smallest one it can verify; it never touches the store and never
+//! decides whether the family wins (ADR-0010). FILL (period 1) is
+//! subsumed by the same machinery but constructed separately by
+//! `fill_candidate` (cheaper), so this encoder starts at period 2.
+//!
+//! # MODEL
+//!
+//! `chunk = pattern^count ‖ tail` with `count = n/p` and
+//! `tail = input[p·count..]` (`tail.len() < p`). The descriptor persists
+//! `(period, pattern, count, tail, len)`; materialization repeats the
+//! pattern and appends the tail.
+//!
+//! # PERSISTENT AUTHORITY
+//!
+//! Yes: the descriptor is persisted verbatim when this candidate wins
+//! (`docs/format/ondisk-v1.md`, tag `0x09`: `period u32, pattern (period
+//! bytes), count u32, tail_len u32, tail`).
+//!
+//! # CORRECTNESS INVARIANTS
+//!
+//! - the chosen period reproduces the chunk exactly — verified by the
+//!   full compare `input[p..] == input[..n-p]` (equivalently
+//!   `input[i] == input[i-p]` for all `i ≥ p`);
+//! - the smallest valid period is selected: the ascending search returns
+//!   on the first hit (pinned by `smallest_period_wins`);
+//! - `len == p·count + tail.len()` and `tail.len() < p`;
+//! - materialization is byte-exact — enforced by the §32 candidate
+//!   validation gate.
+//!
+//! # CONCURRENCY
+//!
+//! Stateless encoder; safe to call from any thread (parallel chunk
+//! preparation, Phase-10C).
+//!
+//! # RESOURCE BOUNDS
+//!
+//! `n ≥ 4`; `p ≤ min(max_period, n/2)` (a period must repeat at least
+//! twice). The search budget [`PERIODIC_WORK_CAP`] — 8 MiB of total
+//! byte-comparisons — bounds foreground CPU for any chunk size; it is the
+//! encode-side analog of the decode-side `max_decode_work` budget
+//! (`docs/security/resource-bounds.md`). Worst case is `O(n·max_p)`
+//! comparisons, but the work cap cuts it off well before that.
+//!
+//! # PERFORMANCE
+//!
+//! An O(1) first-boundary filter (`input[p] == input[0]`) skips a full
+//! compare for most candidate periods; the full compare runs only on a
+//! boundary match, and the first (smallest) hit returns immediately. The
+//! honest `ByteSplit` (tail bytes as residual payload; pattern/count stay
+//! in the descriptor) means the cost function sees exactly what would be
+//! persisted.
+//!
+//! # FAILURE MODES
+//!
+//! Work-cap exhaustion or a failed `Representation::validate` yields an
+//! empty candidate list — the family skips itself and RAW wins. Nothing
+//! here panics; a wrong candidate would be caught by the §32 gate.
+//!
+//! # HISTORY / EVIDENCE
+//!
+//! Phase-1 family (`docs/theory/configurational-storage.md` §5); the
+//! smallest-period canonical form is pinned by `smallest_period_wins`.
 
 #![forbid(unsafe_code)]
 
@@ -15,6 +88,9 @@ pub struct PeriodicEncoder;
 
 /// Search budget: total byte-comparisons before giving up on finding a
 /// period. Bounded foreground behavior (`docs/security/resource-bounds.md`).
+///
+/// This is an encode-side CPU bound: the write path must never spend
+/// unbounded time hunting for structure, regardless of chunk size.
 const PERIODIC_WORK_CAP: usize = 8 * 1024 * 1024;
 
 impl Encoder for PeriodicEncoder {
@@ -23,6 +99,11 @@ impl Encoder for PeriodicEncoder {
     }
 
     fn encode(&self, input: &[u8], ctx: &CandidateContext<'_>) -> Vec<Candidate> {
+        // -------------------------------------------------------------------
+        // Stage 1: size and period-range gates. `n < 4` has no room for a
+        // period-2 repetition plus tail; `max_p ≤ n/2` guarantees a period
+        // repeats at least twice.
+        // -------------------------------------------------------------------
         let n = input.len();
         if n < 4 {
             return Vec::new();
@@ -31,6 +112,11 @@ impl Encoder for PeriodicEncoder {
         if max_p < 2 {
             return Vec::new();
         }
+        // -------------------------------------------------------------------
+        // Stage 2: ascending period search. The first hit is the smallest
+        // period — the canonical (and cheapest) encoding. Every byte
+        // comparison is counted against the work cap.
+        // -------------------------------------------------------------------
         let mut work: usize = 0;
         for p in 2..=max_p {
             // O(1) filter: the first repeat boundary must match.
@@ -41,6 +127,10 @@ impl Encoder for PeriodicEncoder {
                 }
                 continue;
             }
+            // -------------------------------------------------------------------
+            // Stage 3: full verification and descriptor construction on the
+            // first (smallest) valid period.
+            // -------------------------------------------------------------------
             // Full check: input[p..] == input[..n-p] (equivalently
             // input[i] == input[i-p] for all i >= p).
             work += n - p;
@@ -61,6 +151,11 @@ impl Encoder for PeriodicEncoder {
                 if rep.validate(ctx.limits).is_err() {
                     return Vec::new();
                 }
+                // -------------------------------------------------------------------
+                // Stage 4: honest accounting and candidate — the tail bytes
+                // are residual payload; pattern/count stay in the
+                // descriptor. The cost function decides from here.
+                // -------------------------------------------------------------------
                 let split = ByteSplit {
                     residual: tail.len() as u64,
                     ..Default::default()
@@ -74,6 +169,7 @@ impl Encoder for PeriodicEncoder {
                 }];
             }
         }
+        // No period ≤ max_p reproduces the chunk — the family does not apply.
         Vec::new()
     }
 }

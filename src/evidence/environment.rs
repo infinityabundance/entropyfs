@@ -5,6 +5,59 @@
 //! memory, storage device, cache state, and the exact command line. JSON via
 //! serde — evidence artifacts are human-readable; the permanent on-disk
 //! format is explicit byte codecs elsewhere.
+//!
+//! # PURPOSE
+//!
+//! Make every measured claim re-runnable in context: a number without
+//! its environment is not evidence (methodology §1 — if any context
+//! field is missing, the run is exploratory, not admissible). This
+//! module also provides the statistical helpers the campaign uses for
+//! its percentiles and the device-level write/read deltas that bound a
+//! campaign window.
+//!
+//! # BOUNDARY
+//!
+//! KNOWS: `/proc` and `/sys` (cpuinfo, meminfo, diskstats, hostname,
+//! governor), `/proc/mounts` (device + fstype for the store dir), git
+//! and the process argv, `Cargo.lock`. NEVER KNOWS: the store, the
+//! corpora, or any filesystem format — it captures context and computes
+//! statistics, nothing else.
+//!
+//! # MODEL
+//!
+//! One [`Environment`] snapshot per capture, serialized as pretty JSON.
+//! Capture is best-effort by construction: every source is read with
+//! fallbacks (empty string, 0, "unknown") so a missing file can never
+//! fail the campaign — but the field is then visibly empty rather than
+//! silently wrong, which is what makes an incomplete context
+//! detectable (and therefore non-admissible). Device accounting is
+//! sampled before and after a window and differenced (saturating) into
+//! a [`DiskDelta`].
+//!
+//! # CORRECTNESS INVARIANTS
+//!
+//! - Units are explicit and consistent: memory in KiB, CPU frequency in
+//!   MHz, disk sectors (× 512 = bytes via `DiskDelta::written_bytes` /
+//!   `read_bytes`), latencies in seconds (converted to µs only at
+//!   report time), time as unix seconds.
+//! - Percentiles are nearest-rank over a SORTED sample (`percentile`
+//!   documents its input contract); `summary` sorts and is the only
+//!   public aggregator.
+//! - `mount_of` picks the longest matching mount-point prefix, so a
+//!   nested mount resolves to the device that actually backs the path.
+//! - `current_uid` avoids the `rustix::process` feature by parsing
+//!   `/proc/self/status` — a deliberate dependency-boundary choice.
+//!
+//! # RESOURCE BOUNDS
+//!
+//! Bounded by the small proc/sys files read; `cpu_flags` is the only
+//! potentially long field (one line of `/proc/cpuinfo`).
+//!
+//! # HISTORY / EVIDENCE
+//!
+//! The field set implements `docs/performance/methodology.md` §1
+//! verbatim; every sealed campaign archives its `environment.json`
+//! under `evidence/performance/campaign-<ts>-<rev>/`.
 
 #![forbid(unsafe_code)]
 

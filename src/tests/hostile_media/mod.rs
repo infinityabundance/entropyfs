@@ -1,9 +1,13 @@
 //! Phase-11A hostile-media court (see `docs/security/hostile-media-court.md`):
-//! the persistent-data adversarial suite.
+//! the persistent-data adversarial suite. This module is the **adversarial
+//! test oracle**: it proves the bounded-valid-or-typed-rejection contract
+//! over untrusted backing bytes.
+//!
+//! # Purpose
 //!
 //! The backing store is treated as **untrusted/corrupt input** (the threat
 //! model's first line). This court attacks the one dimension the valid-path
-//! suite barely exercises: input EntropyFS did not produce itself. The
+//! suite barely exercised: input EntropyFS did not produce itself. The
 //! oracle is simple and uniform:
 //!
 //! ```text
@@ -22,7 +26,24 @@
 //! silent wrong bytes
 //! ```
 //!
-//! Three courts run here:
+//! # Boundary
+//!
+//! What the courts MAY do: feed any bounded byte string to the persistent
+//! decoders, the materializer, and the store's open/fsck/read/replay
+//! paths; mutate record/superblock/descriptor/tree/model/inode bytes; and
+//! recompute envelope CRCs and content ids to force hostile payloads
+//! through the deep parsers (`store_court`). What the courts may NEVER
+//! assume: that arbitrary hostile data must be rejected (some random
+//! inputs legitimately describe valid content — the default outcome class
+//! is `Either`); that a mutated store image is self-consistent (the
+//! authenticated-bytes check runs through the OPENED store's own view,
+//! not fsck's separate root selection); and that any input dimension is
+//! unbounded — every strategy, exhibit, and store image is size-capped so
+//! the court itself can never become an attacker's tool.
+//!
+//! # Model
+//!
+//! Three layers, each with its own court:
 //! - `descriptor_court`: every bounded byte string through the descriptor
 //!   codec; decode-OK implies structural validation OK and a byte-exact
 //!   canonical re-encode (ADR-0016 "typed error, never panic").
@@ -37,6 +58,35 @@
 //! The corpus (`corpus`) is the permanent hand-crafted exhibit set: one
 //! canonical descriptor of every representation family, plus adversarial
 //! exhibits for every boundary the format defines.
+//!
+//! # Resource bounds
+//!
+//! Every fuzz dimension is bounded. Fuzz inputs cap at
+//! `MAX_FUZZ_INPUT` bytes with 0..=8 mutation ops per descriptor seed;
+//! graph specs cap at `GRAPH_MAX_TABLES` tables with input-bounded
+//! allocations; the store images are ~1 MiB segments; and every decode
+//! runs under `Limits` (both the tight set and the real defaults), so
+//! allocation size, decode work, reference depth, fanout, and model size
+//! are enforced before the allocation or loop they guard.
+//!
+//! # Failure modes
+//!
+//! Expected: any typed error from the decoders, the materializer, open,
+//! or fsck — that is the oracle's admissible rejection arm. What must
+//! NEVER happen: panic, OOM, infinite loop, unbounded recursion,
+//! unbounded CPU, or bytes inconsistent with the descriptor's
+//! authenticated content identity. A court `Err(description)` names the
+//! violated invariant and the courts turn it into a test failure.
+//!
+//! # History / evidence
+//!
+//! Phase 11A (v0.7.0) introduced this suite after the security
+//! documentation claimed fuzz assurance the repository did not implement
+//! (CHANGELOG.md 11A entry). Sealed evidence:
+//! `evidence/hostile-media/court-1787750784-a2983dc/` (revision
+//! `a2983dc`): 200k descriptor cases + 200k graph cases + 30k
+//! store-mutator cases per proptest target in release mode, plus the
+//! full 428-test lib suite, all green.
 
 #![forbid(unsafe_code)]
 
@@ -57,6 +107,19 @@ use crate::core::representation::{RansCodec, Representation, UniverseId};
 /// must honor these, not merely the defaults (a hostile mount could
 /// configure small limits, and a parser that only behaves at default sizes
 /// is a bomb waiting for a constrained deployment).
+///
+/// Every value is at or below its default (units: bytes for sizes,
+/// count for fanout, u8 steps for depth):
+///
+/// - `max_chunk_size`: 16 KiB logical chunk cap (default 256 KiB);
+/// - `max_descriptor_bytes`: 512 bytes encoded-descriptor cap (default 8192);
+/// - `max_reference_depth`: 2 (default 4);
+/// - `max_decode_work`: 1 MiB operation budget (default 64 MiB);
+/// - `max_alloc_bytes`: 64 KiB single allocation (default 1 MiB);
+/// - `max_fanout`: 64 (default 4096);
+/// - `max_model_bytes`: 512 bytes (default 2048);
+/// - `max_inline_bytes`: 256 bytes (default 4096);
+/// - `max_period`: 64 (default 1024); `max_palette`: 4 (default 16).
 pub fn tight_limits() -> Limits {
     Limits {
         max_chunk_size: 16 * 1024,
@@ -73,14 +136,23 @@ pub fn tight_limits() -> Limits {
     }
 }
 
-/// The two limit sets every court runs under (tight + the real defaults).
+/// The two limit sets every court runs under: `"tight"` (above) and
+/// `"default"` (`Limits::default()` — the real production values). Every
+/// fuzz target and exhibit runs BOTH sets: a parser that only behaves at
+/// default sizes is a bomb waiting for a constrained deployment.
 pub const LIMIT_SETS: [&str; 2] = ["tight", "default"];
 
 /// Expected outcome class of an exhibit. The court never asserts that
 /// arbitrary data must be rejected — some random inputs legitimately
 /// describe valid content — so `Either` (bounded-valid or typed-reject) is
 /// the default oracle; `MustAccept`/`MustReject` are asserted only where
-/// the outcome is fully determined by the format.
+/// the outcome is fully determined by the format (e.g. a tag byte that
+/// names no representation, or a length field over the cap).
+///
+/// Assertion semantics: `MustReject` is `decode`/`materialize`/`open`
+/// returning a typed `Err`; `MustAccept` is the full
+/// `run_descriptor_oracle`/`run_graph_oracle`/`run_store_oracle` contract
+/// passing; `Either` accepts either arm of the oracle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expect {
     /// decode+validate must succeed (and materialize boundedly for graph
@@ -95,14 +167,22 @@ pub enum Expect {
 /// Which court consumes an exhibit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExhibitKind {
-    /// Bytes fed to `format::descriptor::decode`.
+    /// Bytes fed to `format::descriptor::decode` (the descriptor codec
+    /// court).
     Descriptor,
     /// Bytes parsed as a graph spec (descriptor table + object table +
-    /// entry id) and materialized.
+    /// entry id) by `parse_graph_spec` and materialized (the graph
+    /// court).
     Graph,
 }
 
 /// One named adversarial exhibit: bytes plus the expected outcome class.
+///
+/// Invariants: `name` is stable and doubles as the evidence receipt key
+/// (renaming an exhibit invalidates its receipt); `bytes` are
+/// deterministic — built from fixed seeds, never the wall clock — so an
+/// exhibit is reproducible across runs; `expect` is one of the three
+/// oracle classes; `kind` selects the consuming court.
 #[derive(Debug, Clone)]
 pub struct Exhibit {
     /// Stable exhibit name (also the evidence receipt key).
@@ -134,11 +214,20 @@ impl Exhibit {
 /// Maximum tables the lenient parser accepts (input-bounded; a u8 count
 /// field can claim up to 255, but each entry costs ≥33 bytes and the court
 /// bounds its inputs, so 32 is generous and keeps the resolver tiny).
+///
+/// The cap also bounds the parser's loop count and the resolver's
+/// `HashMap` sizes: a hostile spec can never grow either beyond 32
+/// entries, so the graph court's memory is input-bounded.
 pub const GRAPH_MAX_TABLES: usize = 32;
 
 /// A fuzz-defined hostile graph: a descriptor table (content id →
 /// descriptor bytes), an object table (content id → payload bytes), and
 /// the entry descriptor id to materialize.
+///
+/// Invariants: every table is bounded by `GRAPH_MAX_TABLES` entries (the
+/// parser enforces the cap; builders clamp); ids are opaque 32-byte
+/// content ids; the entry id may be absent from the tables — a typed
+/// `MissingChunk` rejection is then the admissible oracle outcome.
 #[derive(Debug, Clone)]
 pub struct GraphSpec {
     /// Descriptor table: id → descriptor bytes.
@@ -181,6 +270,11 @@ impl GraphSpec {
 ///   per obj:  [u8;32] id, u32 LE olen, [olen] object bytes
 /// [u8;32] entry id
 /// ```
+///
+/// This flat form is the fuzz surface: `parse_graph_spec` accepts ANY
+/// byte string, so the courts can feed raw hostile bytes directly. The
+/// counts are clamped to `GRAPH_MAX_TABLES`, so a spec can never exceed
+/// the parser's caps (the round trip is safe by construction).
 pub fn encode_graph_spec(spec: &GraphSpec) -> Vec<u8> {
     let mut out = Vec::new();
     out.push(spec.descs.len().min(GRAPH_MAX_TABLES) as u8);
@@ -201,9 +295,12 @@ pub fn encode_graph_spec(spec: &GraphSpec) -> Vec<u8> {
 
 /// Lenient graph-spec parser: any byte string is a valid spec. Truncation
 /// mid-structure stops parsing (what was read is used); a missing entry id
-/// falls back to a content-derived id (almost surely absent → a typed
-/// `MissingChunk`). Never panics; allocations are bounded by the input
-/// size and the table caps.
+/// falls back to a content-derived id (`ChunkId::of(input)` — almost
+/// surely absent → a typed `MissingChunk`).
+///
+/// Invariant: never panics (the only `expect`s are fixed-size slice
+/// conversions that cannot fail); every allocation is bounded by the
+/// input size and the `GRAPH_MAX_TABLES` caps.
 pub fn parse_graph_spec(input: &[u8]) -> GraphSpec {
     let mut pos = 0usize;
     let mut take = |n: usize| -> Option<&[u8]> {
@@ -258,6 +355,13 @@ pub fn parse_graph_spec(input: &[u8]) -> GraphSpec {
 /// `DecoderContext` semantics exactly (fetch_descriptor = decode-with-
 /// limits, decode_rans = decode_model + tag check + decode_stream), so the
 /// materializer exercises the same code paths a hostile store would.
+///
+/// Role: the graph court's stand-in for a hostile store's chunk index —
+/// the same interface a real store implements for the materializer.
+/// Invariants: `fetch_descriptor` decodes hostile bytes through the real
+/// codec WITH the limits; `decode_rans` decodes the model and checks the
+/// tag before decoding the stream; every lookup is a bounded decode or a
+/// typed `MissingObject` / `MissingChunk`.
 #[derive(Debug, Clone)]
 pub struct HostileResolver {
     /// Content-addressed objects (payloads, rANS streams, models).
@@ -341,6 +445,11 @@ impl DecoderContext for HostileResolver {
 /// declared limits) or a typed rejection — never a panic, never an
 /// unbounded allocation (every allocation in the materializer is checked
 /// against `max_alloc_bytes`/`max_chunk_size` before it happens).
+///
+/// Role: the oracle's outcome class for graph exhibits. `Ok` carries the
+/// exact materialized length in bytes (the output must equal the
+/// descriptor's declared length — no silent wrong bytes); `Rejected`
+/// carries the typed error description.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GraphOutcome {
     /// Materialized successfully within the declared bounds.
@@ -351,6 +460,17 @@ pub enum GraphOutcome {
 
 /// Run the graph oracle over a spec; returns an `Err` describing any
 /// invariant violation (the court turns that into a failure).
+///
+/// The oracle contract asserted here (bounded-valid OR typed rejection):
+/// - entry fetch: a typed `Rejected` is admissible (missing chunk,
+///   invalid descriptor bytes);
+/// - the entry's declared length must be within `max_chunk_size` AND
+///   `max_alloc_bytes` — asserted explicitly BEFORE materialization so
+///   the declared length can never drive an over-budget allocation;
+/// - materialization: `Ok` output must equal the declared length exactly
+///   (never silent wrong bytes); `Err` becomes a typed `Rejected`;
+/// - never panic, never an unbounded allocation (the materializer checks
+///   every allocation against the limits before it happens).
 pub fn run_graph_oracle(spec: &GraphSpec, limits: &Limits) -> Result<GraphOutcome, String> {
     let resolver = HostileResolver::from_spec(spec, limits);
     let entry = match resolver.fetch_descriptor(&spec.entry) {
@@ -392,6 +512,10 @@ pub fn run_graph_oracle(spec: &GraphSpec, limits: &Limits) -> Result<GraphOutcom
 
 /// Deterministic pseudo-random bytes (SplitMix64). Shared by the courts
 /// for reproducible seeded mutation.
+///
+/// Unit: `n` output bytes. Deterministic for a given `(n, seed)` pair
+/// (no wall clock, no RNG state), so every exhibit and every mutation
+/// recipe is reproducible across runs, machines, and architectures.
 pub fn seeded_bytes(n: usize, mut seed: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(n);
     while out.len() < n {

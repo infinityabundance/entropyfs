@@ -5,6 +5,92 @@
 //! cost and λ_depth for space. Flattening materializes the final bytes and
 //! re-encodes them at depth 0. The background pass calls this before the
 //! guided search; the cheaper valid candidate wins.
+//!
+//! PURPOSE
+//!     Measure and bound the reference depth of descriptors, and flatten
+//!     chains that have grown past `REBASE_DEPTH_THRESHOLD` back to
+//!     depth 0. Depth is the currency of bounded random access: every
+//!     reference hop costs a chunk-index lookup at decode time, and the
+//!     format caps total depth at `limits.max_reference_depth` (default
+//!     4).
+//!
+//! BOUNDARY
+//!     A pure read-side helper over the committed store's chunk index: it
+//!     decodes descriptors and materializes one chunk, but never commits
+//!     (the caller in `optimizer::background` owns the commit path and
+//!     the CAS gate) and knows nothing about the epoch or the write path.
+//!
+//! MODEL
+//!     The reference graph is a DAG, not a chain: SEQUENCE_SHARED_DICT
+//!     points at two dictionaries (file + shared) that may converge on a
+//!     common chunk, and EXACT_REF / BASE_RESIDUAL / SEQUENCE_DICT point
+//!     at one. Depth is therefore the LONGEST-PATH length through the DAG
+//!     (the deepest branch), never the visited-node depth.
+//!
+//! PERSISTENT AUTHORITY
+//!     None directly — no writes happen here. But the depth reported here
+//!     gates which descriptors the background passes commit: a chain
+//!     deeper than the decode cap is undecodable (`DepthExceeded`), and
+//!     depth is resolved through the chunk index at materialize time, so
+//!     a chunk-index replacement can deepen an already-committed chain
+//!     (Phase-10E).
+//!
+//! CORRECTNESS INVARIANTS
+//!     - `chain_depth` reports the longest path through the DAG: a node
+//!       first reached shallowly is re-explored when a deeper path
+//!       reaches it, or the reported depth undercounts and the depth gate
+//!       admits an undecodable chain;
+//!     - `chain_depth_uncapped` must DETECT chains above the cap, so it
+//!       is not capped by `max_reference_depth`; only a hard sanity bound
+//!       (`MAX_CHAIN_WALK` = 64) guards a corrupt chain from looping;
+//!     - `chain_contains` rejects a candidate base whose chain contains
+//!       the target's own content id (self-reference is undecodable:
+//!       materialization would loop until the depth cap);
+//!     - `flatten_if_deep` never returns a corrupting candidate: the
+//!       depth-0 re-encode is materialized back through a resolver that
+//!       sees the candidate's own staged objects and compared byte-exact.
+//!
+//! CONCURRENCY
+//!     Read-only; no locks. The chunk index may change between the walk
+//!     and the caller's commit — the caller re-checks with the CAS gate.
+//!
+//! DURABILITY
+//!     None: this module never persists anything.
+//!
+//! RESOURCE BOUNDS
+//!     `chain_depth` walks are capped by `limits.max_reference_depth`
+//!     (the decode cap) plus a per-node visited set; the uncapped walk is
+//!     bounded by `MAX_CHAIN_WALK`. Each step decodes at most one
+//!     descriptor and follows ≤ 2 children (SEQUENCE_SHARED_DICT), so a
+//!     walk is O(cap · branching), trivially bounded. `flatten_if_deep`
+//!     re-encodes one chunk (≤ `chunk_class` bytes).
+//!
+//! PERFORMANCE
+//!     Depth is the decode-cost gate: flattening trades a few extra
+//!     persisted bytes (the depth-0 re-encode) for bounded random access.
+//!     `REBASE_DEPTH_THRESHOLD` = 2 flattens chains long before they
+//!     approach the decode cap, and the caller's strictly-cheaper gate
+//!     ensures flattening commits only when it also wins on bytes.
+//!
+//! FAILURE MODES
+//!     Corrupt descriptors in the walk are skipped (an undecodable chunk
+//!     contributes no children); missing index entries terminate a
+//!     branch. The one state that must never occur is a committed chain
+//!     past the decode cap — Phase-10E made unreadable files possible
+//!     before the deepest-path walk and the post-pass convergence sweep
+//!     fixed it.
+//!
+//! HISTORY / EVIDENCE
+//!     Phase-9B: flatten must resolve through the candidate's OWN staged
+//!     objects (materializing through the bare store failed on rANS/
+//!     sequence model and stream objects). Phase-9C:
+//!     SEQUENCE_SHARED_DICT branches the walk into two chains. Phase-10C:
+//!     parallel batch encoding defers chain resolution to the serial
+//!     assembly phase (`chain_depth_uncapped`). Phase-10E: deepest-path
+//!     walks through diamond-shaped DAGs + post-pass convergence sweep
+//!     (`Store::rebase_overdepth_extents`); pinned by
+//!     `chain_depth_reports_deepest_path_through_a_diamond` and the
+//!     hostile-media diamond court.
 
 #![forbid(unsafe_code)]
 
@@ -38,16 +124,43 @@ pub const fn depth_of(desc: &Representation) -> u8 {
 /// first reached via a shallow path must not block a deeper path through
 /// it, or the reported depth undercounts and the depth gate would admit a
 /// chain whose true length exceeds `max_reference_depth`.
+///
+/// WHY DEPTH IS LONGEST-PATH, NOT VISITED-NODE DEPTH (Phase-10E):
+///
+/// Phase-10E made the DAG case concrete on the real tree: when the dict
+/// chain and the shared chain of a SEQUENCE_SHARED_DICT converge on a
+/// common chunk, the reference graph is diamond-shaped, and a
+/// first-reached-wins visited set reports the SHALLOWER convergence
+/// depth. Meanwhile the chunk index resolves each reference at
+/// materialize time, so a background pass's index-entry replacement can
+/// push a previously-committed chain PAST the decode cap while the
+/// undercounting walk keeps admitting it — unreadable files became
+/// possible before the fix. The depth walks therefore follow the deepest
+/// branch through the diamond, and the background passes close with a
+/// post-pass convergence sweep (`Store::rebase_overdepth_extents`) that
+/// rebases any extent whose chain a chunk-index replacement pushed past
+/// the cap. Pinned by `chain_depth_reports_deepest_path_through_a_diamond`
+/// (optimizer tests) and the hostile-media diamond court.
 pub fn chain_depth(store: &Store, desc: &Representation) -> u8 {
     let limits = *store.limits();
     // Depth of one reference id from the chunk index (capped walk over
     // every branch; returns the deepest chain length).
+    //
+    // -----------------------------------------------------------------
+    // Stage 1: Seed the worklist with the reference id at depth 0 and an
+    // empty visited map (node -> deepest depth already explored from it).
+    // -----------------------------------------------------------------
     fn walk(store: &Store, limits: &crate::core::limits::Limits, id: ChunkId) -> u8 {
         let mut max_depth = 0u8;
         let mut stack: Vec<(ChunkId, u8)> = vec![(id, 0u8)];
         // Node -> deepest depth already explored from it. Re-explore when
         // the current path reaches it deeper than before; skip otherwise.
         let mut visited: std::collections::HashMap<ChunkId, u8> = std::collections::HashMap::new();
+        // -----------------------------------------------------------------
+        // Stage 2: Pop a node; prune when at the decode cap or when the
+        // node was already explored at ≥ this depth (a shallow first
+        // visit must never block a deeper path through the node).
+        // -----------------------------------------------------------------
         while let Some((cur, d)) = stack.pop() {
             if d >= limits.max_reference_depth {
                 continue;
@@ -58,6 +171,11 @@ pub fn chain_depth(store: &Store, desc: &Representation) -> u8 {
                     visited.insert(cur, d);
                 }
             }
+            // -----------------------------------------------------------------
+            // Stage 3: Decode the node's descriptor and push every
+            // referenced chunk one level deeper; `max_depth` tracks the
+            // deepest chain observed.
+            // -----------------------------------------------------------------
             let Some(desc_bytes) = store.chunk_descriptor(&cur).ok().flatten() else {
                 continue;
             };
@@ -131,6 +249,11 @@ pub fn chain_depth_uncapped(
 
     /// Depth of one reference id from the committed chunk index (uncapped
     /// walk over every branch; returns the deepest chain length).
+    ///
+    /// The same staged walk as `chain_depth` (seed, longest-path prune,
+    /// decode + descend), with one difference: Stage 2 prunes only at the
+    /// hard `MAX_CHAIN_WALK` bound, never at `max_reference_depth` — the
+    /// caller must be able to detect a chain that exceeds the decode cap.
     fn walk(store: &Store, id: ChunkId) -> u8 {
         let limits = *store.limits();
         let mut max_depth = 0u8;
@@ -268,6 +391,14 @@ pub fn chain_contains(
 /// depth 0 through the cheap unguided path. Returns the depth-0 update
 /// (byte-exact by construction of `encode_chunk`'s candidates and the
 /// materialize-and-compare gate here).
+///
+/// Units: `start` is the extent byte offset (the re-encode's write
+/// offset); `bytes` is the materialized logical content (the CAS ground
+/// truth); `cid` is `ChunkId::of(bytes)`. The return is `Ok(None)` when
+/// the chain is not deeper than `REBASE_DEPTH_THRESHOLD` or when the
+/// re-encode fails the byte-exact gate — never a corrupting candidate.
+/// `Err` is reserved for store-level failures (index/materialize errors
+/// on the incumbent itself).
 pub fn flatten_if_deep(
     store: &Store,
     start: u64,

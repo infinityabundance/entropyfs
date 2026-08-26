@@ -13,6 +13,124 @@
 //! winner is chosen by exact deterministic cost (ADR-0010). DSFB never
 //! decides bytes — it only orders the search and sizes the budget. A
 //! poorly predicted DSFB wastes CPU, never data.
+//!
+//! PURPOSE
+//!     Convert a target chunk (the logical truth that must be reproduced)
+//!     into the cheapest VALID representation for it, given the write
+//!     path's latency constraints or the background optimizer's full-search
+//!     latitude. Everything the store persists about a chunk's content
+//!     passes through here (the unguided `encode_chunk` gate shares the
+//!     same §32 validation, but every guided path is this module).
+//!
+//! BOUNDARY
+//!     The search reads the committed store (dedup lookups, base chunks,
+//!     validation materialization) and WRITES only performance-only DSFB
+//!     observer state. It never stages objects or appends records itself —
+//!     it returns an `ExtentUpdate` (descriptor + objects + content id)
+//!     that the caller (batch, optimizer pass, or worker task) commits.
+//!     It must never decide what a representation MEANS — that is
+//!     `core::representation` + `core::materialize`; DSFB's role is
+//!     strictly to order and budget the search.
+//!
+//! MODEL
+//!     A candidate plane, evaluated in a fixed priority order with an
+//!     early-exit gate: P2 exact dedup first (a hit is nearly free and
+//!     exact), then the always-on cheap families (ZERO/FILL, the
+//!     configurational families, rANS, sequence families, RAW), with the
+//!     DSFB plan deciding WHICH of the budgeted base/universe channels to
+//!     evaluate and in what order. Every candidate is materialized and
+//!     compared byte-exact (§32) before it can win; the cheapest VALID
+//!     candidate by the mode-appropriate metric is the outcome. Units:
+//!     candidate cost is measured in persisted bytes (marginal in the
+//!     foreground, full in the background — see [`candidate_metric`]).
+//!
+//! PERSISTENT AUTHORITY
+//!     Indirect and total: the winner's descriptor + objects ARE what gets
+//!     persisted for the chunk. Every committed representation must
+//!     therefore be decodable (the §32 validation gate), within the
+//!     format's structural limits (the encoders are `validate`-gated and
+//!     `descriptor::decode` re-validates on read), and byte-exact. DSFB
+//!     state itself is NEVER persisted: a filesystem image decodes
+//!     identically with all DSFB state deleted (the authority separation
+//!     in `docs/theory/dsfb-selection.md` §4).
+//!
+//! CORRECTNESS INVARIANTS
+//!     - the winner is byte-exact: `Materialize(winner) == target`,
+//!       verified by materializing through a resolver that sees the
+//!       candidate's own staged objects plus the committed store (and,
+//!       Phase-8C, the batch's pending descriptors/objects);
+//!     - RAW always exists and always validates (~1.0× persisted bytes —
+//!       the identity representation), so the search ALWAYS terminates
+//!       with a winner: `encode_guided` asserts "RAW must always work";
+//!     - reference cycles are impossible: a base/dictionary whose chain
+//!       contains the target's own content id is rejected
+//!       (`rebase::chain_contains`) before evaluation — two chunks
+//!       referencing each other would be undecodable;
+//!     - in-batch dictionary chains respect `max_reference_depth` (the
+//!       pending-depth accounting in `PendingBatch`);
+//!     - dedup accepts a hit only after materializing the existing chunk
+//!       and comparing exact bytes (a content-id match is not enough).
+//!
+//! CONCURRENCY
+//!     The search runs on the caller's thread: the Phase-10C parallel
+//!     chunk preparation (scoped threads per multi-chunk write), the
+//!     Phase-11C process-wide worker semaphore (which caps search/decode
+//!     threads at `available_parallelism()`), and the Phase-11E
+//!     persistent fair worker pool (task-level fairness; workers execute
+//!     typed `EncodeChunk` tasks that call into this module's public
+//!     entry points). The store reads are committed-state reads; the DSFB
+//!     observer and the perf registry are the only shared mutable state,
+//!     and both are internally synchronized. The epoch is never held here.
+//!
+//! DURABILITY
+//!     None: a successful `SearchOutcome` is an IN-MEMORY plan. The bytes
+//!     become durable only when the caller stages and commits the update
+//!     (the epoch/transaction layer's barrier). Nothing in this module
+//!     survives a crash.
+//!
+//! RESOURCE BOUNDS
+//!     The target is a chunk: ≤ `max_chunk_size` (enforced), normally
+//!     exactly `chunk_class`. The DSFB plan budget is bounded by
+//!     [`BUDGETED_CHANNELS`] (5); the always-on families are each bounded
+//!     by their encoders' own limits. Validation materializes at most the
+//!     candidate's declared size (≤ `max_chunk_size`). The background
+//!     deep matcher is chain-bounded (256) and the rebase chain walk is
+//!     depth-capped. No allocation here is attacker-controlled beyond
+//!     these; the write path feeds only real chunk bytes.
+//!
+//! PERFORMANCE
+//!     The Phase-10B foreground policy exists because the full search is
+//!     expensive: on incompressible data the always-on families measured
+//!     ~440 µs/chunk before RAW won (direct-store random writes 39.8 →
+//!     852 MiB/s raw-only vs full — evidence `8062f2d` / `d38f73f`).
+//!     Phase-10C parallelized preparation across chunks (3ca9d93 /
+//!     5a5f2f3). The 11D oracle decomposed the remaining `prepare` bucket
+//!     and found useful search CPU CONSTANT across writer counts
+//!     (9.8–10.0 s) — throughput is at the CPU floor; the 11E pool then
+//!     made the search task-level FAIR to buy tail latency without
+//!     changing the CPU floor (probe-sealed; `--worker-pool N` gates it).
+//!
+//! FAILURE MODES
+//!     `StoreError` from store reads; `Invariant("empty target")` /
+//!     `Invariant("target exceeds max chunk size")` for caller misuse;
+//!     `Invariant("no valid candidate")` if RAW ever fails to validate
+//!     (a store/encoder bug — RAW must always work). A candidate that
+//!     fails §32 validation is silently skipped (cheaper-but-invalid
+//!     candidates fall through to the next-cheapest valid one); that is
+//!     the designed behavior, not an error — the oversized-descriptor
+//!     regression test pins it.
+//!
+//! HISTORY / EVIDENCE
+//!     Phase-8 introduced the sequence families and the batch pending
+//!     state (8C). Phase-9B/9C added the dictionary families with the
+//!     depth caps and cycle checks; 9E the deep family. Phase-10B added
+//!     the foreground policy (the 10A millisecond map motivated it); 10C
+//!     parallelized preparation; 11C bounded total search threads with
+//!     the semaphore (the inline fallback was measured and rejected: ~5×
+//!     search CPU at 16 threads); 11D sealed the decision oracle; 11E
+//!     built and KEPT the fair worker pool. The Phase-6 cargo-build
+//!     SIGBUS investigation found the oversized-descriptor class that the
+//!     §32 validation gate prevents (regression-pinned in tests).
 
 #![forbid(unsafe_code)]
 
@@ -29,6 +147,22 @@ use crate::optimizer::policy::OptimizeOptions;
 use crate::store::{ExtentUpdate, Store, StoreError};
 
 /// How aggressively the search may spend (foreground stays cheap).
+///
+/// # What
+///
+/// The two execution contexts the search runs in: the write path
+/// (latency-conscious, family-gated by the Phase-10B foreground policy)
+/// and the background optimizer pass (full search, plan-ordered, with the
+/// DSFB plan's budget as the only gate).
+///
+/// # Why
+///
+/// The foreground/settled-state division of labor: a write-path chunk
+/// must be persisted quickly and cheaply (RAW or a cheap exact family is
+/// fine; the background optimizer may revisit it later), while the
+/// background pass has license to spend real CPU recovering density. The
+/// mode selects the cost METRIC too — marginal bytes in the foreground,
+/// full persisted bytes in the background (see [`candidate_metric`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchMode {
     /// Write path: dedup + structural + rANS + RAW + in-hand P0, plus at
@@ -71,6 +205,21 @@ pub struct GuidedContext<'a> {
 /// batch stages all its records in one transaction; the dedup lookup reads
 /// the committed chunk index, so without this view the batch's own chunks
 /// would never dedup against each other.
+///
+/// INVARIANTS:
+/// - first occurrence wins per content id: the persisted chunk-index
+///   entry is exactly that first update's descriptor, so a later
+///   duplicate reuses it (or aliases it) rather than replacing it;
+/// - EXACT_REF descriptors are NOT registered here: their content
+///   resolves through the committed index, and a self-referencing
+///   pending entry (cid → EXACT_REF(cid) in the pending table) would
+///   loop at §32 validation;
+/// - `objects` are staged payloads that are NOT yet in the committed
+///   object index — validation must resolve them here or a pending
+///   descriptor would fail to materialize until its op's append lands
+///   (the Phase-10G pending-object visibility fix);
+/// - `depths` let an in-batch SequenceDict chain inherit its dictionary's
+///   depth, keeping the whole chain within `max_reference_depth`.
 #[derive(Debug, Default, Clone)]
 pub struct PendingBatch {
     /// Content id → encoded descriptor of the FIRST occurrence of that
@@ -117,6 +266,13 @@ pub struct SearchOutcome {
 
 /// Channels whose evaluation is budgeted by the DSFB plan (the base and
 /// universe channels; dedup/structural/rANS/RAW are always evaluated).
+///
+/// # Why
+///
+/// These are the expensive channels: each needs a base chunk fetched and
+/// materialized (or a universe generated) before it can be evaluated, so
+/// their total count is what the DSFB plan budget bounds. The always-on
+/// families are cheap enough (or exact enough — RAW) to run unconditionally.
 pub const BUDGETED_CHANNELS: [Channel; 5] = [
     Channel::PrevVersion,
     Channel::Adjacent,
@@ -127,6 +283,14 @@ pub const BUDGETED_CHANNELS: [Channel; 5] = [
 
 /// Threshold above which a base channel is trusted enough to spend a
 /// foreground materialization on it.
+///
+/// # Why
+///
+/// Foreground latency: fetching + materializing a base chunk is the
+/// expensive part of a base channel, so the write path only pays for it
+/// when DSFB trust says the channel is likely to win (or the plan is
+/// Broad, or ranking is disabled for ablation — then the gate is bypassed
+/// so the ablation measures the channels themselves, not the gating).
 const FOREGROUND_BASE_TRUST: f64 = 0.5;
 
 /// Run the guided search for one chunk. `store` is used read-only for
@@ -135,12 +299,110 @@ const FOREGROUND_BASE_TRUST: f64 = 0.5;
 /// it decides how much search CPU this chunk deserves in the write path
 /// (the background optimizer always passes `ForegroundPolicy::full()`;
 /// the policy only gates Foreground mode).
+///
+/// # What
+///
+/// Produce the cheapest VALID `ExtentUpdate` for `ctx.target`: dedup
+/// first, then the always-on cheap families, then the DSFB-budgeted base/
+/// universe channels, with the §32 byte-exact validation gate and an
+/// exact deterministic cost pick (ADR-0010).
+///
+/// # Why
+///
+/// This is the write path's and the background optimizer's single search
+/// entry point — the place where a chunk's content becomes a persisted
+/// representation. Its two hard contracts are (1) the winner must
+/// actually materialize to the target bytes (never persist an undecodable
+/// or wrong descriptor) and (2) the search must always terminate with a
+/// winner (RAW always exists).
+///
+/// # Inputs and authority
+///
+/// - `store`: read-only committed-state access (dedup lookups, base
+///   chunk fetches, validation resolution) plus the two performance-only
+///   writers (DSFB observer, perf registry). Never the epoch.
+/// - `ctx`: the per-chunk search inputs (inode, offset, target bytes,
+///   the in-hand bases, the batch pending state, the mode).
+/// - `options`: the ablation authority — which families EXIST.
+/// - `fg`: the Phase-10B policy — how much CPU this chunk deserves NOW
+///   (Foreground mode only; Background passes `full()`).
+///
+/// # Algorithm (stages)
+///
+/// 1. Preflight: target/limits validation, chunk index and content id,
+///    DSFB chunk key, foreground family set.
+/// 2. P2 exact dedup (foreground only) — a verified byte-exact hit is
+///    the cheapest possible outcome.
+/// 3. Always-on structural candidates: ZERO/FILL.
+/// 4. Foreground P0 (prev-version) — its bytes are already in hand, so
+///    it is nearly free and a decisive win skips the expensive families.
+/// 5. Decisive-win early-exit gate (Phase 6) — checked after each cheap
+///    family group.
+/// 6. Configurational families (SPARSE/PALETTE/PERIODIC/SPARSE_BLOCK64).
+/// 7. rANS (P6), SequenceRans (E1), SequenceDeep (E4, background only),
+///    SequenceDict (E2), SequenceSharedDict (E3).
+/// 8. RAW — the always-valid identity floor (~1.0× persisted bytes).
+/// 9. DSFB-guided budgeted channels: the base/universe channels in plan
+///    order, each gated by trust/family-set/plan-budget.
+/// 10. §32 validation + cheapest-valid pick (marginal bytes foreground,
+///    full persisted bytes background).
+/// 11. DSFB observation (performance-only; never affects bytes).
+///
+/// # Invariants
+///
+/// Post: the returned `SearchOutcome.update` materializes byte-exact to
+/// `ctx.target` (validated inside `pick_best_valid`). RAW is always among
+/// the candidates, so `None` here is a store/encoder bug, not a search
+/// outcome — it becomes `Invariant("no valid candidate")`.
+///
+/// # Concurrency
+///
+/// Called from the caller's thread (Phase-10C scoped workers, Phase-11C
+/// semaphore-gated threads, or Phase-11E pool workers). Reads committed
+/// store state; writes only the internally-synchronized DSFB observer and
+/// perf registry. Never holds the epoch guard.
+///
+/// # Durability
+///
+/// None: the outcome is in-memory. Durability arrives with the caller's
+/// stage+commit.
+///
+/// # Resource bounds
+///
+/// Target ≤ `max_chunk_size` (enforced). Search CPU is bounded by the
+/// plan budget (≤ [`BUDGETED_CHANNELS`] channels) plus the always-on
+/// families; the Phase-10B policy and the plan gates hold the write path
+/// cheap; the total search/decode thread count is bounded process-wide
+/// (Phase-11C semaphore / Phase-11E pool).
+///
+/// # Failure behavior
+///
+/// `StoreError` from store reads; `Invariant` for caller misuse (empty
+/// target, oversized target) and for the impossible RAW failure. Invalid
+/// candidates are skipped, not errors.
+///
+/// # Evidence / rationale
+///
+/// ADR-0004 §14/§16 (search design), ADR-0010 (exact cost), Phase-10B
+/// (foreground policy, evidence `8062f2d`/`d38f73f`), Phase-11D oracle
+/// (search CPU constant across concurrency), Phase-11E pool (task-level
+/// fairness on top).
 pub fn encode_guided(
     store: &Store,
     ctx: &GuidedContext<'_>,
     options: OptimizeOptions,
     fg: crate::optimizer::foreground::ForegroundPolicy,
 ) -> Result<SearchOutcome, StoreError> {
+    // -------------------------------------------------------------------
+    // Stage 1: Preflight — target validation, chunk key, family set.
+    //
+    // The target is the logical truth the search must reproduce: it must
+    // be nonempty and within the chunk cap (both are caller-misuse
+    // invariants, not hostile input — the write path only feeds real
+    // chunk bytes). The chunk key (ino, index, cid) is the DSFB
+    // feature-state key; the Phase-10B probe then classifies the chunk
+    // (HIGH-entropy chunks skip the LZ/entropy families entirely).
+    // -------------------------------------------------------------------
     let limits = *store.limits();
     let policy = *store.policy();
     let chunk_class = limits.chunk_class;
@@ -170,7 +432,10 @@ pub fn encode_guided(
     let mut candidates: Vec<(Channel, Candidate)> = Vec::new();
     let mut bases_tried: Vec<(Channel, bool)> = Vec::new();
 
-    // --- P2: exact dedup, always first in the write path (§12). The chunk
+    // -------------------------------------------------------------------
+    // Stage 2: P2 exact dedup — always first in the write path (§12).
+    // -------------------------------------------------------------------
+    // The chunk
     // index (or the batch pending state) maps the content id to a
     // descriptor; a hit is accepted only after materializing the existing
     // chunk and comparing exact bytes. Two candidates are proposed for a
@@ -202,9 +467,14 @@ pub fn encode_guided(
         candidates.extend(dd.into_iter().map(|c| (Channel::SharedContent, c)));
     }
 
-    // --- Cheap structural families + rANS + RAW (always evaluated; they
-    // are the workhorses of the write path). ZERO/FILL count as
-    // configurational for ablation purposes.
+    // -------------------------------------------------------------------
+    // Stage 3: always-on structural candidates — ZERO/FILL.
+    //
+    // ZERO/FILL are the cheapest possible exact representations (a few
+    // descriptor bytes, no objects); they count as configurational for
+    // ablation purposes (attributed to the Raw channel here — the
+    // structural families are not DSFB channels).
+    // -------------------------------------------------------------------
     let base_ctx = CandidateContext {
         limits: &limits,
         policy: &policy,
@@ -223,9 +493,13 @@ pub fn encode_guided(
         });
     }
 
-    // P0 (previous version) is evaluated early in the foreground: its
-    // bytes are already in hand (the RMW read), so it is nearly free, and
-    // a decisive win lets the search skip the expensive families.
+    // -------------------------------------------------------------------
+    // Stage 4: foreground P0 (previous version).
+    //
+    // Evaluated early in the foreground: its bytes are already in hand
+    // (the RMW read), so it is nearly free, and a decisive win lets the
+    // search skip the expensive families.
+    // -------------------------------------------------------------------
     if ctx.mode == SearchMode::Foreground && options.allow_bases && fg_set.bases {
         if let Some(b) = &ctx.prev_version {
             if !crate::optimizer::rebase::chain_contains(store, b, &cid) {
@@ -252,8 +526,12 @@ pub fn encode_guided(
         }
     }
 
-    // Decisive-win early exit (Phase 6): if a cheap candidate already
-    // beats RAW by a large margin, the expensive families (rANS,
+    // -------------------------------------------------------------------
+    // Stage 5: decisive-win early-exit gate (Phase 6).
+    //
+    // The gate below is re-checked after each cheap family group: if a
+    // cheap candidate already beats RAW by a large margin, the expensive
+    // families (rANS,
     // configurational rank/unrank) cannot plausibly win — skip them and
     // keep the write path latency-conscious (§16). The metric is MARGINAL
     // bytes in the foreground (an object that already exists — committed
@@ -264,6 +542,7 @@ pub fn encode_guided(
     // persisted bytes and never short-circuits on a marginal-cheap
     // incumbent (Phase-9B: a chunk whose RAW object already exists would
     // otherwise look marginally free and block every re-encoding).
+    // -------------------------------------------------------------------
     let raw_bytes = ctx.target.len() as u64;
     let metric = |c: &Candidate| candidate_metric(c, store, ctx.pending, ctx.mode);
     let mut decisive = candidates
@@ -283,6 +562,12 @@ pub fn encode_guided(
         .perf()
         .record("probe_pre_rans_cands", candidates.len() as u64);
     if !decisive && options.allow_configurational && fg_set.configurational {
+        // -------------------------------------------------------------------
+        // Stage 6: configurational families — the rank/unrank structural
+        // encoders (SPARSE, PALETTE, PERIODIC, SPARSE_BLOCK64). These
+        // produce exact bytes from combinatorial ranks; each encoder is
+        // bounded by its own limits and `validate`-gated.
+        // -------------------------------------------------------------------
         store.perf().time("search_configurational", || {
             for enc in [
                 Box::new(crate::entropy::sparse::SparseEncoder) as Box<dyn Encoder>,
@@ -305,6 +590,15 @@ pub fn encode_guided(
             .unwrap_or(false);
     }
     let mut rans_measurement: Option<f64> = None;
+    // -------------------------------------------------------------------
+    // Stage 7: the rANS / sequence / dictionary families.
+    //
+    // Each family runs only if the ablation config admits it, the
+    // Phase-10B family set allows it, and the Stage-5 decisive gate has
+    // not already closed the search. The `rans_measurement` for the
+    // byte-level and sequence coders feeds the DSFB observation later
+    // (an encoded-size ratio; see [`measurement_for_ratio`]).
+    // -------------------------------------------------------------------
     if options.allow_byte_rans && fg_set.byte_rans && !decisive {
         // P6: conventional byte-level rANS (the original methodology's
         // "rANS" — the pure entropy coder over the raw alphabet).
@@ -409,11 +703,32 @@ pub fn encode_guided(
             }
         }
     }
+    // -------------------------------------------------------------------
+    // Stage 8: RAW — the identity floor.
+    //
+    // RAW is the content's own bytes stored as an object: it always
+    // exists, always validates, and costs ~1.0× persisted bytes. It is
+    // the search's termination guarantee — whatever else happens, the
+    // cheapest VALID candidate is at most RAW, so `pick_best_valid` can
+    // never return `None` unless the store itself is broken. (The Stage-5
+    // gate's `raw_bytes` baseline uses the same identity representation;
+    // this push attaches the RAW channel attribution.)
+    // -------------------------------------------------------------------
     if let Some(r) = crate::core::candidate::raw_candidate(ctx.target, cid, &limits) {
         candidates.push((Channel::Raw, r));
     }
 
-    // --- DSFB-guided budgeted channels (bases + universe).
+    // -------------------------------------------------------------------
+    // Stage 9: DSFB-guided budgeted channels (bases + universe).
+    //
+    // The plan orders the base/universe channels by predicted gain and
+    // bounds how many may run; each channel is additionally gated by the
+    // ablation config (`channel_allowed`), the Phase-10B family set, the
+    // plan's own `should_evaluate`, and (foreground) the base-trust
+    // threshold. P0 was already evaluated up front in the foreground; the
+    // loop re-evaluates it only in Background mode where the full plan
+    // order matters.
+    // -------------------------------------------------------------------
     let plan = if options.allow_dsfb_ranking {
         store.dsfb_plan(&key)
     } else {
@@ -540,7 +855,17 @@ pub fn encode_guided(
         }
     }
 
-    // --- Validate (§32) and pick the cheapest valid candidate.
+    // -------------------------------------------------------------------
+    // Stage 10: §32 validation + cheapest-valid pick.
+    //
+    // Every candidate is materialized through a resolver that sees the
+    // candidate's OWN staged objects, the batch's pending state, and the
+    // committed store, and compared byte-exact to the target; the cheapest
+    // VALID one wins (ordering by the mode-appropriate metric). Cheaper
+    // but invalid candidates are skipped — they fall through to the next
+    // valid candidate, and if everything failed, RAW's presence makes
+    // `None` impossible.
+    // -------------------------------------------------------------------
     let (winner_channel, winner) = store
         .perf()
         .time("validation", || {
@@ -561,7 +886,18 @@ pub fn encode_guided(
         objects: winner.objects.clone(),
     };
 
-    // --- DSFB observation (performance-only; never affects bytes).
+    // -------------------------------------------------------------------
+    // Stage 11: DSFB observation (performance-only; never affects bytes).
+    //
+    // The winner and the measurements of the channels that actually ran
+    // feed the DSFB regime tracker. This is the ONLY persistent-state
+    // write the search makes, and it is deliberately not persistent
+    // AUTHORITY: DSFB state is never part of the on-disk format — a
+    // filesystem image decodes identically with all DSFB state deleted
+    // (authority separation, `docs/theory/dsfb-selection.md` §4). The
+    // feature measurement for each tried base is re-derived here (cheap:
+    // diff summaries are O(n) and the bases are already loaded).
+    // -------------------------------------------------------------------
     let mut measurements: Vec<(Channel, f64)> = Vec::new();
     // Re-derive base evidence for the channels we actually tried with a
     // base (cheap: diff summaries are O(n) and bases are already loaded).
@@ -628,6 +964,23 @@ pub fn encode_guided(
 /// Both are exact representations of the target (§12 — a candidate dedup
 /// hit must verify logical length, content identity, and exact bytes);
 /// the marginally cheapest wins.
+///
+/// # Why the byte verification matters
+///
+/// The chunk index is content-addressed (the id IS the bytes' hash), but
+/// a content-id match is not proof: the index entry must still
+/// MATERIALIZE to those bytes — a stale, corrupted, or self-aliased
+/// entry is rejected here exactly like any other invalid candidate. This
+/// is the same §32 gate applied to the dedup path, so a dedup hit can
+/// never persist a descriptor that does not reproduce the target.
+///
+/// # Pending vs committed resolution
+///
+/// A pending entry's descriptor bytes live in the batch (not yet
+/// committed) and its objects are staged in the same batch — validation
+/// resolves through [`CandidateResolver`] so the materialization can see
+/// them (Phase-8C). An unreadable index entry is treated as a MISS (the
+/// search falls through to a fresh encoding) rather than an error.
 fn dedup_candidates(
     store: &Store,
     target: &[u8],
@@ -693,6 +1046,14 @@ fn dedup_candidates(
 /// marginal payload bytes — reusing it is the entire point of a
 /// content-addressed store. This is the cost that decides between
 /// "reuse the canonical descriptor" and "emit a new representation".
+///
+/// # Units
+///
+/// Bytes; MARGINAL (excludes objects that already exist, includes
+/// descriptor bytes and each newly-introduced object exactly once). This
+/// is the foreground ordering metric — it measures what a write actually
+/// ADDS to the store, which is the only cost that matters when an
+/// existing chunk can simply be shared (CAS).
 fn marginal_bytes(cand: &Candidate, store: &Store, pending: Option<&PendingBatch>) -> u64 {
     let mut total = cand.representation.encoded_size();
     for o in &cand.objects {
@@ -713,6 +1074,18 @@ fn marginal_bytes(cand: &Candidate, store: &Store, pending: Option<&PendingBatch
 /// persisted bytes in the background (the optimizer must be able to
 /// REPLACE an existing representation with a denser one even when the
 /// incumbent's objects already exist).
+///
+/// # Why the two metrics
+///
+/// Foreground: a write only pays for what it ADDS; sharing an existing
+/// object is free, so the canonical-reuse dedup candidate competes
+/// fairly with a fresh encoding. Background: the incumbent's objects are
+/// already on disk and must STAY (the chunk-index entry must remain
+/// decodable), so counting them as free would make every re-encode look
+/// expensive — the optimizer must compare what the store would contain
+/// under each representation (Phase-9B). The 8C/9B cost-accounting
+/// distinction this encodes is the reason a marginal-cheap incumbent can
+/// never block a denser replacement.
 fn candidate_metric(
     cand: &Candidate,
     store: &Store,
@@ -736,6 +1109,26 @@ fn candidate_metric(
 /// descriptor competes fairly with a fresh encoding) and FULL persisted
 /// bytes in the background (the incumbent's already-existing objects must
 /// not make a denser replacement look expensive).
+///
+/// # What "valid" means
+///
+/// `validate_candidate` materializes the candidate through a resolver
+/// that sees the candidate's own staged objects plus the pending/committed
+/// state and compares the result byte-exact to `target`; it also enforces
+/// the format's structural limits (descriptor size, depth, length
+/// agreement). A candidate that fails is SKIPPED — the search continues
+/// to the next-cheapest. Because RAW is always in `candidates` and always
+/// validates, `None` is returned only if the store/encoders are broken
+/// (the caller turns that into `Invariant`).
+///
+/// # Why skip rather than fail
+///
+/// The Phase-6 SIGBUS investigation found the class this gate exists
+/// for: a candidate can beat RAW on byte cost yet exceed
+/// `max_descriptor_bytes` (e.g. a huge RangeReplace residual) — if it
+/// were committed, the descriptor would be undecodable (EIO on read,
+/// fsck errors). Skipping keeps the search on the valid surface; the
+/// `oversized_descriptor_candidate_is_rejected` regression test pins it.
 fn pick_best_valid<'a>(
     store: &Store,
     candidates: &'a [(Channel, Candidate)],
@@ -770,6 +1163,22 @@ fn pick_best_valid<'a>(
 /// falls back to the committed store (for bases/targets/models that
 /// already exist). Used for §32 validation (also by the store's commit
 /// gate for unguided `encode_chunk` updates).
+///
+/// # Resolution order (why it matters)
+///
+/// 1. the candidate's own staged objects — the new payloads this
+///    representation introduces (they do not exist anywhere else yet);
+/// 2. the batch's pending descriptors/objects — the group-commit batch's
+///    own entries, which are not yet in the committed index (Phase-8C; a
+///    pending in-batch dictionary must resolve here or validation would
+///    fail on a descriptor that is perfectly decodable once committed);
+/// 3. the committed store — everything that already exists on disk
+///    (bases, models, referenced chunks).
+///
+/// Reversing 1 and 2 would make in-batch dedup invisible to validation;
+/// omitting 3 would reject candidates whose operands are already
+/// committed. The same three-layer view is what the materializer sees
+/// after commit — so validation exactly predicts post-commit decodability.
 pub(crate) struct CandidateResolver<'a> {
     store: &'a Store,
     objects: std::collections::HashMap<ChunkId, Vec<u8>>,
@@ -845,6 +1254,14 @@ impl DecoderContext for CandidateResolver<'_> {
 }
 
 /// Measurement for an encoded-size ratio (0 = free, 1 = raw-sized).
+///
+/// # Units
+///
+/// Dimensionless [0, 1]; the inverted, clamped persisted-bytes ratio of
+/// the best candidate in a rANS family (raw-size ratio 1 → measurement 0;
+/// a free representation → 1). This is the DSFB measurement for the Rans
+/// channel: it quantifies how much a family compressed WITHOUT saying
+/// anything about which bytes result (DSFB never sees content).
 fn measurement_for_ratio(ratio: f64) -> f64 {
     (1.0 - ratio.clamp(0.0, 1.0)).clamp(0.0, 1.0)
 }
@@ -852,6 +1269,18 @@ fn measurement_for_ratio(ratio: f64) -> f64 {
 /// The outcome-quality scalar fed to the regime tracker: 1.0 for perfect
 /// structural/generated wins, the channel measurement for
 /// base/rans/raw-driven wins.
+///
+/// # Why
+///
+/// The DSFB regime tracker needs to know whether the winning channel
+/// actually delivered its predicted gain. Structural/generated families
+/// (ZERO/FILL/SPARSE/…/ENTROPY_REF) are perfect by construction — they
+/// win exactly when their structure exists, so quality is 1.0. Base and
+/// rANS channels are scored by their measured compression ratio (the
+/// [`measurement_for_ratio`] of the winner's channel), and anything
+/// unscored defaults to 0.5 (the neutral prior). Performance-only: this
+/// never affects the persisted bytes, only the DSFB state that orders
+/// FUTURE searches.
 fn outcome_quality(winner: Channel, rep: &Representation, measurements: &[(Channel, f64)]) -> f64 {
     match rep {
         Representation::Zero { .. }

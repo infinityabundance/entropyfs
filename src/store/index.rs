@@ -1,10 +1,145 @@
 //! Persistent copy-on-write B-tree over content-addressed immutable nodes
 //! (ADR-0007, `docs/format/ondisk-v1.md` §4).
 //!
-//! Nodes are immutable objects: mutation rewrites the path from root to the
-//! touched leaf, producing new nodes; unchanged nodes are shared. Node
-//! content id = BLAKE3(payload). Keys are raw bytes compared
-//! lexicographically (filenames are never assumed UTF-8).
+//! # PURPOSE
+//!
+//! The repository's one index structure. Every persistent tree — inode
+//! index (`ino → inode`), directory (`name → (ino, d_type)`), extent tree
+//! (`offset → extent descriptor`), chunk index (`cid → descriptor`), model
+//! index, snapshot tree, xattr tree — is an instance of this B-tree. This
+//! module implements the tree algebra: point ops (`get`, `predecessor`,
+//! `insert`, `remove`), range scans (`scan`, `scan_all`), counting/fsck
+//! (`count`, `verify`), and the two bulk paths the store lives on:
+//! `bulk_load` (rebuild from sorted entries) and `apply_sorted_batch`
+//! (the epoch checkpoint's one-pass COW patch).
+//!
+//! # BOUNDARY
+//!
+//! The tree treats keys and values as opaque byte strings — keys are
+//! compared lexicographically and are NEVER assumed UTF-8 (filenames are
+//! raw bytes). It knows nothing about what a tree means (inodes vs extents
+//! vs snapshots) and nothing about storage: all node bytes move through
+//! the [`ObjectProvider`] seam, and durability is the caller's commit
+//! path. It never interprets a leaf value, and it treats an internal
+//! node's value as exactly the 32-byte child id the codec produced.
+//!
+//! # MODEL
+//!
+//! Nodes are immutable objects: mutation rewrites the path from the root
+//! to the touched leaf, producing new nodes; unchanged nodes are shared.
+//! Node content id = BLAKE3(payload), so two nodes with identical payloads
+//! are one object — unchanged subtrees cost zero new records on rewrite
+//! (the store stages at most one physical record per content id per
+//! transaction). The zero id is the empty tree.
+//!
+//! # PERSISTENT AUTHORITY
+//!
+//! The node payload is normative on-disk format (ondisk-v1 §4): kind tag,
+//! `order`, entry count, then entries (u16-length-prefixed keys, u32
+//! leaf values, fixed 32-byte child ids). `order` (fanout) is a FORMAT
+//! PARAMETER — it is encoded in every node and `decode` rejects a node
+//! whose encoded order differs from the caller's `expected_order` (a node
+//! written by an inconsistent tree configuration is corrupt, fsck-grade).
+//! Changing the codec is a format change.
+//!
+//! # CORRECTNESS INVARIANTS
+//!
+//! - Keys within a node are strictly increasing (enforced at decode and
+//!   by every mutating algorithm).
+//! - Shape: a leaf holds ≤ `order` entries; an internal node holds ≤
+//!   `order` separator entries, i.e. ≤ `order + 1` children.
+//! - Internal ranges: `first_child` covers keys strictly below
+//!   `entries[0].key`; entry `i`'s child covers
+//!   `[entries[i].key, entries[i+1].key)`; the last child covers keys ≥
+//!   the last separator.
+//! - No empty node ever exists in a well-formed tree (the zero root is
+//!   the empty tree); `remove` and `apply_sorted_batch` collapse empties
+//!   rather than staging them.
+//! - COW identity: a node whose content changed gets a NEW id; an
+//!   unchanged node keeps its id — this is what makes sharing and
+//!   idempotent re-application free.
+//! - Depth ≤ 128 on every descent (termination bound on cyclic/corrupt
+//!   trees).
+//!
+//! # CONCURRENCY
+//!
+//! This module has no locks: the tree is a pure function of its root id
+//! and the provider. Read-only ops (`get`, `predecessor`, `scan`,
+//! `scan_all`, `verify`) take `&P` and may run concurrently against a
+//! committed root. Mutations take `&mut P` (exclusive staging, matching
+//! the store's serialized write path). The provider decides all physical
+//! concurrency.
+//!
+//! # DURABILITY
+//!
+//! None here. Mutations STAGE node payloads through `provider.put`; the
+//! returned root id is "staged", not "acknowledged". Durability is the
+//! caller's commit: the epoch checkpoint appends the staged objects plus
+//! a root record to the segment, fdatasyncs, and flips the superblock. A
+//! root id returned to a caller that never commits is unreachable and
+//! therefore garbage-collectable (reachability from committed roots is
+//! the only source of truth — `docs/architecture/gc.md`).
+//!
+//! # RESOURCE BOUNDS
+//!
+//! Persistent (therefore untrusted) sizes that reach this code (all in
+//! bytes): key length (u16 prefix), leaf value length (u32 prefix), entry
+//! count (u16, capped at `max_fanout` BEFORE any allocation — the
+//! hostile-media allocation gate), and tree depth (capped at 128 on every
+//! recursive descent, so a corrupt/cyclic tree terminates). Scans are
+//! capped by `limit`; `get`/`predecessor` are O(depth) fetches. The
+//! hostile-media court exercises this surface (B-tree exhibits: fanout
+//! 4096/4097, unsorted/duplicate keys — `docs/security/hostile-media-court.md`).
+//!
+//! # PERFORMANCE
+//!
+//! Point ops are O(depth) node rewrites. The two bulk paths exist for
+//! measured reasons:
+//!
+//! - `bulk_load` (Phase 9H): repeated COW inserts would stage every
+//!   intermediate path version — 2.66 MB of dead `BtreeNode` records on
+//!   the real-tree rebuild, proven by the physical scanner
+//!   (`campaign-1787688017-0a03ece`). Bottom-up staging writes each
+//!   FINAL node exactly once.
+//! - `apply_sorted_batch` (Phase 10D/10F): the checkpoint's chunk-index
+//!   patch is 1-2 entries; walking the whole tree per patch cost O(tree)
+//!   per commit. One pass + empty-batch/empty-slice guards made it a
+//!   50×+ win on both io backends (`cp_chunk_apply` p50 1262 → 22 µs
+//!   sync, 2281 → 30 µs uring).
+//!
+//! Unchanged subtrees keep their ids in both paths, so sparse work is
+//! proportional to the touched paths, not the tree.
+//!
+//! # FAILURE MODES
+//!
+//! Typed [`BTreeError`] only, never a panic on corrupt input (this
+//! module is `#![forbid(unsafe_code)]`; every persistent byte passes
+//! through checked parsing): corrupt payloads → `Corrupt`; a node the
+//! provider cannot produce, a zero node id, or a depth/order violation →
+//! `Invariant` (the internal-inconsistency class); caller-supplied
+//! keys/values beyond codec limits → `KeyTooLong` / `ValueTooLarge`
+//! (validated in `insert`). The remaining `expect`/`unreachable!` sites
+//! are codec-guaranteed conversions (u16/u32 length prefixes and the
+//! 32-byte child id, both produced by `decode`) and the sorted-merge
+//! `unreachable!()` — all unreachable given valid codec output.
+//!
+//! # HISTORY / EVIDENCE
+//!
+//! - ADR-0007: content-addressed object model; COW node sharing.
+//! - Phase 9H (physical convergence): `bulk_load` for the chunk-index
+//!   rebuild; sealed `campaign-1787688017-0a03ece` (tree court backing
+//!   9,129,988 → 1,100,161 B; post-GC reconciliation = reachable + 0 B
+//!   dead + 4 B format).
+//! - Phase 10D (metadata writeback epochs): `apply_sorted_batch` merges
+//!   the frozen overlay once per checkpoint (`store/mod.rs`
+//!   `epoch_checkpoint`: bulk-load for the small per-directory trees,
+//!   `apply_sorted_batch` for the global inode/chunk/extent indexes).
+//! - Phase 10F (io_uring transport, ADR-0021): the write-path hunt found
+//!   `apply_sorted_batch` walking the ENTIRE tree per tiny batch; the
+//!   empty-batch short-circuit + empty-slice skip is the fix (CHANGELOG
+//!   v0.6.2).
+//! - Phase 10G: parallel-workload hardening regression-pinned the epoch
+//!   overlay/checkpoint semantics these bulk paths serve.
 //!
 //! v1 tradeoff (documented): delete collapses empty nodes but leaves
 //! under-full nodes in place; fsck and GC compaction tolerate and repair
@@ -24,7 +159,17 @@ pub const NODE_INTERNAL: u8 = 0x02;
 /// Default fanout (max entries per node).
 pub const DEFAULT_ORDER: u16 = 64;
 
-/// A B-tree entry.
+/// A B-tree entry: a raw key byte string (never assumed UTF-8) plus a
+/// value whose role depends on the node kind.
+///
+/// - In a [`Node::Leaf`], `value` is the entry's value bytes.
+/// - In a [`Node::Internal`], `value` is the 32-byte child node id.
+///
+/// Keys within a node are strictly increasing (enforced at decode and by
+/// every mutating algorithm). On disk the key is u16-length-prefixed and
+/// a leaf value u32-length-prefixed (ondisk-v1 §4), so keys are limited
+/// to 65535 bytes and leaf values to u32::MAX bytes — the `KeyTooLong` /
+/// `ValueTooLarge` bounds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     /// Key bytes (length-prefixed in the codec).
@@ -46,7 +191,37 @@ pub type Promotion = Option<(Vec<u8>, ChunkId)>;
 /// removed value).
 pub type RemoveResult = (Option<ChunkId>, Option<Vec<u8>>);
 
-/// A decoded node.
+/// A decoded B-tree node — one immutable, content-addressed object of the
+/// tree (id = BLAKE3(encoded payload)).
+///
+/// # Role
+///
+/// The unit of persistence, fetch, and sharing. Mutating algorithms never
+/// modify a decoded node in place; they build a new `Node`, encode it, and
+/// stage the new id through the provider (COW — ADR-0007). Two nodes with
+/// identical payloads share one id, so unchanged subtrees cost zero new
+/// records.
+///
+/// # Shape invariants
+///
+/// - [`Node::Leaf`] holds ≤ `order` entries; [`Node::Internal`] holds ≤
+///   `order` separator entries — i.e. ≤ `order + 1` children.
+/// - Keys are strictly increasing within a node.
+/// - Internal child ranges: `first_child` covers keys strictly below
+///   `entries[0].key`; entry `i`'s child covers
+///   `[entries[i].key, entries[i+1].key)`; the last child covers keys ≥
+///   the last separator.
+/// - An empty node never exists in a well-formed tree (the zero id is the
+///   empty tree). `decode` is structurally lenient — it accepts an
+///   encoded `entry_count == 0` — but no algorithm here produces one.
+///
+/// # Encoding contract
+///
+/// `encode`/`decode` implement ondisk-v1 §4: kind tag, `order` (validated
+/// against the caller's `expected_order` — a mismatch means the node came
+/// from an inconsistent tree configuration and is treated as corrupt),
+/// entry count (capped at `max_fanout` before any allocation), then the
+/// entries in key order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Node {
     /// Leaf: entries only.
@@ -184,16 +359,40 @@ impl Node {
     }
 }
 
-/// Object provider: fetches node payloads (committed or pending) and
-/// registers new node payloads. Implemented by the transaction.
+/// Object provider: the seam between the tree algebra and the store's
+/// content-addressed object storage (implemented by the transaction).
+///
+/// # Contract
+///
+/// - `get` fetches a payload by content id — committed or pending; `None`
+///   means the object is not staged (an internal inconsistency when the
+///   id is referenced by a tree — see `fetch`).
+/// - `put` registers `bytes` under `id`. The caller guarantees
+///   `id == ChunkId::of(bytes)`; the provider may dedup by id (the store
+///   stages at most one physical record per content id per transaction),
+///   which is what makes COW sharing and idempotent rewrites physically
+///   free.
+///
+/// # Concurrency
+///
+/// `get` takes `&self`, so committed-root reads may run concurrently.
+/// `put` takes `&mut self`: staging is exclusive, matching the store's
+/// serialized write path.
 pub trait ObjectProvider {
-    /// Fetch a node payload by content id.
+    /// Fetch a node payload by content id (committed or pending).
     fn get(&self, id: &ChunkId) -> Result<Option<Vec<u8>>, BTreeError>;
-    /// Register a new immutable node payload.
+    /// Register a new immutable node payload (caller guarantees
+    /// `id == ChunkId::of(bytes)`).
     fn put(&mut self, id: ChunkId, bytes: Vec<u8>);
 }
 
-/// B-tree errors.
+/// Typed B-tree errors. Persistent bytes are treated as untrusted input:
+/// a malformed payload surfaces as [`BTreeError::Corrupt`]; an internal
+/// inconsistency (missing node, zero id, depth exceeded, zero order) as
+/// [`BTreeError::Invariant`]; caller-supplied data beyond codec limits as
+/// `KeyTooLong` / `ValueTooLarge`. A corrupt tree must produce a typed
+/// error, never a panic (hostile-media court,
+/// `docs/security/hostile-media-court.md`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BTreeError {
     /// Provider fetch failed.
@@ -222,7 +421,20 @@ impl From<CodecError> for BTreeError {
     }
 }
 
-/// Look up a key; returns the value bytes.
+/// Look up `key`; returns the value bytes, or `None` when absent.
+///
+/// # Algorithm
+///
+/// Descent from the root: binary-search each node for the key and follow
+/// the matching child range (leaf ⇒ return the entry; internal ⇒
+/// descend). A zero root is the empty tree and answers `None`
+/// immediately.
+///
+/// # Guarantees
+///
+/// O(depth) provider fetches, depth-capped at 128. `None` means absent —
+/// a corrupt node on the path is `Err(Corrupt)`, never a silent miss.
+/// The cap also bounds work on a cyclic/corrupt tree.
 pub fn get<P: ObjectProvider>(
     root: ChunkId,
     key: &[u8],
@@ -263,7 +475,16 @@ pub fn get<P: ObjectProvider>(
     }
 }
 
-/// The largest key strictly less than `key` (predecessor), with its value.
+/// The largest key STRICTLY less than `key` (predecessor), with its value.
+///
+/// Exclusive semantics: a key equal to `key` is not a predecessor —
+/// consistent with the read window's exclusive upper bound. The candidate
+/// is threaded down the descent: at each internal node the largest
+/// separator strictly below `key` seen so far is remembered, and the
+/// search continues into the child that could still hold a larger
+/// predecessor; the leaf resolves the final candidate. `None` when no
+/// key is strictly less than `key`; zero root ⇒ `None`. Depth-capped at
+/// 128.
 pub fn predecessor<P: ObjectProvider>(
     root: ChunkId,
     key: &[u8],
@@ -323,7 +544,28 @@ pub fn predecessor<P: ObjectProvider>(
     }
 }
 
-/// Insert (or replace) a key; returns the new root id.
+/// Insert (or replace) `key` with `value`; returns the new root id.
+///
+/// # COW semantics
+///
+/// Every node on the path root → touched leaf is rebuilt and re-staged;
+/// untouched subtrees keep their ids and are shared. Because ids are
+/// content-derived, a rewrite that changes nothing (e.g. replacing a
+/// value with byte-identical bytes) stages the SAME ids — the provider's
+/// dedup makes it physically free.
+///
+/// # Algorithm
+///
+/// Empty tree (zero root) ⇒ a single leaf becomes the root. Otherwise
+/// [`insert_rec`] descends and folds the result; a promotion (split) at
+/// the root builds a new root whose `first_child` is the split's left
+/// half and whose single entry is `(promoted separator, right half id)`.
+///
+/// # Guarantees
+///
+/// Shape invariants hold after every split (≤ `order` entries / ≤
+/// `order + 1` children). Key/value length limits are enforced up front
+/// (`KeyTooLong` / `ValueTooLarge`). Depth-capped at 128.
 pub fn insert<P: ObjectProvider>(
     root: ChunkId,
     key: &[u8],
@@ -370,7 +612,22 @@ pub fn insert<P: ObjectProvider>(
     }
 }
 
-/// Remove a key; returns the new root id (equal to `root` if unchanged).
+/// Remove `key`; returns the new root id (equal to `root` when the key is
+/// absent — a fully unchanged tree keeps its root id).
+///
+/// # v1 tradeoff (documented)
+///
+/// Removal collapses nodes that become EMPTY (a collapsed child drops its
+/// separator; a root that collapses returns `ChunkId::ZERO`), but leaves
+/// under-full nodes in place — no rebalancing. fsck and GC compaction
+/// tolerate and repair under-full nodes (ondisk-v1 §4); this is
+/// deliberate, since rebalancing would rewrite sibling paths on every
+/// delete for no correctness gain.
+///
+/// # Guarantees
+///
+/// Zero root ⇒ unchanged. All keys removed ⇒ `ChunkId::ZERO` (empty
+/// tree). Depth-capped at 128.
 pub fn remove<P: ObjectProvider>(
     root: ChunkId,
     key: &[u8],
@@ -391,9 +648,18 @@ pub fn remove<P: ObjectProvider>(
     }
 }
 
-/// Scan keys in `[start, end)` (inclusive lower, exclusive upper);
-/// `None` bounds are open. Returns up to `limit` entries in key order,
-/// plus whether more remain and the last key returned.
+/// Scan keys in `[start, end)` — inclusive lower, EXCLUSIVE upper bound
+/// (the store's read-window convention); `None` bounds are open. Returns
+/// up to `limit` entries in key order, plus whether more remain and the
+/// last key returned (the caller resumes with `start = last`).
+///
+/// # Resource bounds
+///
+/// `limit` caps emitted entries; `has_more` reports truncation so the
+/// caller can page. Only children whose key ranges intersect the window
+/// are fetched (bound pruning in [`scan_rec`]), so a narrow range over a
+/// huge tree walks O(depth + covered leaves), not O(tree). Depth-capped
+/// at 128.
 pub fn scan<P: ObjectProvider>(
     root: ChunkId,
     start: Option<&[u8]>,
@@ -421,7 +687,9 @@ pub fn scan<P: ObjectProvider>(
     Ok((state.out, state.has_more, state.last_key))
 }
 
-/// Full scan (no limit).
+/// Full scan (no limit): all `(key, value)` pairs in key order. Used by
+/// `count` (fsck/stat) and by the chunk-index rebuild — `scan_all`
+/// output is in key order, which is exactly what `bulk_load` requires.
 pub fn scan_all<P: ObjectProvider>(
     root: ChunkId,
     order: u16,
@@ -435,19 +703,44 @@ pub fn scan_all<P: ObjectProvider>(
 /// Bulk-build a B-tree from SORTED entries (Phase-9H), staging each final
 /// node exactly once.
 ///
-/// The COW `insert` path stages every intermediate path version on disk;
-/// rebuilding a large tree by repeated inserts therefore physically writes
-/// (and indexes) far more nodes than the final tree contains — the
-/// compaction-pass equivalent of write amplification. This loader builds
-/// the tree bottom-up from sorted entries: leaves hold up to `order`
-/// entries, internal nodes hold up to `order` separator entries (order+1
+/// # Why this exists — the rebuild path
+///
+/// GC's chunk-index rebuild (`store/gc.rs::rebuild_chunk_index`) and the
+/// checkpoint's small per-directory tree rebuilds must reconstruct a tree
+/// from the sorted reachable entries. The COW `insert` path stages every
+/// intermediate path version on disk; rebuilding a large tree by repeated
+/// inserts therefore physically writes (and indexes) far more nodes than
+/// the final tree contains — the compaction-pass equivalent of write
+/// amplification.
+///
+/// # Evidence (Phase-9H)
+///
+/// The old repeated-insert rebuild's intermediates survived as **2.66 MB
+/// of dead `BtreeNode` records on the real tree** — proven by the
+/// physical scanner (`store/physical.rs`; the reconciliation identity
+/// `file_bytes = Σ live/dead-indexed/index-hidden/unindexed/torn/
+/// padding/format` held with unexplained = 0, and the
+/// index-hidden-duplicate hypothesis was falsified: index-hidden = 0).
+/// Evidence: `campaign-1787688017-0a03ece` (tree court backing
+/// 9,129,988 → 1,100,161 B; post-GC = reachable + 0 B dead + 4 B format).
+///
+/// # Algorithm
+///
+/// Bottom-up from sorted entries: leaves hold up to `order` entries,
+/// internal nodes hold up to `order` separator entries (order+1
 /// children), separators are the leftmost key of each right child, and
-/// every node is final — nothing is staged that the final root does not
+/// every node is FINAL — nothing is staged that the final root does not
 /// reference. Empty input yields a ZERO root (empty tree).
 ///
-/// The result satisfies the same node-shape invariants the COW path
-/// produces (≤ `order` entries per node, ≤ `order + 1` children), so
-/// later inserts/removes operate on it normally.
+/// # Precondition and invariants
+///
+/// The input MUST be sorted with strictly increasing keys (the callers
+/// produce it via `scan_all`, which is in key order; a violation
+/// silently yields a malformed tree — this is the caller's contract,
+/// unlike [`apply_sorted_batch`], which validates). The result satisfies
+/// the same node-shape invariants the COW path produces (≤ `order`
+/// entries per node, ≤ `order + 1` children), so later inserts/removes
+/// operate on it normally.
 pub fn bulk_load<P: ObjectProvider>(
     entries: &[(Vec<u8>, Vec<u8>)],
     order: u16,
@@ -463,6 +756,13 @@ pub fn bulk_load<P: ObjectProvider>(
     if order as u32 > max_fanout {
         return Err(BTreeError::Invariant("order exceeds max fanout".into()));
     }
+    // ---------------------------------------------------------------------------
+    // Stage 1: build the leaf level (level 0).
+    //
+    // Each chunk of `order` sorted entries becomes one leaf (the last may
+    // be short). Every leaf is FINAL — staged once here, referenced by the
+    // level above, never rewritten.
+    // ---------------------------------------------------------------------------
     // Level 0: leaves (max `order` entries each; the last may be short).
     // (node id, leftmost key of the subtree)
     let mut level: Vec<(ChunkId, Vec<u8>)> = Vec::new();
@@ -481,6 +781,15 @@ pub fn bulk_load<P: ObjectProvider>(
         provider.put(id, node.encode(order));
         level.push((id, leftmost));
     }
+    // ---------------------------------------------------------------------------
+    // Stage 2: build the internal levels bottom-up.
+    //
+    // Every `order + 1` children become one internal node: `first_child`
+    // is the first child, and each subsequent child contributes a
+    // separator — its subtree's LEFTMOST key — so separators are strictly
+    // increasing. A node's own leftmost key is its first child's leftmost
+    // key (propagated). Loop until a single root remains.
+    // ---------------------------------------------------------------------------
     // Higher levels: group children into internal nodes of `order`
     // separator entries (order + 1 children); the leftmost key of a child
     // is the leftmost key of its first_child subtree (propagated).
@@ -507,10 +816,18 @@ pub fn bulk_load<P: ObjectProvider>(
         }
         level = next;
     }
+    // ---------------------------------------------------------------------------
+    // Stage 3: the single remaining node is the root.
+    //
+    // Total staging = Σ_levels ⌈count / fanout⌉ — every staged node is
+    // reachable from this root and nothing else was written (contrast the
+    // COW path's O(entries · depth) intermediate writes).
+    // ---------------------------------------------------------------------------
     Ok(level[0].0)
 }
 
-/// Count entries (for fsck/stat).
+/// Count entries via a full scan (for fsck/stat). O(n) — not for the hot
+/// path.
 pub fn count<P: ObjectProvider>(
     root: ChunkId,
     order: u16,
@@ -526,11 +843,27 @@ pub fn count<P: ObjectProvider>(
 /// `None` = remove — to an existing tree in one pass, rewriting each
 /// affected LEAF once and each affected ANCESTOR once. Unchanged subtrees
 /// retain their content ids, so a sparse patch over a large tree touches
-/// only the paths that actually change (the `bulk_load` alternative would
-/// rebuild the whole tree). Returns the new root.
+/// only the paths that actually change (the `bulk_load` alternative
+/// would rebuild the whole tree). Returns the new root.
+///
+/// # Why the empty-batch short-circuit exists (evidence, Phase-10F)
+///
+/// The epoch checkpoint applies its chunk-index patch as a TINY batch
+/// (1-2 entries per commit), and the Phase-10F write-path hunt found the
+/// pre-fix code walked the ENTIRE tree for each one: every child slot was
+/// recursed into and every node fetched even when a subtree's slice was
+/// empty — O(tree) per checkpoint, the dominant write-path floor on both
+/// io backends. The fix is two guards: this empty-batch early return, and
+/// the empty-slice skip in [`patch_rec`]'s partition loop (the recursion
+/// never descends into an unaffected child). Measured (CHANGELOG v0.6.2 /
+/// Phase 10F): `cp_chunk_apply` p50 1262 → 22 µs (sync) and 2281 → 30 µs
+/// (uring) — a 50×+ win on both backends.
+///
+/// # Caller contract
 ///
 /// The batch must be sorted by key with no duplicates (the caller
-/// canonicalizes; a violation is an invariant error, never silent).
+/// canonicalizes; a violation is an invariant error, never silent — a
+/// tree silently built from an unsorted batch would be corrupt).
 pub fn apply_sorted_batch<P: ObjectProvider>(
     root: ChunkId,
     batch: &[(Vec<u8>, Option<Vec<u8>>)],
@@ -538,6 +871,13 @@ pub fn apply_sorted_batch<P: ObjectProvider>(
     max_fanout: u32,
     provider: &mut P,
 ) -> Result<ChunkId, BTreeError> {
+    // ---------------------------------------------------------------------------
+    // Stage 1: validate the batch and handle the degenerate cases.
+    //
+    // Empty batch ⇒ the tree is unchanged and the root id is returned
+    // untouched (Phase-10F guard — see the doc comment for the evidence).
+    // Zero order and unsorted/duplicate keys are invariant errors.
+    // ---------------------------------------------------------------------------
     if batch.is_empty() {
         return Ok(root);
     }
@@ -552,6 +892,14 @@ pub fn apply_sorted_batch<P: ObjectProvider>(
             ));
         }
     }
+    // ---------------------------------------------------------------------------
+    // Stage 2: empty tree — bulk-load the batch's inserts.
+    //
+    // A tree that does not exist yet cannot be patched in place; the
+    // removes are dropped (nothing to remove) and the upserts are
+    // bulk-loaded, staging each final node exactly once (Phase 9H). This
+    // is the only path that CREATES a tree from a batch.
+    // ---------------------------------------------------------------------------
     if root.is_zero() {
         // Empty tree: bulk-load the batch's inserts.
         let entries: Vec<(Vec<u8>, Vec<u8>)> = batch
@@ -560,6 +908,15 @@ pub fn apply_sorted_batch<P: ObjectProvider>(
             .collect();
         return bulk_load(&entries, order, max_fanout, provider);
     }
+    // ---------------------------------------------------------------------------
+    // Stage 3: single-pass COW patch of the existing tree.
+    //
+    // `patch_rec` rewrites each affected leaf and ancestor once; untouched
+    // subtrees keep their ids. Outcomes: a new root (normal), ZERO root
+    // (the whole tree collapsed), or a root split — the promotion builds a
+    // new root whose first_child is the left half and whose single entry
+    // is (separator, right half).
+    // ---------------------------------------------------------------------------
     match patch_rec(root, batch, 0, order, max_fanout, provider)? {
         (Some(id), None) => Ok(id),
         (None, _) => Ok(ChunkId::ZERO), // the whole tree collapsed to empty
@@ -585,8 +942,14 @@ pub fn apply_sorted_batch<P: ObjectProvider>(
 /// unchanged subtree returns its own id and no promotion.
 type PatchOut = (Option<ChunkId>, Promotion);
 
-/// Returns the new subtree root (or `None` when the subtree collapsed to
-/// empty). An unchanged subtree returns its own id.
+/// The recursive core of [`apply_sorted_batch`]: merge `batch` into the
+/// subtree rooted at `node_id` in one pass.
+///
+/// Returns `(new subtree root, promotion)`: a `None` root means the
+/// subtree COLLAPSED to empty (the caller drops its separator); an
+/// unchanged subtree returns its OWN id — the property that makes sparse
+/// patches cheap (unchanged subtrees are shared, never re-staged). The
+/// depth cap (128) bounds work on cyclic/corrupt trees.
 fn patch_rec<P: ObjectProvider>(
     node_id: ChunkId,
     batch: &[(Vec<u8>, Option<Vec<u8>>)],
@@ -598,6 +961,17 @@ fn patch_rec<P: ObjectProvider>(
     if depth > 128 {
         return Err(BTreeError::Invariant("tree depth exceeded".into()));
     }
+    // ---------------------------------------------------------------------------
+    // Stage 1: empty-batch guard (Phase-10F).
+    //
+    // An empty batch leaves this subtree untouched — return its id WITHOUT
+    // fetching the node. Without this, a tiny batch (the epoch checkpoint
+    // applies 1-2 entries per commit) still fetched (and the internal
+    // loop recursed into) EVERY node of the tree: O(tree) per apply, the
+    // dominant write-path floor. Today this is defense-in-depth: the
+    // partition loop already skips empty slices (Stage 4), so this guard
+    // is what a future partition change must not regress.
+    // ---------------------------------------------------------------------------
     // Phase-10F: an empty batch leaves this subtree untouched — return its
     // id WITHOUT fetching the node. Without this, a tiny batch (the epoch
     // checkpoint applies 1-2 entries per commit) still fetched (and the
@@ -606,8 +980,23 @@ fn patch_rec<P: ObjectProvider>(
     if batch.is_empty() {
         return Ok((Some(node_id), None));
     }
+    // ---------------------------------------------------------------------------
+    // Stage 2: fetch and decode the node.
+    //
+    // Persistent bytes are untrusted: a fetch failure or a payload that
+    // fails structural validation surfaces as a typed error, never a
+    // panic.
+    // ---------------------------------------------------------------------------
     let node = fetch(node_id, order, max_fanout, provider)?;
     match node {
+        // -----------------------------------------------------------------
+        // Stage 3 (leaf): merge the batch into the entries with a sorted
+        // two-list walk.
+        //
+        // Outcomes: unchanged (own id — no re-stage), collapsed to empty
+        // (None — the parent drops the separator), over-full (split; the
+        // right half's first key promotes), or a rebuilt leaf (new id).
+        // -----------------------------------------------------------------
         Node::Leaf { entries } => {
             // Merge the batch into the leaf: a sorted walk over both lists.
             let mut out: Vec<Entry> = Vec::with_capacity(entries.len() + batch.len());
@@ -687,6 +1076,11 @@ fn patch_rec<P: ObjectProvider>(
             provider.put(id, n.encode(order));
             Ok((Some(id), None))
         }
+        // -----------------------------------------------------------------
+        // Stage 4 (internal): partition the batch across the child ranges,
+        // recurse, fold promotions, compact collapsed children, and split
+        // when over-full.
+        // -----------------------------------------------------------------
         Node::Internal {
             first_child,
             entries,
@@ -810,8 +1204,10 @@ fn patch_rec<P: ObjectProvider>(
     }
 }
 
-/// `partition_point` for a slice of byte slices against a predicate
-/// (Rust's slice::partition_point with a closure over borrowed keys).
+/// Binary-search split point of a slice: the first index where `pred` is
+/// false. (Rust's `slice::partition_point` with a closure over borrowed
+/// keys.) Used only on SORTED batch keys to partition a batch across
+/// child ranges; O(log n).
 fn partition_point<F>(slice: &[&[u8]], mut pred: F) -> usize
 where
     F: FnMut(&[u8]) -> bool,
@@ -833,6 +1229,11 @@ where
 // Internals
 // ---------------------------------------------------------------------------
 
+/// Fetch and decode a node, mapping provider/decode failures to typed
+/// errors. A zero id is an internal inconsistency (the algorithms never
+/// fetch the empty tree); a MISSING payload is likewise `Invariant` (the
+/// tree references an id the provider never staged); a present but
+/// unparseable payload is `Corrupt`.
 fn fetch<P: ObjectProvider>(
     node_id: ChunkId,
     order: u16,
@@ -852,11 +1253,18 @@ fn child_id(entry: &Entry) -> ChunkId {
     ChunkId::new(entry.value.as_slice().try_into().expect("32-byte child id"))
 }
 
-/// Returns (new node id for the caller's slot, optional promote).
+/// Recursive COW insert: apply `key = value` inside the subtree rooted at
+/// `node_id`; returns `(new node id for the caller's slot, optional
+/// promotion)`.
+///
+/// The promotion is `Some((separator, right_id))` when this subtree's
+/// root SPLIT — the caller inserts the separator entry right after this
+/// subtree's slot.
 ///
 /// COW invariant: a node whose content changed gets a NEW content id and
 /// returns it so the parent updates its child pointer (ADR-0007). A node
-/// whose content is unchanged keeps its id.
+/// whose content is unchanged keeps its id — the identical re-encoding
+/// stages the same id, which the provider dedups to zero new records.
 fn insert_rec<P: ObjectProvider>(
     node_id: ChunkId,
     key: &[u8],
@@ -866,11 +1274,22 @@ fn insert_rec<P: ObjectProvider>(
     provider: &mut P,
     depth: u32,
 ) -> Result<(ChunkId, Promotion), BTreeError> {
+    // ---------------------------------------------------------------------------
+    // Stage 1: depth guard, then fetch and decode the node.
+    // ---------------------------------------------------------------------------
     if depth > 128 {
         return Err(BTreeError::Invariant("tree depth exceeded".into()));
     }
     let node = fetch(node_id, order, max_fanout, provider)?;
     match node {
+        // -----------------------------------------------------------------
+        // Stage 2 (leaf): locate the key, then rebuild.
+        //
+        // Binary search: found ⇒ replace the value; absent ⇒ insert at
+        // the boundary. Over-full ⇒ split (the right half's first key
+        // promotes to the parent); otherwise re-encode and stage the new
+        // leaf id.
+        // -----------------------------------------------------------------
         Node::Leaf { mut entries } => {
             match entries.binary_search_by(|e| e.key.as_slice().cmp(key)) {
                 Ok(i) => entries[i].value = value.to_vec(),
@@ -906,6 +1325,20 @@ fn insert_rec<P: ObjectProvider>(
                 Ok((id, None))
             }
         }
+        // -----------------------------------------------------------------
+        // Stage 3 (internal): descend to the child covering `key`, then
+        // fold the child's result back up.
+        //
+        // The binary search picks the child slot (first_child when `key`
+        // is below every separator). Two outcomes:
+        //
+        // - promotion: the child SPLIT — its left half occupies the slot
+        //   and `(pkey, right)` becomes a NEW separator at the boundary;
+        //   the node may itself split (split_internal) if now over-full;
+        // - no promotion: the child changed identity — rewrite the slot
+        //   pointer and re-stage the node (new id; content dedup makes
+        //   unchanged bytes free).
+        // -----------------------------------------------------------------
         Node::Internal {
             first_child,
             mut entries,
@@ -1002,7 +1435,13 @@ fn insert_rec<P: ObjectProvider>(
     }
 }
 
-/// Split an over-full internal node; returns (left_id, promote).
+/// Split an over-full internal node in half; returns `(left_id, promote)`
+/// with the median key as the promoted separator and the right half as a
+/// new node.
+///
+/// The median key's child becomes the right half's `first_child`, so both
+/// halves end with ≤ `order` separators and no key is duplicated or
+/// dropped.
 fn split_internal<P: ObjectProvider>(
     first_child: ChunkId,
     entries: Vec<Entry>,
@@ -1030,8 +1469,14 @@ fn split_internal<P: ObjectProvider>(
     Ok((left_id, Some((median_key, right_id))))
 }
 
-/// Returns (new node id or None if the node collapsed to empty, removed
-/// value). COW invariant: changed nodes return their new content id.
+/// Recursive COW remove: delete `key` from the subtree rooted at
+/// `node_id`; returns `(new subtree root, removed value)`.
+///
+/// The new root is `None` when the subtree COLLAPSED to empty — the
+/// caller drops the separator that pointed here. An absent key returns
+/// `(Some(node_id), None)`: untouched, id unchanged. COW invariant:
+/// changed nodes return their new content id. Under-full-but-nonempty
+/// nodes are left in place (the v1 tradeoff — see [`remove`]).
 fn remove_rec<P: ObjectProvider>(
     node_id: ChunkId,
     key: &[u8],
@@ -1040,11 +1485,20 @@ fn remove_rec<P: ObjectProvider>(
     provider: &mut P,
     depth: u32,
 ) -> Result<RemoveResult, BTreeError> {
+    // ---------------------------------------------------------------------------
+    // Stage 1: depth guard, then fetch and decode the node.
+    // ---------------------------------------------------------------------------
     if depth > 128 {
         return Err(BTreeError::Invariant("tree depth exceeded".into()));
     }
     let node = fetch(node_id, order, max_fanout, provider)?;
     match node {
+        // -----------------------------------------------------------------
+        // Stage 2 (leaf): locate and remove.
+        //
+        // Found ⇒ drop the entry; an empty leaf COLLAPSES to `None` (the
+        // parent drops the separator). Not found ⇒ untouched (own id).
+        // -----------------------------------------------------------------
         Node::Leaf { mut entries } => {
             match entries.binary_search_by(|e| e.key.as_slice().cmp(key)) {
                 Ok(i) => {
@@ -1061,6 +1515,17 @@ fn remove_rec<P: ObjectProvider>(
                 Err(_) => Ok((Some(node_id), None)),
             }
         }
+        // -----------------------------------------------------------------
+        // Stage 3 (internal): descend into the child covering `key`, then
+        // fold the child's result.
+        //
+        // - child collapsed ⇒ drop its separator (a collapsed first_child
+        //   promotes the next survivor; if only one child remains the
+        //   node collapses to that child);
+        // - child unchanged ⇒ the node keeps its id (absent key);
+        // - child changed ⇒ rewrite the slot pointer and re-stage (new
+        //   id).
+        // -----------------------------------------------------------------
         Node::Internal {
             first_child,
             mut entries,
@@ -1171,6 +1636,12 @@ struct ScanState {
     last_key: Option<Vec<u8>>,
 }
 
+/// Recursive in-order scan of the subtree rooted at `node_id`, emitting
+/// window-matching entries into `state.out` until `limit` (then sets
+/// `has_more`); `last_key` records the final emitted key for resumption.
+/// Children whose key ranges cannot intersect the window are pruned via
+/// `min_bound` narrowing, so a narrow range walk does not traverse the
+/// whole tree. Depth-capped at 128.
 fn scan_rec<P: ObjectProvider>(
     node_id: ChunkId,
     start: Option<&[u8]>,
@@ -1179,6 +1650,9 @@ fn scan_rec<P: ObjectProvider>(
     params: &ScanParams<'_, P>,
     state: &mut ScanState,
 ) -> Result<(), BTreeError> {
+    // ---------------------------------------------------------------------------
+    // Stage 1: depth guard + limit check, then fetch and decode.
+    // ---------------------------------------------------------------------------
     if depth > 128 {
         return Err(BTreeError::Invariant("tree depth exceeded".into()));
     }
@@ -1191,6 +1665,10 @@ fn scan_rec<P: ObjectProvider>(
     }
     let node = fetch(node_id, params.order, params.max_fanout, params.provider)?;
     match node {
+        // -----------------------------------------------------------------
+        // Stage 2 (leaf): range-filter the entries and emit until the
+        // limit; the exclusive upper bound is enforced here.
+        // -----------------------------------------------------------------
         Node::Leaf { entries } => {
             for e in entries {
                 // Range filter.
@@ -1213,6 +1691,11 @@ fn scan_rec<P: ObjectProvider>(
             }
             Ok(())
         }
+        // -----------------------------------------------------------------
+        // Stage 3 (internal): descend children in key order, narrowing
+        // each child's window to its own key range (min_bound with the
+        // query bounds) so out-of-window subtrees are never fetched.
+        // -----------------------------------------------------------------
         Node::Internal {
             first_child,
             entries,
@@ -1261,6 +1744,11 @@ pub fn verify<P: ObjectProvider>(
     verify_rec(root, order, max_fanout, provider, 0)
 }
 
+/// Recursive invariant check (fsck): every reachable node decodes, keys
+/// are strictly increasing (decode enforces it), every child id is
+/// non-zero and present, and the depth cap bounds the walk — a cycle
+/// surfaces as `Invariant("tree depth exceeded")` rather than looping.
+/// Returns the entry count.
 fn verify_rec<P: ObjectProvider>(
     node_id: ChunkId,
     order: u16,

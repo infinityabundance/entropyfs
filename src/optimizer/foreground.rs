@@ -25,6 +25,79 @@
 //! optimizer (full search) can revisit any extent later — the
 //! foreground-state/settled-state distinction is exactly what makes this
 //! asymmetry safe.
+//!
+//! PURPOSE
+//!     Decide, per incoming write-path chunk, how much search CPU the
+//!     representation search deserves right now — the foreground half of
+//!     the foreground/settled division of labor.
+//!
+//! BOUNDARY
+//!     Decides CPU budget only. Which families EXIST is `OptimizeOptions`
+//!     (`optimizer::policy`, the ablation authority); this module never
+//!     defines correctness, never touches the store, and never commits.
+//!     The background optimizer (`optimizer::background`) is the other
+//!     half: it may revisit any extent later, which is what makes the
+//!     aggressive skips here safe.
+//!
+//! MODEL
+//!     Two gates compose per chunk: the policy (this module) decides
+//!     whether the full candidate search may run, and the options decide
+//!     which families exist. Cheap mode classifies each chunk with a
+//!     deterministic entropy probe before spending the expensive
+//!     LZ/entropy searches (see the three classes above).
+//!
+//! PERSISTENT AUTHORITY
+//!     None. A skip here changes only which candidate is chosen in
+//!     memory; RAW is exact, so no on-disk representation depends on the
+//!     policy.
+//!
+//! CORRECTNESS INVARIANTS
+//!     - the probe is deterministic (fixed stride), so the classification
+//!       is reproducible across runs;
+//!     - false negatives are harmless: a chunk misclassified LOW costs
+//!       CPU, never bytes; a chunk misclassified HIGH falls back to RAW,
+//!       which is exact, and the background optimizer revisits it later;
+//!     - anti-aliasing: the probe takes the MINIMUM entropy over three
+//!       consecutive strides, so periodic data never looks random (a
+//!       period p > 1 cannot divide three consecutive integers);
+//!     - chunks smaller than 256 bytes always run the full search (the
+//!       probe is unreliable and the families are cheap).
+//!
+//! CONCURRENCY
+//!     Per-chunk and single-threaded; no locks. The probe reads only the
+//!     chunk buffer handed to it.
+//!
+//! DURABILITY
+//!     None: nothing here persists.
+//!
+//! RESOURCE BOUNDS
+//!     The probe reads at most `probe_bytes` (default 4096) bytes of the
+//!     chunk over three strides, so classification cost is
+//!     O(probe_bytes) regardless of chunk size. The families themselves
+//!     are bounded by the policy mode plus `OptimizeOptions`.
+//!
+//! PERFORMANCE
+//!     The 10A millisecond map measured the motivation (above). The
+//!     sealed 10B court pair (evidence `8062f2d` / `d38f73f`) measured
+//!     the outcome: mounted random 64 MiB writes 66.5 → 229.3 MiB/s
+//!     (3.4×), compressed.tgz 42.0 → 66.3 MiB/s, daemon CPU 0.41× →
+//!     0.26× (−37%), and — the decisive number — settled density
+//!     UNCHANGED at 1.994×, because the background optimizer recovers
+//!     everything the cheap foreground defers. Direct-store random
+//!     writes 39.8 → 852 MiB/s (21×).
+//!
+//! FAILURE MODES
+//!     No hard failures: the only failure is a misclassification, which
+//!     is bounded on both sides (wasted CPU, or a densification deferred
+//!     to the background pass). The min-over-strides probe is the
+//!     conservative direction — families are skipped only when EVERY
+//!     stride looks high-entropy.
+//!
+//! HISTORY / EVIDENCE
+//!     Phase-10B introduced `ForegroundMode::Cheap` (evidence `8062f2d` /
+//!     `d38f73f`); the anti-aliasing min-over-strides was found by the
+//!     periodic fixture in `entropy_classification_is_deterministic_and_sane`;
+//!     `ForegroundMode::RawOnly` is the raw-only control arm.
 
 #![forbid(unsafe_code)]
 
@@ -46,6 +119,17 @@ pub enum ForegroundMode {
 }
 
 /// The foreground representation policy.
+///
+/// Role: the CPU-budget authority for one write-path chunk. It composes
+/// with `OptimizeOptions` (the family authority): the policy says whether
+/// the full search may run, the options say which families exist.
+///
+/// Invariants: `mode` is one of three sealed modes (the 10B comparison
+/// arms); `high_entropy_bits` is Shannon entropy in bits per byte
+/// (8.0 = uniform byte alphabet; compressed data sits near it;
+/// source/text is typically 4–6); `probe_bytes` is the probe sample size
+/// in bytes. A `Copy` value with no interior state, safe to share across
+/// threads.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ForegroundPolicy {
     /// Search mode.
@@ -80,6 +164,13 @@ impl ForegroundPolicy {
     }
 
     /// The cheap policy (10B): probe + skip hopeless families.
+    ///
+    /// Evidence (Phase-10B, sealed `8062f2d` / `d38f73f`): the
+    /// high-entropy probe skips the LZ/entropy families for incompressible
+    /// chunks, and the background optimizer recovers everything the cheap
+    /// foreground defers — direct-store random writes 39.8 → 852 MiB/s
+    /// (21×), mounted random 64 MiB writes 66.5 → 229.3 MiB/s (3.4×),
+    /// daemon CPU −37%, settled density unchanged at 1.994×.
     pub const fn cheap() -> Self {
         Self {
             mode: ForegroundMode::Cheap,
@@ -128,7 +219,10 @@ impl ForegroundPolicy {
 /// integers, so at least one stride breaks the alias. The minimum is
 /// also the conservative direction (only skip the families when EVERY
 /// stride looks high-entropy; a false low-entropy verdict just costs CPU,
-/// never correctness).
+/// never correctness). Pinned by the periodic fixture in
+/// `entropy_classification_is_deterministic_and_sane`: a 256-period
+/// uniform pattern must stay below the high-entropy threshold so the
+/// configurational (periodic) family still gets evaluated.
 pub fn sampled_entropy(chunk: &[u8], probe_bytes: usize) -> f64 {
     if chunk.is_empty() {
         return 0.0;
@@ -164,6 +258,11 @@ pub fn sampled_entropy(chunk: &[u8], probe_bytes: usize) -> f64 {
 
 /// The 10B classification: high entropy (incompressible) — the LZ and
 /// entropy families cannot beat RAW on such data.
+///
+/// Threshold: Shannon entropy (bits per byte) at or above
+/// `policy.high_entropy_bits` (7.2 default). The 256-byte floor exists
+/// because on tiny chunks the probe is unreliable and the families are
+/// cheap — always run the full search (pinned by `tiny_chunks_never_skip`).
 pub fn high_entropy(chunk: &[u8], policy: &ForegroundPolicy) -> bool {
     if chunk.len() < 256 {
         // Tiny chunks: the probe is unreliable and the families are
@@ -222,6 +321,16 @@ pub fn foreground_allows(
 }
 
 /// Which families the foreground may evaluate for one chunk.
+///
+/// Role: the materialized decision `foreground_allows` computes for one
+/// chunk — the policy gate applied on top of the options gate. Produced
+/// by `foreground_allows` (or `unrestricted()` where CPU is not the
+/// product, e.g. the background/guided search), never hand-assembled in
+/// the write path.
+///
+/// Invariant: `dedup` and `zero_fill` are always true in the write path
+/// (exact dedup is a store invariant; ZERO/FILL decide immediately); the
+/// rest follow `OptimizeOptions` when the policy admits the full search.
 #[derive(Debug, Clone, Copy)]
 pub struct ForegroundFamilySet {
     /// Exact dedup (P2) — always allowed in the write path.
