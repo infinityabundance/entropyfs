@@ -392,6 +392,9 @@ impl crate::core::materialize::DecoderContext for PrefetchContext<'_> {
         if let Some(b) = self.objects.get(id) {
             return Ok(b.clone());
         }
+        if let Some(b) = self.ep.and_then(|e| e.staged_payloads.get(id)) {
+            return Ok(b.clone());
+        }
         self.store.fetch_object_impl(id)
     }
 
@@ -451,7 +454,12 @@ impl crate::core::materialize::DecoderContext for PrefetchContext<'_> {
 #[derive(Debug, Default)]
 pub struct Epoch {
     /// Next log sequence number (1-based; the checkpoint root records the
-    /// highest consumed sequence).
+    /// highest consumed sequence). GLOBALLY MONOTONIC: it is only ever
+    /// bumped, never reset (the checkpoint snapshots the overlay rather
+    /// than replacing the epoch), so envelope sequence numbers are unique
+    /// across the whole store lifetime and strictly ordered by append
+    /// order. Recovery replays exactly the envelopes with
+    /// `seq > root.log_seq`.
     pub seq: u64,
     /// ino -> final inode (creates, setattrs, parent updates).
     pub pending_inodes: std::collections::BTreeMap<u64, Inode>,
@@ -468,6 +476,13 @@ pub struct Epoch {
     /// Object ids already appended by earlier epoch ops (per-epoch dedup
     /// for the staged-object records).
     pub staged_objects: std::collections::HashSet<ChunkId>,
+    /// The staged-object PAYLOADS (id -> bytes): the objects of this
+    /// epoch's pending extents/chunk-index entries. They are appended to
+    /// the segment by the op's `epoch_append` — a concurrent overlay read
+    /// may resolve a pending descriptor BEFORE that append lands, so the
+    /// read path fetches from here (the object index only knows appended
+    /// records). Cleared at the checkpoint like `staged_objects`.
+    pub staged_payloads: std::collections::HashMap<ChunkId, Vec<u8>>,
     /// Whether the MutationLog incompat feature bit has been persisted.
     pub feature_persisted: bool,
     /// Highest inode number known (committed max when 0 and unset; the
@@ -477,10 +492,11 @@ pub struct Epoch {
 }
 
 impl Epoch {
-    /// Whether the epoch has any pending state.
+    /// Whether the epoch has any pending state (the sequence counter is
+    /// globally monotonic and non-zero after any checkpoint, so it is not
+    /// part of the emptiness test — pending overlay state is).
     pub fn is_empty(&self) -> bool {
-        self.seq == 0
-            && self.pending_inodes.is_empty()
+        self.pending_inodes.is_empty()
             && self.removed_inodes.is_empty()
             && self.pending_entries.is_empty()
             && self.removed_entries.is_empty()

@@ -1,5 +1,77 @@
 # EntropyFS changelog
 
+## v0.6.3 (2026-08-26)
+
+**10G — parallel-workload hardening.** The writeback-native architecture
+(10D epochs + 10E range reads + 10F io_uring transport) re-run under
+GENUINELY PARALLEL workloads (`tools/court-threads-parallel.sh`: concurrent
+`cp`/`cmp`, multi-thread namespace loops, `make -j` with the target on the
+mount). The sweep exposed five real bugs — all fixed, all regression-pinned
+on both io backends (385 lib tests green):
+
+1. **Epoch envelope sequence monotonicity.** `Epoch::envelope()` assigned
+   each op's `MutationLog` sequence at STAGE time, and the checkpoint
+   `mem::take`'d the epoch and restarted the counter at 0 — a post-
+   checkpoint op could receive a small seq <= an earlier `log_seq` and be
+   silently DROPPED at recovery (its overlay was never checkpointed), and
+   two epochs could emit envelopes sharing a sequence (the recovery
+   "duplicate mutation log sequence" invariant). The sequence counter is
+   now globally monotonic (never reset); the inode high-water mark is
+   carried the same way (a reset could hand out a duplicate ino — two
+   files, one ino).
+
+2. **Checkpoint snapshot redesign.** The checkpoint SNAPSHOTS the overlay
+   under the commit lock (the live epoch keeps its state, so concurrent
+   epoch ops never see the old empty-overlay + stale-committed gap that
+   produced spurious "inode missing" EIOs), merges the snapshot, and
+   compare-and-removes exactly the snapshot's entries only after a
+   successful commit (a failed commit leaves the overlay intact). An
+   overlapping checkpoint can no longer merge a stale snapshot onto a
+   newer tree (the observed corruption: a file's committed size regressed
+   while its tail extents remained — fsck "extent ends beyond file size").
+   `log_seq` is `max`'d with the pre-commit root for monotonicity.
+
+3. **Overlay read-path staleness.** `read_file_epoch` used the PENDING
+   inode's `extent_root` — stale once a checkpoint published a newer tree
+   — so reads missed newly-committed extents (holes at chunk boundaries,
+   cached by the kernel). The read now walks the CURRENT committed
+   inode's `extent_root` (overlaid with the pending extents) and extends
+   the scan window to the PENDING predecessor. `dir_lookup_epoch` /
+   `read_dir_epoch` got the same committed-`dir_root` fix (the parallel
+   namespace court hit "no such entry" on epoch-merged entries).
+
+4. **In-flight staged objects.** An overlay read resolving a PENDING
+   descriptor could fetch objects that were not yet appended (they live in
+   the op's local records until `epoch_append`), producing silent zeros
+   via the decode. The epoch now retains the staged object PAYLOADS
+   (`staged_payloads`, cleared at the checkpoint) and the read paths
+   resolve through them.
+
+5. **FUSE writeback-cache removal.** In writeback mode the kernel flushes
+   dirty pages asynchronously and can interleave READ requests between a
+   file's write requests; the epoch overlay is only complete once every
+   write is staged, so such reads returned partial extents the kernel then
+   cached (mount corruption at chunk boundaries). The daemon no longer
+   negotiates `FUSE_WRITEBACK_CACHE` — write-through makes each `write()`
+   wait for the daemon's ack, so reads always observe fully-staged
+   writes; aggregation is preserved via `max_write`. The FUSE read
+   handler also serializes with the file's in-flight writes.
+
+Also: the epoch-write chunk-index SELF-ALIAS guard (the dedup path's
+`EXACT_REF{target: cid}` must never be registered as the pending entry
+for its own cid — it would let the checkpoint clobber the retained
+terminal with a self-loop, `DepthExceeded` on concurrent identical-content
+writes), and the parallel-workload sweep tool + regression tests
+(`epoch_self_alias`, `epoch_seq_monotonic`, `court_repro`,
+`partial_window_read`, `split_write`, `namespace_repro`).
+
+Sealed: the full court (`court-threads-parallel-1787745479/`) runs clean
+at 1/2/4/8/16 threads; the FUSE max-request-concurrency column is
+GENUINELY >1 for the parallel workloads (reads 351→1044 MB/s, namespace
+ops 200→3200 ops/s, writes ~350→550 MB/s) — the Phase-10A serial-`cp`
+concurrency ceiling (~1) is falsified for parallel workloads; `make -j`
+is flat (~11–12 s, compile-bound).
+
 ## v0.6.2 (2026-08-26)
 
 **10F — io_uring storage transport (`IoBackend`, ADR-0021):** all file

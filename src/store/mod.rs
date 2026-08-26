@@ -1551,7 +1551,10 @@ impl Store {
             descs.push(desc);
         }
         // 2. ONE batched fetch (the read_many win; one submission queue
-        //    for `UringIo`).
+        //    for `UringIo`). Objects staged by in-flight epoch ops are
+        //    not in the object index yet — resolve them from the epoch's
+        //    staged payloads (the overlay read must never see a pending
+        //    descriptor whose objects are unfetchable).
         let objects: std::collections::HashMap<ChunkId, Vec<u8>> = {
             let results = self
                 .perf
@@ -1562,7 +1565,11 @@ impl Store {
                     Ok(Some(b)) => {
                         map.insert(*id, b);
                     }
-                    Ok(None) => {} // missing: fall back at decode time
+                    Ok(None) => {
+                        if let Some(b) = ep.and_then(|e| e.staged_payloads.get(id)) {
+                            map.insert(*id, b.clone());
+                        }
+                    }
                     Err(e) => return Err(e),
                 }
             }
@@ -4082,15 +4089,20 @@ impl Store {
         if ep.removed_entries.contains(&(dir_ino, name.to_vec())) {
             return Ok(None);
         }
-        // Fall back to the committed tree through the overlay-aware parent
-        // inode (an epoch-created directory has no committed inode; its
-        // dir_root is ZERO until the checkpoint).
-        let inode = self
-            .get_inode_epoch(ep, dir_ino)?
-            .ok_or_else(|| StoreError::Invariant(format!("inode {dir_ino} missing")))?;
-        let dir_root = match inode.data {
-            InodeData::Directory { dir_root } => dir_root,
-            _ => return Err(StoreError::Invariant("not a directory".into())),
+        // Fall back to the committed tree through the CURRENT committed
+        // parent inode — NOT the overlay inode's dir_root, which is the
+        // committed root captured when the epoch's first pending op read
+        // it and goes STALE once a checkpoint publishes a newer directory
+        // tree (Phase-10G: the parallel namespace court hit "no such
+        // entry" on an entry the epoch-merged committed tree already
+        // contains). An epoch-created directory has no committed inode;
+        // its dir_root is ZERO until the checkpoint.
+        let dir_root = match self.get_inode(dir_ino)? {
+            Some(i) => match i.data {
+                InodeData::Directory { dir_root } => dir_root,
+                _ => return Err(StoreError::Invariant("not a directory".into())),
+            },
+            None => crate::core::extent::ChunkId::ZERO,
         };
         if dir_root.is_zero() {
             return Ok(None);
@@ -4122,12 +4134,16 @@ impl Store {
         ep: &crate::store::epoch::Epoch,
         dir_ino: u64,
     ) -> Result<Vec<(Vec<u8>, directory::DirEntry)>, StoreError> {
-        let inode = self
-            .get_inode_epoch(ep, dir_ino)?
-            .ok_or_else(|| StoreError::Invariant(format!("inode {dir_ino} missing")))?;
-        let dir_root = match inode.data {
-            InodeData::Directory { dir_root } => dir_root,
-            _ => return Err(StoreError::Invariant("not a directory".into())),
+        // The CURRENT committed inode's dir_root (not the overlay inode's,
+        // which goes stale once a checkpoint publishes a newer directory
+        // tree — see `dir_lookup_epoch`). An epoch-created directory has
+        // no committed inode yet (empty base).
+        let dir_root = match self.get_inode(dir_ino)? {
+            Some(i) => match i.data {
+                InodeData::Directory { dir_root } => dir_root,
+                _ => return Err(StoreError::Invariant("not a directory".into())),
+            },
+            None => crate::core::extent::ChunkId::ZERO,
         };
         let mut merged: std::collections::BTreeMap<Vec<u8>, directory::DirEntry> =
             std::collections::BTreeMap::new();
@@ -4174,9 +4190,22 @@ impl Store {
             return Err(StoreError::Invariant("not a regular file".into()));
         }
         let limits = self.config.limits;
-        let extent_root = match inode.data {
-            InodeData::File { extent_root } => extent_root,
-            _ => unreachable!(),
+        // The extent_root inside the epoch's PENDING inode is the
+        // committed root captured when the first pending write read it —
+        // STALE once a checkpoint publishes a newer root (and the newer
+        // committed extents were removed from the overlay). The committed
+        // trees are immutable, so the read must walk the CURRENT
+        // committed inode's extent_root (overlaid with the pending
+        // extents) for a complete view. A file created in this epoch has
+        // no committed inode yet — every extent is pending (empty base).
+        // (Phase-10G: the mounted parallel read-back hit holes at chunk
+        // boundaries when a checkpoint merged mid-epoch writes.)
+        let extent_root = match self.get_inode(ino)? {
+            Some(i) => match i.data {
+                InodeData::File { extent_root } => extent_root,
+                _ => crate::core::extent::ChunkId::ZERO,
+            },
+            None => crate::core::extent::ChunkId::ZERO,
         };
         // Clamp to the final file size (the epoch's pending size).
         let size = inode.size;
@@ -4188,7 +4217,7 @@ impl Store {
         // [covering(offset), end) via one traversal, overlaid with the
         // epoch's pending extents in the same window (a full-tree scan
         // would walk every leaf for a small read).
-        let scan_start = if extent_root.is_zero() {
+        let mut scan_start = if extent_root.is_zero() {
             offset
         } else {
             match crate::store::extent_tree::covering(
@@ -4202,6 +4231,18 @@ impl Store {
                 None => offset,
             }
         };
+        // A PENDING extent may cover `offset` while starting below the
+        // committed predecessor — when the writes are still in the epoch,
+        // the committed tree lacks them, so the covering above falls back
+        // to `offset` and the pending range below would miss the covering
+        // extent (Phase-10G: the mounted page-granular reads hit holes at
+        // chunk boundaries exactly this way). Extend the window to the
+        // pending predecessor as well; the committed scan and the pending
+        // overlay are merged by offset, so the extra range is harmless
+        // when the committed tree is newer.
+        if let Some(((_, poff), _)) = ep.pending_extents.range(..=(ino, offset)).next_back() {
+            scan_start = scan_start.min(*poff);
+        }
         let mut extents: std::collections::BTreeMap<u64, Vec<u8>> =
             std::collections::BTreeMap::new();
         if !extent_root.is_zero() {
@@ -4231,13 +4272,74 @@ impl Store {
     /// are only referenced by the log, which GC's reachability walk does
     /// not see as roots.
     pub fn epoch_checkpoint(&self, hooks: &CrashHooks) -> Result<(), StoreError> {
+        // Fast path: nothing pending (also avoids taking the commit lock
+        // for the common empty-epoch case).
         if self.epoch().is_empty() {
             return Ok(());
         }
         let limits = self.config.limits;
         let fanout = limits.max_fanout;
         let mut tx = self.begin_tx()?;
-        let frozen: crate::store::epoch::Epoch = std::mem::take(&mut *self.epoch());
+        // SNAPSHOT the pending overlay; the live epoch KEEPS its state.
+        // The merge runs on the snapshot, and the snapshot's entries are
+        // compare-and-removed only after the commit SUCCEEDS. Two
+        // properties follow:
+        //
+        // 1. The snapshot is taken UNDER the commit lock, so a checkpoint
+        //    that waited behind another checkpoint merges the CURRENT
+        //    overlay — never a snapshot taken before the earlier
+        //    checkpoint's commit + remove. An un-serialized snapshot could
+        //    revert a newer committed tree to a stale inode: the stale
+        //    snapshot's merge base is the NEWER root (whose extents stay),
+        //    while its inode (older size) overwrites the newer one — the
+        //    Phase-10G corruption where a file's committed size regressed
+        //    while its tail extents remained, tripping fsck ("extent ends
+        //    beyond file size") and short reads on the mount.
+        //
+        // 2. Closing the visibility gap of the old take-first design: a
+        //    concurrent epoch op between the freeze (mem::take) and the
+        //    root publication saw an EMPTY overlay AND a STALE committed
+        //    root and reported spurious "inode missing" invariants
+        //    (epoch ops read through the overlay + committed trees without
+        //    the commit lock, so they must never observe the checkpoint
+        //    mid-flight). A failed commit also leaves the overlay intact
+        //    for the next attempt instead of silently discarding
+        //    acknowledged state.
+        //
+        // The envelope sequence counter is GLOBALLY MONOTONIC: it is only
+        // ever bumped (never reset), so a post-checkpoint op can never
+        // reuse a sequence the checkpoint already consumed into `log_seq`.
+        // Without monotonicity, an op staged after a checkpoint could
+        // receive a small seq <= an earlier log_seq and be silently
+        // dropped at recovery (its overlay was never checkpointed), and
+        // two epochs could emit envelopes sharing a sequence (the
+        // recovery duplicate invariant). The inode high-water mark is
+        // monotonic the same way: a reset to 0 would make the next create
+        // re-scan the committed index — STALE while this checkpoint's
+        // root is mid-commit — and hand out an inode number another
+        // (already-merged) create allocated, corrupting the namespace
+        // (two files, one ino).
+        let frozen: crate::store::epoch::Epoch = {
+            let ep = self.epoch();
+            if ep.is_empty() {
+                // Another checkpoint merged everything while we waited
+                // for the commit lock; nothing to do.
+                return Ok(());
+            }
+            crate::store::epoch::Epoch {
+                seq: ep.seq,
+                pending_inodes: ep.pending_inodes.clone(),
+                removed_inodes: ep.removed_inodes.clone(),
+                pending_entries: ep.pending_entries.clone(),
+                removed_entries: ep.removed_entries.clone(),
+                pending_extents: ep.pending_extents.clone(),
+                pending_chunks: ep.pending_chunks.clone(),
+                staged_objects: ep.staged_objects.clone(),
+                staged_payloads: std::collections::HashMap::new(),
+                feature_persisted: ep.feature_persisted,
+                max_ino: ep.max_ino,
+            }
+        };
         let committed_root = tx.root().clone();
 
         // 1. Final inode map: the epoch's pending inodes (the ops updated
@@ -4383,9 +4485,56 @@ impl Store {
             )
         })?;
 
-        // 7. The checkpoint root consumes the frozen log sequence.
-        tx.root_mut().log_seq = frozen.seq;
+        // 7. The checkpoint root consumes the frozen log sequence. `max`
+        //    with the pre-commit root keeps log_seq globally monotonic
+        //    even when two checkpoints overlap (a later-committing
+        //    checkpoint may have snapshotted an EARLIER counter value than
+        //    the one the previous checkpoint already published).
+        tx.root_mut().log_seq = frozen.seq.max(tx.root().log_seq);
         tx.commit_deferred(hooks)?;
+        // 8. The commit succeeded: drop exactly the snapshot's overlay
+        //    entries. Compare-and-remove — an op that staged a NEWER value
+        //    for the same key while the merge ran keeps its entry (it is
+        //    the next checkpoint's work, and its envelope has seq >
+        //    log_seq). For the removal SETS, the snapshot's merge already
+        //    made the removal effective in the trees, so a re-added key is
+        //    redundant and safe to drop.
+        {
+            let mut ep = self.epoch();
+            for (ino, inode) in &frozen.pending_inodes {
+                if ep.pending_inodes.get(ino) == Some(inode) {
+                    ep.pending_inodes.remove(ino);
+                }
+            }
+            for ino in &frozen.removed_inodes {
+                ep.removed_inodes.remove(ino);
+            }
+            for ((parent, name), entry) in &frozen.pending_entries {
+                if ep.pending_entries.get(&(*parent, name.clone())) == Some(entry) {
+                    ep.pending_entries.remove(&(*parent, name.clone()));
+                }
+            }
+            for key in &frozen.removed_entries {
+                ep.removed_entries.remove(key);
+            }
+            for ((ino, off), bytes) in &frozen.pending_extents {
+                if ep.pending_extents.get(&(*ino, *off)) == Some(bytes) {
+                    ep.pending_extents.remove(&(*ino, *off));
+                }
+            }
+            for (cid, bytes) in &frozen.pending_chunks {
+                if ep.pending_chunks.get(cid) == Some(bytes) {
+                    ep.pending_chunks.remove(cid);
+                }
+            }
+            // The staged-object dedup set restarts empty: every object it
+            // named is now committed (this merge) or was already appended
+            // and indexed, so `epoch_stage` still dedups through the
+            // object index. The staged PAYLOADS (for in-flight overlay
+            // reads) are dropped with it.
+            ep.staged_objects.clear();
+            ep.staged_payloads.clear();
+        }
         Ok(())
     }
 
@@ -4405,6 +4554,9 @@ impl Store {
             return id;
         }
         ep.mark_staged(id);
+        // Retain the payload for overlay reads that resolve this object
+        // before the op's append lands (see `Epoch::staged_payloads`).
+        ep.staged_payloads.insert(id, payload.clone());
         records.push(crate::store::transaction::PendingRecord {
             tag,
             payload,
@@ -4906,7 +5058,24 @@ impl Store {
             chunks.push((u.offset, u.content_id, desc_bytes.clone()));
             ep.pending_extents
                 .insert((ino, u.offset), desc_bytes.clone());
-            ep.pending_chunks.entry(u.content_id).or_insert(desc_bytes);
+            // The chunk index must never resolve a content id to a
+            // descriptor that references the same content id: the dedup
+            // path emits EXACT_REF{target: cid} for an already-committed
+            // chunk, and registering it in the pending map would let the
+            // checkpoint clobber the retained terminal entry with a
+            // self-loop (materialize(cid) -> EXACT_REF{cid} forever; the
+            // depth cap turns it into DepthExceeded). The self-aliasing
+            // extent stays valid — it resolves through the committed
+            // terminal. Mirrors `put_chunk_in_tx` and the PendingBatch
+            // contract (Phase-10G regression: parallel identical-content
+            // writes, e.g. cp -P of duplicated files, hit this).
+            let self_aliasing = matches!(
+                u.descriptor,
+                Representation::ExactRef { target, .. } if target == u.content_id
+            );
+            if !self_aliasing {
+                ep.pending_chunks.entry(u.content_id).or_insert(desc_bytes);
+            }
         }
         let mut fin = inode;
         fin.size = new_size;
@@ -5238,7 +5407,11 @@ impl Store {
     fn maybe_checkpoint_epoch(&self) -> Result<(), StoreError> {
         /// Pending ops per epoch before an automatic close.
         const EPOCH_MAX_OPS: u64 = 1024;
-        if self.epoch().seq >= EPOCH_MAX_OPS {
+        // The epoch sequence is globally monotonic (it continues from the
+        // consumed log_seq across checkpoints), so the pending-op count is
+        // the difference from the committed log sequence.
+        let pending = self.epoch().seq.saturating_sub(self.current_root().log_seq);
+        if pending >= EPOCH_MAX_OPS {
             self.epoch_checkpoint(&CrashHooks::none())?;
         }
         Ok(())

@@ -334,26 +334,21 @@ impl Filesystem for EntropyFs {
         let _ = config.set_max_readahead(1024 * 1024);
         let _ = config.set_max_background(64);
         let _ = config.set_congestion_threshold(48);
-        // Writeback cache: the kernel aggregates tiny application writes
-        // into large write() requests and serves reads from its page
-        // cache, so read-your-writes never depends on the daemon's commit
-        // cadence. Async reads and parallel directory ops make the
-        // lock-free read path (Phase 8) reachable from multiple kernel
-        // threads. If the kernel does not offer writeback, we continue
-        // without it (correctness is unaffected; only aggregation is
-        // lost).
+        // Phase-10G: the writeback cache is intentionally NOT requested —
+        // in writeback mode the kernel flushes dirty pages asynchronously
+        // and can interleave read requests between a file's write
+        // requests; the daemon's epoch overlay is only complete once every
+        // write is staged, so such reads would return partial extents that
+        // the kernel then caches (mounted-court corruption). Write-through
+        // (the default without the flag) makes each write() wait for the
+        // daemon's ack, so reads always observe fully-staged writes.
+        // Aggregation is preserved via max_write.
         let available = config.capabilities();
-        let wanted = fuser::InitFlags::FUSE_WRITEBACK_CACHE
-            | fuser::InitFlags::FUSE_ASYNC_READ
+        let wanted = fuser::InitFlags::FUSE_ASYNC_READ
             | fuser::InitFlags::FUSE_PARALLEL_DIROPS
             | fuser::InitFlags::FUSE_BIG_WRITES;
         let supported = wanted & available;
         let _ = config.add_capabilities(supported);
-        if !supported.contains(fuser::InitFlags::FUSE_WRITEBACK_CACHE) {
-            log::warn!(
-                "entropyfs: kernel does not offer FUSE_WRITEBACK_CACHE; write aggregation degraded"
-            );
-        }
         Ok(())
     }
 
@@ -686,6 +681,14 @@ impl Filesystem for EntropyFs {
     ) {
         let _g = ReqGuard::begin(&self.stats, "read");
         let store = self.store();
+        // Serialize with the file's in-flight epoch writes: the kernel can
+        // interleave read requests between a file's write-back requests,
+        // and the overlay is only complete once every write is staged. The
+        // per-inode mutation lock (already held by `epoch_write`) closes
+        // that window (Phase-10G: the parallel-workload court hit
+        // read-before-write state — partial extents — that the kernel then
+        // cached).
+        let _lock = store.inode_lock(ino.0);
         let ep = store.epoch();
         match store.read_file_epoch(&ep, ino.0, offset, size as u64) {
             Ok(data) => reply.data(&data),
