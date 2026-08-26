@@ -263,6 +263,12 @@ pub struct Store {
     /// Bounded by `DSFB_MAX_CHUNKS`; dropping it affects only search
     /// ordering, never bytes (ADR-0004).
     dsfb: std::sync::Mutex<crate::dsfb::observer::StorageObserver>,
+    /// Total candidate representations evaluated by foreground search
+    /// (diagnostic only). The 11F oracle's "candidate count" row:
+    /// accumulated at the two `encode_guided` call sites on the write
+    /// path with identical accounting in every configuration, so it is a
+    /// pure measurement — never a behavior.
+    candidates_evaluated: std::sync::atomic::AtomicU64,
     /// Per-inode mutation locks (file-data writes and truncates).
     inode_locks: std::sync::Arc<InodeLockTable>,
     /// Phase-10A write-path phase timings (diagnostic only).
@@ -382,6 +388,7 @@ impl Store {
             _lock: lock,
             model_cache: std::sync::Mutex::new(crate::cache::model::ModelCache::new(64)),
             dsfb: std::sync::Mutex::new(crate::dsfb::observer::StorageObserver::default()),
+            candidates_evaluated: std::sync::atomic::AtomicU64::new(0),
             inode_locks: std::sync::Arc::new(InodeLockTable::default()),
             perf: std::sync::Arc::new(crate::perf::Timings::default()),
             foreground: config.foreground,
@@ -462,6 +469,7 @@ impl Store {
             _lock: lock,
             model_cache: std::sync::Mutex::new(crate::cache::model::ModelCache::new(64)),
             dsfb: std::sync::Mutex::new(crate::dsfb::observer::StorageObserver::default()),
+            candidates_evaluated: std::sync::atomic::AtomicU64::new(0),
             inode_locks: std::sync::Arc::new(InodeLockTable::default()),
             perf: std::sync::Arc::new(crate::perf::Timings::default()),
             foreground: config.foreground,
@@ -619,24 +627,37 @@ impl Store {
     }
 
     /// The DSFB search plan for a chunk (trust-ordered, budget-bounded).
+    ///
+    /// Timed under the global `dsfb_plan` row (NOT the request envelope —
+    /// `perf::time` records globally only) so the 11F oracle can compare
+    /// observer-call wall time between the single-mutex observer and the
+    /// sharded observer without disturbing the per-request reconciliation
+    /// partition (`prepare` already contains this call's wall; a second
+    /// envelope row would double-count).
     pub fn dsfb_plan(
         &self,
         key: &crate::dsfb::features::ChunkKey,
     ) -> crate::dsfb::selection::SearchPlan {
-        self.dsfb.lock().expect("dsfb poisoned").plan(key)
+        self.perf.time("dsfb_plan", || {
+            self.dsfb.lock().expect("dsfb poisoned").plan(key)
+        })
     }
 
-    /// DSFB trust for one channel of a chunk.
+    /// DSFB trust for one channel of a chunk. Timed under the global
+    /// `dsfb_trust` row (same rationale as [`Store::dsfb_plan`]).
     pub fn dsfb_trust(
         &self,
         key: &crate::dsfb::features::ChunkKey,
         channel: crate::dsfb::features::Channel,
     ) -> f64 {
-        self.dsfb.lock().expect("dsfb poisoned").trust(key, channel)
+        self.perf.time("dsfb_trust", || {
+            self.dsfb.lock().expect("dsfb poisoned").trust(key, channel)
+        })
     }
 
     /// Feed the DSFB observer (performance-only state). Bounded eviction
-    /// keeps the observer from growing without limit.
+    /// keeps the observer from growing without limit. Timed under the
+    /// global `dsfb_observe` row (same rationale as [`Store::dsfb_plan`]).
     pub fn dsfb_observe(
         &self,
         key: crate::dsfb::features::ChunkKey,
@@ -644,17 +665,30 @@ impl Store {
         winner: crate::dsfb::features::Channel,
         outcome_quality: f64,
     ) -> crate::dsfb::drift::Regime {
-        let mut dsfb = self.dsfb.lock().expect("dsfb poisoned");
-        let regime = dsfb.observe(key, measurements, winner, outcome_quality);
-        if dsfb.len() > DSFB_MAX_CHUNKS {
-            dsfb.evict_one();
-        }
-        regime
+        self.perf.time("dsfb_observe", || {
+            let mut dsfb = self.dsfb.lock().expect("dsfb poisoned");
+            let regime = dsfb.observe(key, measurements, winner, outcome_quality);
+            if dsfb.len() > DSFB_MAX_CHUNKS {
+                dsfb.evict_one();
+            }
+            regime
+        })
     }
 
     /// Observer statistics (for `status`).
     pub fn dsfb_stats(&self) -> crate::dsfb::observer::ObserverStats {
         self.dsfb.lock().expect("dsfb poisoned").stats
+    }
+
+    /// Total candidate representations evaluated by foreground search
+    /// (diagnostic; the 11F oracle's candidate-count row). CPU-scale
+    /// counter incremented at every successful `encode_guided` on the
+    /// write path; identical accounting across scheduler/observer
+    /// configurations, so cross-configuration deltas measure search
+    /// guidance changes, never instrumentation.
+    pub fn candidates_evaluated(&self) -> u64 {
+        self.candidates_evaluated
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Materialize the chunk at `offset` of `ino` as a candidate base, but
@@ -3012,6 +3046,11 @@ fn encode_prepared_chunk(
     let outcome = store.perf().time("search", || {
         crate::optimizer::search::encode_guided(store, &ctx, options, fg)
     })?;
+    // 11F diagnostic: count evaluated candidates (never a behavior).
+    store.candidates_evaluated.fetch_add(
+        outcome.evaluated as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     Ok((flatten_updates, outcome, prev_version))
 }
 
@@ -3592,6 +3631,13 @@ impl Store {
                         StoreError::Invariant(format!("fallback re-encode failed validation: {e}"))
                     })?;
                 outcome = redo;
+                // 11F diagnostic: the fallback re-encode also evaluated
+                // candidates; count them with the same accounting as the
+                // parallel search (never a behavior).
+                self.candidates_evaluated.fetch_add(
+                    outcome.evaluated as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 real_depth = crate::optimizer::rebase::chain_depth_uncapped(
                     self,
                     &outcome.update.descriptor,
