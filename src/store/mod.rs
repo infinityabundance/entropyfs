@@ -17,6 +17,7 @@ pub mod root;
 pub mod segment;
 pub mod snapshot;
 pub mod transaction;
+pub mod workers;
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -271,6 +272,13 @@ pub struct Store {
     /// Phase-10D active metadata writeback epoch (pending namespace/write-
     /// back mutations between checkpoints; see `store/epoch.rs`).
     epoch: std::sync::Mutex<crate::store::epoch::Epoch>,
+    /// Phase-11C lock-free mirror of the epoch's pending-op count
+    /// (`epoch.seq − root.log_seq`). Written under the epoch guard (every
+    /// envelope-staging op and the checkpoint update it), read WITHOUT the
+    /// guard by the checkpoint-threshold check — removing the per-write
+    /// epoch-mutex acquisition 11B measured as `epoch_wait` (20% of
+    /// 16-thread request time).
+    epoch_pending: std::sync::atomic::AtomicU64,
     /// Phase-10F storage transport (ADR-0021): the reference synchronous
     /// engine (`SyncIo`) or the io_uring performance path (`UringIo`).
     /// Every file mutation and payload read goes through this backend; the
@@ -287,6 +295,30 @@ impl std::fmt::Debug for Store {
             .field("generation", &cs.generation)
             .field("root", &cs.root)
             .finish_non_exhaustive()
+    }
+}
+
+/// The guard-independent input of a batched materialization's decode
+/// half (Phase-11C): the extent offsets, the decoded descriptors, the
+/// prefetched objects, and the reference closure's nested descriptors.
+/// Everything is OWNED — produced under the epoch guard (when the read
+/// is overlay-aware) and decoded WITHOUT it.
+#[derive(Debug)]
+pub(crate) struct PreparedRead {
+    starts: Vec<u64>,
+    descs: Vec<Representation>,
+    objects: std::collections::HashMap<ChunkId, Vec<u8>>,
+    descriptors: std::collections::HashMap<ChunkId, Vec<u8>>,
+    offset: u64,
+    end: u64,
+    avail: usize,
+}
+
+impl PreparedRead {
+    /// The merged extents' start offsets, in order (diagnostics/tests:
+    /// how many extents a read window collected).
+    pub(crate) fn starts(&self) -> &[u64] {
+        &self.starts
     }
 }
 
@@ -345,6 +377,7 @@ impl Store {
             perf: std::sync::Arc::new(crate::perf::Timings::default()),
             foreground: config.foreground,
             epoch: std::sync::Mutex::new(crate::store::epoch::Epoch::default()),
+            epoch_pending: std::sync::atomic::AtomicU64::new(0),
             io,
         };
         store.open_segment(0)?;
@@ -423,6 +456,7 @@ impl Store {
             perf: std::sync::Arc::new(crate::perf::Timings::default()),
             foreground: config.foreground,
             epoch: std::sync::Mutex::new(crate::store::epoch::Epoch::default()),
+            epoch_pending: std::sync::atomic::AtomicU64::new(0),
             io,
         };
         // Phase-10D: replay any un-checkpointed mutation log tail left by
@@ -1452,6 +1486,10 @@ impl Store {
         deps: &mut Vec<ChunkId>,
         seen_objects: &mut std::collections::HashSet<ChunkId>,
         seen_nested: &mut std::collections::HashSet<ChunkId>,
+        // Phase-11C: every nested descriptor resolved here (pending
+        // overlay or committed) is captured so the decode half can run
+        // without the epoch guard.
+        nested_descriptors: &mut std::collections::HashMap<ChunkId, Vec<u8>>,
     ) -> Result<(), StoreError> {
         let limits = self.config.limits;
         for oid in crate::store::transaction::descriptor_objects(desc, &limits) {
@@ -1495,8 +1533,17 @@ impl Store {
                 None => self.chunk_descriptor(&id)?,
             };
             if let Some(b) = bytes {
+                nested_descriptors.insert(id, b.clone());
                 if let Ok(d) = crate::format::descriptor::decode(&b, &limits) {
-                    self.collect_read_deps(ep, &d, depth + 1, deps, seen_objects, seen_nested)?;
+                    self.collect_read_deps(
+                        ep,
+                        &d,
+                        depth + 1,
+                        deps,
+                        seen_objects,
+                        seen_nested,
+                        nested_descriptors,
+                    )?;
                 }
             }
         }
@@ -1509,6 +1556,14 @@ impl Store {
     /// an optimization — every object missing from the prefetch falls back
     /// to the store at decode time, so the bytes are always the exact
     /// committed/overlay state.
+    ///
+    /// Phase-11C: split into [`Store::materialize_prepare`] (the
+    /// guard-dependent half: descriptor decode, dependency enumeration, and
+    /// the batched object fetch with the epoch's staged-payload fallback)
+    /// and [`Store::materialize_decode`] (pure CPU). The epoch write path
+    /// prepares the chunk prefill under the guard, RELEASES it, and decodes
+    /// outside — the measured block-A guard hold (`epoch_lock_wait` at
+    /// 8–16 threads) was the prefill materialization.
     fn materialize_range_batched(
         &self,
         ep: Option<&crate::store::epoch::Epoch>,
@@ -1517,14 +1572,40 @@ impl Store {
         end: u64,
         avail: usize,
     ) -> Result<Vec<u8>, StoreError> {
+        let prepared = self.materialize_prepare(ep, extents, offset, end, avail)?;
+        self.materialize_decode(prepared)
+    }
+
+    /// The guard-dependent half of a batched materialization: decode every
+    /// descriptor, enumerate its object dependencies, and fetch them in
+    /// ONE backend call (the `read_many` win; one submission queue for
+    /// `UringIo`). Objects staged by in-flight epoch ops are not in the
+    /// object index yet — they resolve from the epoch's staged payloads
+    /// (the overlay read must never see a pending descriptor whose objects
+    /// are unfetchable). The caller must hold the epoch guard when `ep` is
+    /// `Some`; the returned [`PreparedRead`] owns everything the decode
+    /// half needs, so it can be decoded WITHOUT the guard.
+    fn materialize_prepare(
+        &self,
+        ep: Option<&crate::store::epoch::Epoch>,
+        extents: &[(u64, Vec<u8>)],
+        offset: u64,
+        end: u64,
+        avail: usize,
+    ) -> Result<PreparedRead, StoreError> {
         let limits = self.config.limits;
         // 1. Decode every descriptor and enumerate its dependencies.
+        let mut starts: Vec<u64> = Vec::with_capacity(extents.len());
         let mut descs: Vec<Representation> = Vec::with_capacity(extents.len());
         let mut deps: Vec<ChunkId> = Vec::new();
         let mut seen_objects: std::collections::HashSet<ChunkId> = std::collections::HashSet::new();
         let mut seen_nested: std::collections::HashSet<ChunkId> = std::collections::HashSet::new();
+        // The reference closure's nested descriptors (Phase-11C): the
+        // decode half resolves them from this map, without the guard.
+        let mut descriptors: std::collections::HashMap<ChunkId, Vec<u8>> =
+            std::collections::HashMap::new();
         self.perf.time_request("read_deps", || {
-            for (_, bytes) in extents {
+            for (start, bytes) in extents {
                 let desc = crate::format::descriptor::decode(bytes, &limits)?;
                 self.collect_read_deps(
                     ep,
@@ -1533,16 +1614,14 @@ impl Store {
                     &mut deps,
                     &mut seen_objects,
                     &mut seen_nested,
+                    &mut descriptors,
                 )?;
+                starts.push(*start);
                 descs.push(desc);
             }
             Ok::<(), StoreError>(())
         })?;
-        // 2. ONE batched fetch (the read_many win; one submission queue
-        //    for `UringIo`). Objects staged by in-flight epoch ops are
-        //    not in the object index yet — resolve them from the epoch's
-        //    staged payloads (the overlay read must never see a pending
-        //    descriptor whose objects are unfetchable).
+        // 2. ONE batched fetch.
         let objects: std::collections::HashMap<ChunkId, Vec<u8>> = {
             let results = self
                 .perf
@@ -1563,26 +1642,65 @@ impl Store {
             }
             map
         };
-        // 3. Decode (parallel for multi-extent reads; the prefetched map
-        //    makes decode pure CPU).
-        let ctx = crate::store::epoch::PrefetchContext::new(self, &objects, ep);
+        Ok(PreparedRead {
+            starts,
+            descs,
+            objects,
+            descriptors,
+            offset,
+            end,
+            avail,
+        })
+    }
+
+    /// The pure-CPU decode half of a batched materialization: parallel
+    /// decode of the prepared descriptors (scoped threads; single-extent
+    /// reads inline; the prefetched map makes decode pure CPU). Touches NO
+    /// epoch state — safe to run without the epoch guard. `pub(crate)` for
+    /// the FUSE two-phase read.
+    pub(crate) fn materialize_decode(&self, prepared: PreparedRead) -> Result<Vec<u8>, StoreError> {
+        let PreparedRead {
+            starts,
+            descs,
+            objects,
+            descriptors,
+            offset,
+            end,
+            avail,
+        } = prepared;
+        let limits = self.config.limits;
+        // The decode context has NO epoch reference: the prepared maps
+        // carry every object and every nested descriptor the closure
+        // needs, so decode runs without the guard.
+        let ctx =
+            crate::store::epoch::PrefetchContext::new(self, &objects, Some(&descriptors), None);
         self.perf.time_request("read_decode", || {
             let mut out = vec![0u8; avail];
-            let workers = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4)
-                .min(descs.len());
-            if descs.len() == 1 || workers <= 1 {
+            if descs.is_empty() {
+                // No extents in the window: a pure hole (zeros). Must not
+                // reach the worker semaphore — an empty decode has nothing
+                // to parallelize and would block for no work.
+                return Ok(out);
+            }
+            if descs.len() == 1 {
                 for (i, desc) in descs.iter().enumerate() {
-                    materialize_into_window(
-                        &ctx,
-                        desc,
-                        extents[i].0,
-                        offset,
-                        end,
-                        &limits,
-                        &mut out,
-                    )?;
+                    materialize_into_window(&ctx, desc, starts[i], offset, end, &limits, &mut out)?;
+                }
+                return Ok(out);
+            }
+            // Phase-11C: the process-wide worker semaphore — concurrent
+            // requests wait for the machine's workers instead of spawning
+            // T×N threads (or burning CPU in a serial fallback).
+            let want = descs.len().min(
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4),
+            );
+            let grant = crate::store::workers::grant(want);
+            let workers = grant.n();
+            if workers <= 1 {
+                for (i, desc) in descs.iter().enumerate() {
+                    materialize_into_window(&ctx, desc, starts[i], offset, end, &limits, &mut out)?;
                 }
                 return Ok(out);
             }
@@ -1597,7 +1715,7 @@ impl Store {
                         continue;
                     }
                     let descs = &descs;
-                    let extents = &extents;
+                    let starts = &starts;
                     let ctx = &ctx;
                     handles.push(s.spawn(move || {
                         let mut mine = Vec::with_capacity(hi - lo);
@@ -1614,7 +1732,7 @@ impl Store {
                                 &mut chunk,
                             )
                             .map_err(|e| StoreError::Descriptor(e.to_string()))?;
-                            mine.push((extents[i].0, chunk));
+                            mine.push((starts[i], chunk));
                         }
                         Ok(mine)
                     }));
@@ -3119,29 +3237,55 @@ impl Store {
                 fg,
             ));
         } else {
-            let workers = std::thread::available_parallelism()
-                .map(|p| p.get())
-                .unwrap_or(4)
-                .min(n)
-                .max(1);
-            let per = n.div_ceil(workers);
-            std::thread::scope(|s| {
-                let mut handles = Vec::with_capacity(workers);
-                for (w, slice) in results.chunks_mut(per).enumerate() {
-                    let store = &*self;
-                    let composed = &composed[..];
-                    handles.push(s.spawn(move || {
-                        for (j, slot) in slice.iter_mut().enumerate() {
-                            let c = &composed[w * per + j];
-                            let r = encode_prepared_chunk(store, c, ino, limits, options, fg);
-                            *slot = Some(r);
-                        }
-                    }));
+            // Phase-11C: the process-wide worker SEMAPHORE. Concurrent
+            // requests wait for the machine's workers (T requests × N
+            // cores was the oversubscription 11B measured — the 16-thread
+            // per-chunk search ran ~11× its single-request cost) instead
+            // of spawning T×N threads; the search CPU stays bounded at
+            // every thread count and the wall converges to the single-
+            // request floor. A non-blocking serial fallback was measured
+            // and rejected (the unlucky requests' inline searches thrashed
+            // the workers' cores). The grant parks this thread; it holds
+            // no other store lock here (11B releases the epoch guard
+            // before prepare), so no lock-order cycle can form.
+            let want = n.min(
+                std::thread::available_parallelism()
+                    .map(|p| p.get())
+                    .unwrap_or(4),
+            );
+            let grant = crate::store::workers::grant(want);
+            let workers = grant.n();
+            if workers <= 1 {
+                for (j, slot) in results.iter_mut().enumerate() {
+                    *slot = Some(encode_prepared_chunk(
+                        self,
+                        &composed[j],
+                        ino,
+                        limits,
+                        options,
+                        fg,
+                    ));
                 }
-                for h in handles {
-                    let _ = h.join();
-                }
-            });
+            } else {
+                let per = n.div_ceil(workers);
+                std::thread::scope(|s| {
+                    let mut handles = Vec::with_capacity(workers);
+                    for (w, slice) in results.chunks_mut(per).enumerate() {
+                        let store = &*self;
+                        let composed = &composed[..];
+                        handles.push(s.spawn(move || {
+                            for (j, slot) in slice.iter_mut().enumerate() {
+                                let c = &composed[w * per + j];
+                                let r = encode_prepared_chunk(store, c, ino, limits, options, fg);
+                                *slot = Some(r);
+                            }
+                        }));
+                    }
+                    for h in handles {
+                        let _ = h.join();
+                    }
+                });
+            }
         }
 
         // Phase 3: batch semantics in offset order — the in-batch dedup
@@ -4183,6 +4327,28 @@ impl Store {
         offset: u64,
         len: u64,
     ) -> Result<Vec<u8>, StoreError> {
+        let Some(prepared) = self.read_file_epoch_prepare(ep, ino, offset, len)? else {
+            return Ok(Vec::new());
+        };
+        // Phase-11C: the decode half touches no epoch state, so the caller
+        // may release the epoch guard before calling it.
+        self.materialize_decode(prepared)
+    }
+
+    /// The guard-dependent half of an overlay-aware file read: the inode
+    /// view, the range-limited extent collection (committed scan overlaid
+    /// with the epoch's pending extents), the dependency enumeration, and
+    /// the batched object fetch. The caller must hold the epoch guard; the
+    /// returned [`PreparedRead`] decodes WITHOUT it (`None` for an empty
+    /// window). `pub(crate)` so the FUSE read can release the guard before
+    /// the decode half.
+    pub(crate) fn read_file_epoch_prepare(
+        &self,
+        ep: &crate::store::epoch::Epoch,
+        ino: u64,
+        offset: u64,
+        len: u64,
+    ) -> Result<Option<PreparedRead>, StoreError> {
         let inode = self
             .get_inode_epoch(ep, ino)?
             .ok_or_else(|| StoreError::Invariant(format!("inode {ino} missing")))?;
@@ -4211,7 +4377,7 @@ impl Store {
         let size = inode.size;
         let end = offset.saturating_add(len).min(size);
         if end <= offset {
-            return Ok(Vec::new());
+            return Ok(None);
         }
         // Phase-10E: RANGE-LIMITED collection — the committed extents in
         // [covering(offset), end) via one traversal, overlaid with the
@@ -4237,11 +4403,19 @@ impl Store {
         // to `offset` and the pending range below would miss the covering
         // extent (Phase-10G: the mounted page-granular reads hit holes at
         // chunk boundaries exactly this way). Extend the window to the
-        // pending predecessor as well; the committed scan and the pending
-        // overlay are merged by offset, so the extra range is harmless
-        // when the committed tree is newer.
-        if let Some(((_, poff), _)) = ep.pending_extents.range(..=(ino, offset)).next_back() {
-            scan_start = scan_start.min(*poff);
+        // pending predecessor ONLY when it actually COVERS `offset` (a
+        // mid-chunk read of an uncommitted chunk): a chunk-aligned read's
+        // predecessor is the previous chunk, which does not cover the
+        // offset — pulling it in collects an out-of-window extent and
+        // forces a multi-extent decode for every prefill read (Phase-11C:
+        // measured as the read_decode explosion at 2+ threads).
+        if let Some(((_, poff), bytes)) = ep.pending_extents.range(..=(ino, offset)).next_back() {
+            let covers = crate::format::descriptor::decode(bytes, &limits)
+                .map(|d| *poff + d.len() > offset)
+                .unwrap_or(false);
+            if covers {
+                scan_start = scan_start.min(*poff);
+            }
         }
         let mut extents: std::collections::BTreeMap<u64, Vec<u8>> =
             std::collections::BTreeMap::new();
@@ -4253,7 +4427,7 @@ impl Store {
                 extents.insert(off, bytes);
             }
         }
-        for ((fino, off), bytes) in ep.pending_extents.range((ino, scan_start)..=(ino, end)) {
+        for ((fino, off), bytes) in ep.pending_extents.range((ino, scan_start)..(ino, end)) {
             let _ = fino;
             extents.insert(*off, bytes.clone());
         }
@@ -4263,10 +4437,11 @@ impl Store {
         // scan_start or later; nothing to add here).
         let avail = (end - offset) as usize;
         let merged: Vec<(u64, Vec<u8>)> = extents.into_iter().collect();
-        // Phase-10F: ONE prefetch submission for every extent's
-        // materialization dependencies (overlay-aware), then parallel
-        // decode.
-        self.materialize_range_batched(Some(ep), &merged, offset, end, avail)
+        // Phase-10F/11C: ONE prefetch submission for every extent's
+        // materialization dependencies (overlay-aware); the decode half
+        // runs without the guard.
+        let prepared = self.materialize_prepare(Some(ep), &merged, offset, end, avail)?;
+        Ok(Some(prepared))
     }
 
     /// Flush the active epoch to a checkpoint (merge + one root
@@ -4503,6 +4678,7 @@ impl Store {
         //    checkpoint may have snapshotted an EARLIER counter value than
         //    the one the previous checkpoint already published).
         tx.root_mut().log_seq = frozen.seq.max(tx.root().log_seq);
+        let new_log_seq = tx.root().log_seq;
         tx.commit_deferred(hooks)?;
         // 8. The commit succeeded: drop exactly the snapshot's overlay
         //    entries. Compare-and-remove — an op that staged a NEWER value
@@ -4514,6 +4690,13 @@ impl Store {
         self.perf.time_request("cp_overlay_remove", || {
             {
                 let mut ep = self.epoch();
+                // Phase-11C: the lock-free pending-op mirror — the ops the
+                // merge consumed are gone; ops staged while the merge ran
+                // keep their count (their envelopes have seq > log_seq).
+                self.epoch_pending.store(
+                    ep.seq.saturating_sub(new_log_seq),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 for (ino, inode) in &frozen.pending_inodes {
                     if ep.pending_inodes.get(ino) == Some(inode) {
                         ep.pending_inodes.remove(ino);
@@ -4673,6 +4856,10 @@ impl Store {
             inode_id,
             parent_inode_id,
         });
+        // Phase-11C: the lock-free pending-op mirror (this op is now
+        // staged; the checkpoint-threshold check reads it lock-free).
+        self.epoch_pending
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         records.push(crate::store::transaction::PendingRecord {
             tag: RecordTag::MutationLog,
             payload: env,
@@ -4730,6 +4917,10 @@ impl Store {
             None,
         );
         let env = ep.envelope(&crate::store::epoch::MutationOp::Setattr { ino, inode_id });
+        // Phase-11C: the lock-free pending-op mirror (the op is now
+        // staged; a checkpoint may merge it later).
+        self.epoch_pending
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         ep.pending_inodes.insert(ino, inode.clone());
         records.push(crate::store::transaction::PendingRecord {
             tag: RecordTag::MutationLog,
@@ -4819,6 +5010,9 @@ impl Store {
             parent_inode_id,
             child_inode_id,
         });
+        // Phase-11C: the lock-free pending-op mirror.
+        self.epoch_pending
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         records.push(crate::store::transaction::PendingRecord {
             tag: RecordTag::MutationLog,
             payload: env,
@@ -4980,6 +5174,9 @@ impl Store {
             src_child_inode_id: Some(src_child_inode_id),
             dst_child_inode_id: None,
         });
+        // Phase-11C: the lock-free pending-op mirror.
+        self.epoch_pending
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         records.push(crate::store::transaction::PendingRecord {
             tag: RecordTag::MutationLog,
             payload: env,
@@ -5039,11 +5236,20 @@ impl Store {
         let prefill_first = first_chunk.saturating_sub(1);
 
         // Block A (epoch guard held): the overlay view of the file and the
-        // prefill of the affected chunks. The prefill's read work attaches
-        // to this request through the read-leaf rows
-        // (`read_scan`/`read_deps`/`read_prefetch`/`read_decode`) — the
-        // prefill IS a read, so wrapping it again would double-count.
-        let (old_size, mut overlay): (u64, std::collections::BTreeMap<u64, Vec<u8>>) = {
+        // PREPARED prefill of the affected chunks — extent collection,
+        // dependency enumeration, and the batched object fetch. The decode
+        // half runs AFTER the guard drops (Phase-11C): the prepared reads
+        // own every object and nested descriptor, so the guard is not held
+        // across the materialization (the measured block-A hold at 8–16
+        // threads). The read work still attaches to this request through
+        // the read-leaf rows (`read_scan`/`read_deps`/`read_prefetch`/
+        // `read_decode`) — the prefill IS a read, so wrapping it again
+        // would double-count.
+        let (old_size, mut overlay, prepared): (
+            u64,
+            std::collections::BTreeMap<u64, Vec<u8>>,
+            Vec<(u64, Option<PreparedRead>)>,
+        ) = {
             let ep = self.perf.time_request("epoch_lock_wait", || self.epoch());
             let inode = self
                 .get_inode_epoch(&ep, ino)?
@@ -5051,6 +5257,7 @@ impl Store {
             let old_size = inode.size;
             let mut overlay: std::collections::BTreeMap<u64, Vec<u8>> =
                 std::collections::BTreeMap::new();
+            let mut prepared: Vec<(u64, Option<PreparedRead>)> = Vec::new();
             // Prefill from the PREVIOUS chunk: prepare_write's in-batch
             // dictionary lookup (the previous same-file chunk) falls back
             // to the committed store on an overlay miss, which would fail
@@ -5058,15 +5265,23 @@ impl Store {
             for c in prefill_first..last_chunk {
                 let off = c * chunk_class;
                 let read_end = (off + chunk_class).min(old_size);
-                let bytes = if read_end > off {
-                    self.read_file_epoch(&ep, ino, off, read_end - off)?
+                if read_end > off {
+                    prepared.push((
+                        off,
+                        self.read_file_epoch_prepare(&ep, ino, off, read_end - off)?,
+                    ));
                 } else {
-                    Vec::new()
-                };
-                overlay.insert(off, bytes);
+                    overlay.insert(off, Vec::new());
+                }
             }
-            (old_size, overlay)
+            (old_size, overlay, prepared)
         }; // the epoch guard drops here — prepare runs WITHOUT it
+        // Decode the prefill outside the guard.
+        for (off, p) in prepared {
+            if let Some(p) = p {
+                overlay.insert(off, self.materialize_decode(p)?);
+            }
+        }
         let new_size = old_size.max(end);
 
         let mut pending_batch = crate::optimizer::search::PendingBatch::default();
@@ -5153,6 +5368,9 @@ impl Store {
                 chunks,
                 inode_id,
             });
+            // Phase-11C: the lock-free pending-op mirror.
+            self.epoch_pending
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             records.push(crate::store::transaction::PendingRecord {
                 tag: RecordTag::MutationLog,
                 payload: env,
@@ -5461,18 +5679,17 @@ impl Store {
     fn maybe_checkpoint_epoch(&self) -> Result<(), StoreError> {
         /// Pending ops per epoch before an automatic close.
         const EPOCH_MAX_OPS: u64 = 1024;
-        // Phase-11B: the epoch-mutex wait HERE is a real shared-resource
-        // wait — `epoch_write` holds the epoch guard through its whole
-        // body (prepare dominates), so a concurrent writer's checkpoint
-        // check blocks on the guard. Measure the acquisition as a leaf row
-        // (`epoch_wait`); the checkpoint itself, when it fires, reports
-        // through its own cp_* rows. The temporary guard drops before the
-        // `if`, so `epoch_checkpoint` cannot deadlock on the same mutex.
-        let pending = self
-            .perf
-            .time_request("epoch_wait", || self.epoch())
-            .seq
-            .saturating_sub(self.current_root().log_seq);
+        // Phase-11C: the pending-op count is the lock-free mirror
+        // (`epoch.seq − root.log_seq`, maintained under the epoch guard),
+        // so the per-write threshold check acquires NO epoch mutex — the
+        // acquisition 11B measured as `epoch_wait` (20% of 16-thread
+        // request time) was every writer taking the guard at the end of
+        // every write just to read the counter. The checkpoint itself,
+        // when it fires, reports through its own cp_* rows.
+        let pending = self.perf.time_request("epoch_wait", || {
+            self.epoch_pending
+                .load(std::sync::atomic::Ordering::Relaxed)
+        });
         if pending >= EPOCH_MAX_OPS {
             self.epoch_checkpoint(&CrashHooks::none())?;
         }

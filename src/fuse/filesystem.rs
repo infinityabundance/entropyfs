@@ -693,11 +693,32 @@ impl Filesystem for EntropyFs {
         // read-before-write state — partial extents — that the kernel then
         // cached).
         let _lock = store.inode_lock(ino.0);
-        let ep = store.epoch();
-        match store.read_file_epoch(&ep, ino.0, offset, size as u64) {
-            Ok(data) => reply.data(&data),
-            Err(e) => reply.error(Self::errno(&e)),
-        }
+        // Phase-11C: TWO-PHASE read — the epoch guard is held only for the
+        // prepare half (extent collection + object fetch); the decode half
+        // runs without it, so a read never holds the epoch mutex while its
+        // decode waits on the worker semaphore (and writers are not
+        // convoyed behind read decodes).
+        let prepared = {
+            let ep = store.epoch();
+            match store.read_file_epoch_prepare(&ep, ino.0, offset, size as u64) {
+                Ok(p) => p,
+                Err(e) => {
+                    reply.error(Self::errno(&e));
+                    return;
+                }
+            }
+        }; // the epoch guard drops here
+        let data = match prepared {
+            Some(p) => match store.materialize_decode(p) {
+                Ok(d) => d,
+                Err(e) => {
+                    reply.error(Self::errno(&e));
+                    return;
+                }
+            },
+            None => Vec::new(),
+        };
+        reply.data(&data);
     }
 
     fn write(

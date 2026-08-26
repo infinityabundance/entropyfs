@@ -278,3 +278,82 @@ fn print_transactional_write_reconciliation() {
         print!("{}", store.perf().render_reconciled());
     }
 }
+
+/// Phase-11C regression: the epoch overlay-read window. (1) A chunk-aligned
+/// read must NOT collect the adjacent pending extent at the window's end
+/// (the inclusive pending-range bound pulled in the NEXT chunk's pending
+/// extent, forcing a multi-extent decode + worker-semaphore wait on every
+/// write-path prefill read — measured as the 11C read_decode explosion at
+/// 2+ threads); (2) a MID-chunk read MUST include the covering pending
+/// predecessor (the scan-start extension is gated on the predecessor
+/// actually covering the offset). Both must return byte-exact windows, and
+/// the merged view must be single-extent in the chunk-aligned case.
+#[test]
+fn epoch_read_window_excludes_adjacent_pending_extent() {
+    let dir = TempDir::new().unwrap();
+    let store = create_store(&dir);
+    let ino = create_files(&store, 1)[0];
+    let data = deterministic_noise(65536 * 2, 0xabc_0001);
+    let opts = OptimizeOptions::default();
+    let fg = store.foreground_policy();
+    // Two chunk-aligned writes: pending extents at 0 and 65536 (uncommitted).
+    store
+        .epoch_write(ino, 0, &data[..65536], opts, fg, &CrashHooks::none())
+        .unwrap();
+    store
+        .epoch_write(ino, 65536, &data[65536..], opts, fg, &CrashHooks::none())
+        .unwrap();
+    // (1) A chunk-aligned read of chunk 0: exactly chunk 0, and the
+    // prepared view must be ONE extent (the adjacent pending chunk 1 at the
+    // window's end is outside the window).
+    {
+        let ep = store.epoch();
+        let prepared = store
+            .read_file_epoch_prepare(&ep, ino, 0, 65536)
+            .unwrap()
+            .unwrap();
+        let prepared = store
+            .read_file_epoch_prepare(&ep, ino, 0, 65536)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            prepared.starts(),
+            &[0],
+            "chunk-aligned read must not collect the adjacent pending extent"
+        );
+        let out = store.materialize_decode(prepared).unwrap();
+        drop(ep);
+        assert_eq!(out, data[..65536].to_vec());
+    }
+    // (2) A mid-chunk read [32768, 65536): the covering pending chunk 0
+    // (start 0, len 64K) covers the offset — the prepared view must start
+    // at 0 so the partial bytes decode.
+    {
+        let ep = store.epoch();
+        let prepared = store
+            .read_file_epoch_prepare(&ep, ino, 32768, 32768)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            prepared.starts(),
+            &[0],
+            "covering predecessor must be included"
+        );
+        let prepared = store
+            .read_file_epoch_prepare(&ep, ino, 32768, 32768)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            prepared.starts(),
+            &[0],
+            "covering predecessor must be included"
+        );
+        let out = store.materialize_decode(prepared).unwrap();
+        drop(ep);
+        assert_eq!(out, data[32768..65536].to_vec());
+    }
+    // The committed view agrees after the checkpoint.
+    store.epoch_checkpoint(&CrashHooks::none()).unwrap();
+    let out = store.read_file(ino, 0, 131072).unwrap();
+    assert_eq!(out, data);
+}

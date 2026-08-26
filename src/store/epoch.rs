@@ -370,6 +370,10 @@ fn read_id(r: &mut Reader<'_>) -> Result<ChunkId, CodecError> {
 pub struct PrefetchContext<'a> {
     store: &'a crate::store::Store,
     objects: &'a std::collections::HashMap<crate::core::extent::ChunkId, Vec<u8>>,
+    /// Phase-11C: the reference closure's nested descriptors (overlay +
+    /// committed), resolved by the prepare phase so the decode half can
+    /// run WITHOUT the epoch guard.
+    descriptors: Option<&'a std::collections::HashMap<crate::core::extent::ChunkId, Vec<u8>>>,
     ep: Option<&'a Epoch>,
 }
 
@@ -378,9 +382,15 @@ impl<'a> PrefetchContext<'a> {
     pub fn new(
         store: &'a crate::store::Store,
         objects: &'a std::collections::HashMap<crate::core::extent::ChunkId, Vec<u8>>,
+        descriptors: Option<&'a std::collections::HashMap<crate::core::extent::ChunkId, Vec<u8>>>,
         ep: Option<&'a Epoch>,
     ) -> Self {
-        Self { store, objects, ep }
+        Self {
+            store,
+            objects,
+            descriptors,
+            ep,
+        }
     }
 }
 
@@ -405,6 +415,14 @@ impl crate::core::materialize::DecoderContext for PrefetchContext<'_> {
         crate::core::representation::Representation,
         crate::core::materialize::MaterializeError,
     > {
+        // Phase-11C: the prepared reference closure first (it carries the
+        // pending nested descriptors the committed index cannot resolve).
+        if let Some(bytes) = self.descriptors.and_then(|d| d.get(id)) {
+            let limits = *self.store.limits();
+            return crate::format::descriptor::decode(bytes, &limits).map_err(|e| {
+                crate::core::materialize::MaterializeError::InvalidDescriptor(e.to_string())
+            });
+        }
         if let Some(bytes) = self.ep.and_then(|e| e.overlay_chunk(id)) {
             let limits = *self.store.limits();
             return crate::format::descriptor::decode(&bytes, &limits).map_err(|e| {
