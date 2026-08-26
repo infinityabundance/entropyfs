@@ -1,0 +1,6 @@
+threads	requests	total_ms	residual_ms	residual_share	overlap	wall_s
+1	133	163.43	2.25	0.0140	False	0.163
+2	265	397.55	12.70	0.0320	False	0.202
+4	529	926.94	25.35	0.0270	False	0.248
+8	1057	3649.91	64.32	0.0180	False	0.515
+16	2113	14661.40	184.48	0.0130	False	1.115

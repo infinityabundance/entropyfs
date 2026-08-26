@@ -1,5 +1,53 @@
 # EntropyFS changelog
 
+## v0.7.2 (2026-08-26)
+
+**11C — the three 11B levers, attacked.** The reconciliation court
+identified the write plateau's components; 11C implements all three and
+re-seals with the same identity (residual ≤ 3.2% mounted, ≤ 1.8%
+direct-store; `docs/performance/reconciliation.md` §3.4, sealed court
+`evidence/performance/recon-court-1787762195-49f1a55/`):
+
+1. **The remaining epoch-guard holds (60–81% of 8–16-thread request
+time).** The chunk prefill is split into a guard-held PREPARE half
+extent collection, dependency enumeration, and the batched object fetch
+with the reference closure's nested descriptors captured into the
+prepared read) and a pure-CPU DECODE half that runs with the epoch guard
+RELEASED — both `epoch_write` and the FUSE read handler are two-phase, so
+no materialization runs under the epoch mutex. The per-write
+checkpoint-threshold check reads a lock-free pending-op mirror
+(`epoch_pending`, maintained under the guard, read without it), removing
+the `epoch_wait` acquisition. Direct-store: `epoch_lock_wait + epoch_wait`
+80.8% → ~0.3% at 16 threads; walls 1.22/1.12/1.13/1.13/1.59 s — the
+plateau is a flat line at the CPU-bound floor.
+
+2. **Worker oversubscription.** A process-wide worker SEMAPHORE
+(`src/store/workers.rs`) caps total search/decode threads at
+`available_parallelism()`. The non-blocking “grant 0 → run inline”
+fallback was measured and REJECTED: the unlucky requests' serial searches
+thrashed the workers' cores (search wall-sum grew ~5× at 16 threads);
+the semaphore parks requesting threads instead, so the search CPU is
+bounded at every thread count.
+
+3. **The fsync convoy is contract-inherent** — the barrier's
+`[fdatasync → superblock fsync]` window must hold the commit lock or a
+mid-barrier commit would ack after the fsync started but before its cut
+(write→fsync durability linearizability, pinned by the crash courts). It
+shrank indirectly as writes stopped stalling behind it (mounted
+`commit_lock_wait` 34.7% → 16.4% at 16 threads).
+
+**Two read-window defects the instrumentation exposed** (regression-tested):
+the pending-extent range used an inclusive upper bound (collecting the
+adjacent pending extent at the window's end → a spurious multi-extent
+decode per prefill read of a rewritten file), and the
+pending-predecessor scan-start extension pulled in the previous chunk
+for chunk-aligned reads. The bound is now exclusive; the extension is
+gated on the predecessor actually covering the read offset.
+
+The mounted court at 16 threads: epoch locks 4.3% → 0.2%, `read_decode`
+1.6% → 0.7%, `commit_lock_wait` 34.7% → 16.4%. Full 417-test suite
+(crash courts, hostile-media court, concurrency) green.
+
 ## v0.7.1 (2026-08-26)
 
 **11B — write-path request reconciliation.** The performance equivalent of

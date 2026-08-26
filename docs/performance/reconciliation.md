@@ -1,7 +1,8 @@
-# Write-path request reconciliation (Phase 11B)
+# Write-path request reconciliation (Phase 11B + 11C)
 
-Status: implemented and sealed (`evidence/performance/recon-court-1787757073-e5b0592/`;
-run `tools/recon-court.sh` to reproduce).
+Status: implemented and sealed (11B: `evidence/performance/recon-court-1787757073-e5b0592/`;
+11C: `evidence/performance/recon-court-1787762195-49f1a55/`; run
+`tools/recon-court.sh` to reproduce).
 
 Phase 11B is the performance equivalent of Phase 9H's physical byte
 reconciliation. 9H made every backing byte accountable:
@@ -151,13 +152,64 @@ The mounted court adds a third, durability-path term: at 16 threads
 `commit_lock_wait` rises to 29.8% — `cp`'s trailing fsyncs queue on the
 commit lock in `durability_barrier` (the fsync convoy).
 
+## 3.4 Phase 11C: the three levers, attacked
+
+All three levers were implemented in 11C and sealed by the same court
+(`recon-court-1787762195-49f1a55/`). The direct-store 16-thread table
+went from `epoch_lock_wait 60.3% + epoch_wait 20.5%` (11B) to
+`epoch_lock_wait 0.2% + epoch_wait 0.0%`:
+
+**Lever 1 — the remaining epoch-guard holds.** The prefill is split into
+a guard-dependent PREPARE half (extent collection + dependency
+enumeration + the batched object fetch, with the reference closure's
+nested descriptors captured into the prepared read) and a pure-CPU
+DECODE half that runs with the epoch guard RELEASED — both `epoch_write`
+and the FUSE read handler are now two-phase, so no materialization runs
+under the epoch mutex. The per-write checkpoint-threshold check reads a
+lock-free pending-op mirror (`epoch_pending`: written under the guard by
+every envelope-staging op and the checkpoint, read without it), removing
+the `epoch_wait` guard acquisition entirely. Direct-store walls across
+1/2/4/8/16 threads: 1.22/1.12/1.13/1.13/1.59 s — the plateau is a flat
+line at the CPU-bound floor.
+
+**Lever 2 — worker oversubscription.** A process-wide worker SEMAPHORE
+(`src/store/workers.rs`) caps total search/decode threads at
+`available_parallelism()`. A non-blocking “grant 0 → run inline”
+fallback was measured and REJECTED: the unlucky requests' serial searches
+competed with the workers' threads, inflating the search wall-sum ~5× at
+16 threads. The semaphore parks requesting threads instead (it is
+acquired only on paths holding no other store lock, so no lock-order
+cycle can form); the search CPU is bounded at every thread count.
+
+**Lever 3 — the fsync convoy (contract-inherent).** The barrier's
+`[fdatasync → superblock fsync]` window must hold the commit lock: a
+commit that completes mid-barrier would ack after the fsync started but
+before its cut, breaking write→fsync durability linearizability (the
+crash courts pin this). The convoy therefore cannot be removed without a
+new durability contract; 11C's other fixes shrink it indirectly (writes
+no longer stall behind it): mounted 16-thread `commit_lock_wait` fell
+34.7% → 16.4% (run-to-run 10.8–16.4%).
+
+**Two read-window defects the instrumentation exposed** (fixed with a
+regression test): the pending-extent range used an INCLUSIVE upper bound
+(collecting the adjacent pending extent at the window's end → a spurious
+multi-extent decode on every prefill read of a rewritten file), and the
+pending-predecessor scan-start extension pulled in the previous chunk
+for chunk-aligned reads. The bound is now exclusive; the extension is
+gated on the predecessor actually covering the read offset.
+
 ## 4. Evidence
 
 - `evidence/performance/recon-court-1787757073-e5b0592/` — the sealed
-  mounted court: identity holds (no overlap, residual ≤ 4.0%) at
+  11B mounted court: identity holds (no overlap, residual ≤ 4.0%) at
   1/2/4/8/16 threads; stacked tables, per-thread stats dumps, machine-
   readable results.
-- `src/tests/perf_reconciled.rs` — the direct-store court (debug + release).
+- `evidence/performance/recon-court-1787762195-49f1a55/` — the sealed
+  11C mounted court (same rules): identity holds (residual ≤ 3.2%),
+  epoch locks 4.3% → 0.2% at 16 threads, `read_decode` 1.6% → 0.7%,
+  `commit_lock_wait` 34.7% → 16.4%.
+- `src/tests/perf_reconciled.rs` — the direct-store court (debug +
+  release) plus the 11C read-window regression test.
 - The daemon's `--stats-file` dump now includes the reconciliation table
   (`Timings::render_reconciled`), so every future `court-threads*` run
   carries it automatically.

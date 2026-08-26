@@ -315,8 +315,9 @@ pub(crate) struct PreparedRead {
 }
 
 impl PreparedRead {
-    /// The merged extents' start offsets, in order (diagnostics/tests:
-    /// how many extents a read window collected).
+    /// The merged extents' start offsets, in order (tests: how many
+    /// extents a read window collected).
+    #[cfg(test)]
     pub(crate) fn starts(&self) -> &[u64] {
         &self.starts
     }

@@ -1,0 +1,598 @@
+{
+  "timestamp_unix": 1787762195,
+  "revision": "49f1a55",
+  "kernel": "7.2.0-1-cachyos",
+  "governor": "performance",
+  "cpu_model": "AMD Ryzen 7 9800X3D 8-Core Processor",
+  "cpu_count": 16,
+  "identity": [
+    {
+      "threads": 1,
+      "requests": 133,
+      "total_ms": 163.43,
+      "residual_ms": 2.25,
+      "residual_share": 0.014,
+      "overlap": false,
+      "wall_s": 0.163
+    },
+    {
+      "threads": 2,
+      "requests": 265,
+      "total_ms": 397.55,
+      "residual_ms": 12.7,
+      "residual_share": 0.032,
+      "overlap": false,
+      "wall_s": 0.202
+    },
+    {
+      "threads": 4,
+      "requests": 529,
+      "total_ms": 926.94,
+      "residual_ms": 25.35,
+      "residual_share": 0.027,
+      "overlap": false,
+      "wall_s": 0.248
+    },
+    {
+      "threads": 8,
+      "requests": 1057,
+      "total_ms": 3649.91,
+      "residual_ms": 64.32,
+      "residual_share": 0.018,
+      "overlap": false,
+      "wall_s": 0.515
+    },
+    {
+      "threads": 16,
+      "requests": 2113,
+      "total_ms": 14661.4,
+      "residual_ms": 184.48,
+      "residual_share": 0.013,
+      "overlap": false,
+      "wall_s": 1.115
+    }
+  ],
+  "phases": [
+    {
+      "threads": 1,
+      "phase": "prepare",
+      "total_ms": 136.03,
+      "share": 0.832
+    },
+    {
+      "threads": 1,
+      "phase": "barrier_fdatasync",
+      "total_ms": 6.72,
+      "share": 0.041
+    },
+    {
+      "threads": 1,
+      "phase": "read_decode",
+      "total_ms": 5.13,
+      "share": 0.031
+    },
+    {
+      "threads": 1,
+      "phase": "append",
+      "total_ms": 5.11,
+      "share": 0.031
+    },
+    {
+      "threads": 1,
+      "phase": "flush",
+      "total_ms": 2.59,
+      "share": 0.016
+    },
+    {
+      "threads": 1,
+      "phase": "stage",
+      "total_ms": 2.27,
+      "share": 0.014
+    },
+    {
+      "threads": 1,
+      "phase": "read_prefetch",
+      "total_ms": 1.75,
+      "share": 0.011
+    },
+    {
+      "threads": 1,
+      "phase": "barrier_sb_fsync",
+      "total_ms": 1.13,
+      "share": 0.007
+    },
+    {
+      "threads": 1,
+      "phase": "read_scan",
+      "total_ms": 0.37,
+      "share": 0.002
+    },
+    {
+      "threads": 1,
+      "phase": "read_deps",
+      "total_ms": 0.06,
+      "share": 0.0
+    },
+    {
+      "threads": 1,
+      "phase": "barrier_sb_write",
+      "total_ms": 0.01,
+      "share": 0.0
+    },
+    {
+      "threads": 1,
+      "phase": "epoch_lock_wait",
+      "total_ms": 0.0,
+      "share": 0.0
+    },
+    {
+      "threads": 1,
+      "phase": "barrier_dir_sync",
+      "total_ms": 0.0,
+      "share": 0.0
+    },
+    {
+      "threads": 1,
+      "phase": "inode_lock_wait",
+      "total_ms": 0.0,
+      "share": 0.0
+    },
+    {
+      "threads": 1,
+      "phase": "commit_lock_wait",
+      "total_ms": 0.0,
+      "share": 0.0
+    },
+    {
+      "threads": 1,
+      "phase": "epoch_wait",
+      "total_ms": 0.0,
+      "share": 0.0
+    },
+    {
+      "threads": 1,
+      "phase": "barrier_commit_lock_wait",
+      "total_ms": 0.0,
+      "share": 0.0
+    },
+    {
+      "threads": 1,
+      "phase": "unaccounted",
+      "total_ms": 2.25,
+      "share": 0.014
+    },
+    {
+      "threads": 2,
+      "phase": "prepare",
+      "total_ms": 337.62,
+      "share": 0.849
+    },
+    {
+      "threads": 2,
+      "phase": "read_decode",
+      "total_ms": 11.31,
+      "share": 0.028
+    },
+    {
+      "threads": 2,
+      "phase": "append",
+      "total_ms": 10.99,
+      "share": 0.028
+    },
+    {
+      "threads": 2,
+      "phase": "barrier_fdatasync",
+      "total_ms": 8.48,
+      "share": 0.021
+    },
+    {
+      "threads": 2,
+      "phase": "flush",
+      "total_ms": 5.57,
+      "share": 0.014
+    },
+    {
+      "threads": 2,
+      "phase": "stage",
+      "total_ms": 4.44,
+      "share": 0.011
+    },
+    {
+      "threads": 2,
+      "phase": "read_prefetch",
+      "total_ms": 3.59,
+      "share": 0.009
+    },
+    {
+      "threads": 2,
+      "phase": "barrier_sb_fsync",
+      "total_ms": 1.17,
+      "share": 0.003
+    },
+    {
+      "threads": 2,
+      "phase": "read_scan",
+      "total_ms": 0.81,
+      "share": 0.002
+    },
+    {
+      "threads": 2,
+      "phase": "commit_lock_wait",
+      "total_ms": 0.54,
+      "share": 0.001
+    },
+    {
+      "threads": 2,
+      "phase": "read_deps",
+      "total_ms": 0.15,
+      "share": 0.0
+    },
+    {
+      "threads": 2,
+      "phase": "epoch_lock_wait",
+      "total_ms": 0.14,
+      "share": 0.0
+    },
+    {
+      "threads": 2,
+      "phase": "barrier_sb_write",
+      "total_ms": 0.01,
+      "share": 0.0
+    },
+    {
+      "threads": 2,
+      "phase": "inode_lock_wait",
+      "total_ms": 0.01,
+      "share": 0.0
+    },
+    {
+      "threads": 2,
+      "phase": "barrier_dir_sync",
+      "total_ms": 0.01,
+      "share": 0.0
+    },
+    {
+      "threads": 2,
+      "phase": "epoch_wait",
+      "total_ms": 0.0,
+      "share": 0.0
+    },
+    {
+      "threads": 2,
+      "phase": "barrier_commit_lock_wait",
+      "total_ms": 0.0,
+      "share": 0.0
+    },
+    {
+      "threads": 2,
+      "phase": "unaccounted",
+      "total_ms": 12.7,
+      "share": 0.032
+    },
+    {
+      "threads": 4,
+      "phase": "prepare",
+      "total_ms": 800.15,
+      "share": 0.863
+    },
+    {
+      "threads": 4,
+      "phase": "append",
+      "total_ms": 23.37,
+      "share": 0.025
+    },
+    {
+      "threads": 4,
+      "phase": "read_decode",
+      "total_ms": 21.16,
+      "share": 0.023
+    },
+    {
+      "threads": 4,
+      "phase": "barrier_fdatasync",
+      "total_ms": 19.55,
+      "share": 0.021
+    },
+    {
+      "threads": 4,
+      "phase": "flush",
+      "total_ms": 11.36,
+      "share": 0.012
+    },
+    {
+      "threads": 4,
+      "phase": "stage",
+      "total_ms": 9.41,
+      "share": 0.01
+    },
+    {
+      "threads": 4,
+      "phase": "read_prefetch",
+      "total_ms": 6.31,
+      "share": 0.007
+    },
+    {
+      "threads": 4,
+      "phase": "commit_lock_wait",
+      "total_ms": 6.23,
+      "share": 0.007
+    },
+    {
+      "threads": 4,
+      "phase": "read_scan",
+      "total_ms": 1.81,
+      "share": 0.002
+    },
+    {
+      "threads": 4,
+      "phase": "barrier_sb_fsync",
+      "total_ms": 1.12,
+      "share": 0.001
+    },
+    {
+      "threads": 4,
+      "phase": "epoch_lock_wait",
+      "total_ms": 0.77,
+      "share": 0.001
+    },
+    {
+      "threads": 4,
+      "phase": "read_deps",
+      "total_ms": 0.31,
+      "share": 0.0
+    },
+    {
+      "threads": 4,
+      "phase": "inode_lock_wait",
+      "total_ms": 0.02,
+      "share": 0.0
+    },
+    {
+      "threads": 4,
+      "phase": "barrier_sb_write",
+      "total_ms": 0.01,
+      "share": 0.0
+    },
+    {
+      "threads": 4,
+      "phase": "barrier_dir_sync",
+      "total_ms": 0.01,
+      "share": 0.0
+    },
+    {
+      "threads": 4,
+      "phase": "epoch_wait",
+      "total_ms": 0.01,
+      "share": 0.0
+    },
+    {
+      "threads": 4,
+      "phase": "barrier_commit_lock_wait",
+      "total_ms": 0.0,
+      "share": 0.0
+    },
+    {
+      "threads": 4,
+      "phase": "unaccounted",
+      "total_ms": 25.35,
+      "share": 0.027
+    },
+    {
+      "threads": 8,
+      "phase": "prepare",
+      "total_ms": 3154.75,
+      "share": 0.864
+    },
+    {
+      "threads": 8,
+      "phase": "commit_lock_wait",
+      "total_ms": 232.14,
+      "share": 0.064
+    },
+    {
+      "threads": 8,
+      "phase": "append",
+      "total_ms": 72.41,
+      "share": 0.02
+    },
+    {
+      "threads": 8,
+      "phase": "read_decode",
+      "total_ms": 43.71,
+      "share": 0.012
+    },
+    {
+      "threads": 8,
+      "phase": "flush",
+      "total_ms": 26.77,
+      "share": 0.007
+    },
+    {
+      "threads": 8,
+      "phase": "stage",
+      "total_ms": 22.64,
+      "share": 0.006
+    },
+    {
+      "threads": 8,
+      "phase": "read_prefetch",
+      "total_ms": 15.14,
+      "share": 0.004
+    },
+    {
+      "threads": 8,
+      "phase": "epoch_lock_wait",
+      "total_ms": 8.22,
+      "share": 0.002
+    },
+    {
+      "threads": 8,
+      "phase": "barrier_fdatasync",
+      "total_ms": 4.16,
+      "share": 0.001
+    },
+    {
+      "threads": 8,
+      "phase": "read_scan",
+      "total_ms": 3.8,
+      "share": 0.001
+    },
+    {
+      "threads": 8,
+      "phase": "barrier_sb_fsync",
+      "total_ms": 1.14,
+      "share": 0.0
+    },
+    {
+      "threads": 8,
+      "phase": "read_deps",
+      "total_ms": 0.64,
+      "share": 0.0
+    },
+    {
+      "threads": 8,
+      "phase": "inode_lock_wait",
+      "total_ms": 0.04,
+      "share": 0.0
+    },
+    {
+      "threads": 8,
+      "phase": "epoch_wait",
+      "total_ms": 0.01,
+      "share": 0.0
+    },
+    {
+      "threads": 8,
+      "phase": "barrier_sb_write",
+      "total_ms": 0.01,
+      "share": 0.0
+    },
+    {
+      "threads": 8,
+      "phase": "barrier_dir_sync",
+      "total_ms": 0.0,
+      "share": 0.0
+    },
+    {
+      "threads": 8,
+      "phase": "barrier_commit_lock_wait",
+      "total_ms": 0.0,
+      "share": 0.0
+    },
+    {
+      "threads": 8,
+      "phase": "unaccounted",
+      "total_ms": 64.32,
+      "share": 0.018
+    },
+    {
+      "threads": 16,
+      "phase": "prepare",
+      "total_ms": 11597.84,
+      "share": 0.791
+    },
+    {
+      "threads": 16,
+      "phase": "commit_lock_wait",
+      "total_ms": 2406.13,
+      "share": 0.164
+    },
+    {
+      "threads": 16,
+      "phase": "append",
+      "total_ms": 164.05,
+      "share": 0.011
+    },
+    {
+      "threads": 16,
+      "phase": "read_decode",
+      "total_ms": 100.85,
+      "share": 0.007
+    },
+    {
+      "threads": 16,
+      "phase": "stage",
+      "total_ms": 53.65,
+      "share": 0.004
+    },
+    {
+      "threads": 16,
+      "phase": "flush",
+      "total_ms": 50.28,
+      "share": 0.003
+    },
+    {
+      "threads": 16,
+      "phase": "epoch_lock_wait",
+      "total_ms": 48.58,
+      "share": 0.003
+    },
+    {
+      "threads": 16,
+      "phase": "read_prefetch",
+      "total_ms": 35.11,
+      "share": 0.002
+    },
+    {
+      "threads": 16,
+      "phase": "read_scan",
+      "total_ms": 10.17,
+      "share": 0.001
+    },
+    {
+      "threads": 16,
+      "phase": "barrier_fdatasync",
+      "total_ms": 7.45,
+      "share": 0.001
+    },
+    {
+      "threads": 16,
+      "phase": "read_deps",
+      "total_ms": 1.54,
+      "share": 0.0
+    },
+    {
+      "threads": 16,
+      "phase": "barrier_sb_fsync",
+      "total_ms": 1.13,
+      "share": 0.0
+    },
+    {
+      "threads": 16,
+      "phase": "inode_lock_wait",
+      "total_ms": 0.1,
+      "share": 0.0
+    },
+    {
+      "threads": 16,
+      "phase": "epoch_wait",
+      "total_ms": 0.03,
+      "share": 0.0
+    },
+    {
+      "threads": 16,
+      "phase": "barrier_sb_write",
+      "total_ms": 0.01,
+      "share": 0.0
+    },
+    {
+      "threads": 16,
+      "phase": "barrier_dir_sync",
+      "total_ms": 0.01,
+      "share": 0.0
+    },
+    {
+      "threads": 16,
+      "phase": "barrier_commit_lock_wait",
+      "total_ms": 0.0,
+      "share": 0.0
+    },
+    {
+      "threads": 16,
+      "phase": "unaccounted",
+      "total_ms": 184.48,
+      "share": 0.013
+    }
+  ],
+  "admitted": true
+}
