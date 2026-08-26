@@ -71,7 +71,7 @@ pub struct GuidedContext<'a> {
 /// batch stages all its records in one transaction; the dedup lookup reads
 /// the committed chunk index, so without this view the batch's own chunks
 /// would never dedup against each other.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct PendingBatch {
     /// Content id → encoded descriptor of the FIRST occurrence of that
     /// content in the batch. First occurrence wins because the persisted

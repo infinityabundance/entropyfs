@@ -43,4 +43,5 @@ pub mod srctree_diag;
 pub mod unsafe_ledger;
 pub mod uring_bench;
 pub mod worker_oracle;
+pub mod worker_pool_probe;
 pub mod write_parallel;

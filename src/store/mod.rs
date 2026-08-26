@@ -269,6 +269,14 @@ pub struct Store {
     perf: std::sync::Arc<crate::perf::Timings>,
     /// Phase-10B foreground representation policy.
     foreground: crate::optimizer::foreground::ForegroundPolicy,
+    /// Phase-11E probe gate: when set, this store's search/decode sites
+    /// submit their work to the process-wide [`workers::POOL`] instead of
+    /// the 11C semaphore. PROBE-ONLY: set by the probe test AFTER binding
+    /// the pool to this store's Arc; every other store (and the FUSE
+    /// daemon) keeps the flag false and the semaphore path untouched. The
+    /// per-store flag — not a global gate — is what lets the probe run
+    /// inside the shared test binary without hijacking other tests' writes.
+    worker_pool: std::sync::atomic::AtomicBool,
     /// Phase-10D active metadata writeback epoch (pending namespace/write-
     /// back mutations between checkpoints; see `store/epoch.rs`).
     epoch: std::sync::Mutex<crate::store::epoch::Epoch>,
@@ -377,6 +385,7 @@ impl Store {
             inode_locks: std::sync::Arc::new(InodeLockTable::default()),
             perf: std::sync::Arc::new(crate::perf::Timings::default()),
             foreground: config.foreground,
+            worker_pool: std::sync::atomic::AtomicBool::new(false),
             epoch: std::sync::Mutex::new(crate::store::epoch::Epoch::default()),
             epoch_pending: std::sync::atomic::AtomicU64::new(0),
             io,
@@ -456,6 +465,7 @@ impl Store {
             inode_locks: std::sync::Arc::new(InodeLockTable::default()),
             perf: std::sync::Arc::new(crate::perf::Timings::default()),
             foreground: config.foreground,
+            worker_pool: std::sync::atomic::AtomicBool::new(false),
             epoch: std::sync::Mutex::new(crate::store::epoch::Epoch::default()),
             epoch_pending: std::sync::atomic::AtomicU64::new(0),
             io,
@@ -578,6 +588,21 @@ impl Store {
     /// The Phase-10B foreground representation policy.
     pub fn foreground_policy(&self) -> crate::optimizer::foreground::ForegroundPolicy {
         self.foreground
+    }
+
+    /// Phase-11E: route this store's search/decode work through the
+    /// process-wide [`workers::POOL`] instead of the 11C semaphore. The
+    /// caller MUST have bound the pool to this store's `Arc` first
+    /// (`workers::POOL.bind(&store)`); the pool is a global resource, so
+    /// only one store may be pool-active at a time (the probe test holds
+    /// `workers::tests::POOL_LOCK`). Every other store keeps the flag
+    /// false and the semaphore path untouched — this is what lets the
+    /// probe run inside the shared test binary without hijacking other
+    /// tests' writes, and keeps the FUSE daemon's default unchanged until
+    /// a mount opts in (`--worker-pool N`).
+    pub fn enable_worker_pool(&self) {
+        self.worker_pool
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The committed stats (copied: `StoreStats` is `Copy`).
@@ -1672,26 +1697,84 @@ impl Store {
         let limits = self.config.limits;
         // The decode context has NO epoch reference: the prepared maps
         // carry every object and every nested descriptor the closure
-        // needs, so decode runs without the guard.
-        let ctx =
-            crate::store::epoch::PrefetchContext::new(self, &objects, Some(&descriptors), None);
+        // needs, so decode runs without the guard. Built per-branch: the
+        // Phase-11E pool path moves the maps into Arc and the workers
+        // build their own contexts.
         self.perf.time_request("read_decode", || {
             let mut out = vec![0u8; avail];
             if descs.is_empty() {
                 // No extents in the window: a pure hole (zeros). Must not
                 // reach the worker semaphore — an empty decode has nothing
-                // to parallelize and would block for no work.
+                // to parallelize and would block for no work (the same
+                // guard applies to the pool: no tasks, no submission).
                 return Ok(out);
             }
             if descs.len() == 1 {
+                let ctx = crate::store::epoch::PrefetchContext::new(
+                    self,
+                    &objects,
+                    Some(&descriptors),
+                    None,
+                );
                 for (i, desc) in descs.iter().enumerate() {
                     materialize_into_window(&ctx, desc, starts[i], offset, end, &limits, &mut out)?;
+                }
+                return Ok(out);
+            }
+            if self.worker_pool.load(std::sync::atomic::Ordering::Relaxed) {
+                // Phase-11E PROBE: the persistent fair pool (decode path).
+                // Each extent becomes a typed DecodeExtent task carrying the
+                // prefetched maps; the caller reassembles strictly by
+                // ordinal (the pool's determinism contract). Only the
+                // scheduler changes — same descriptors, same maps, same
+                // materializer.
+                let store_arc = crate::store::workers::POOL
+                    .store_arc()
+                    .expect("11E pool bound to a store");
+                let objects = std::sync::Arc::new(objects);
+                let descriptors = std::sync::Arc::new(descriptors);
+                let request_id = crate::store::workers::POOL.alloc_request_id();
+                let tasks: Vec<crate::store::workers::WorkerTask> = descs
+                    .iter()
+                    .enumerate()
+                    .map(
+                        |(i, desc)| crate::store::workers::WorkerTask::DecodeExtent {
+                            request_id,
+                            ordinal: i,
+                            store: std::sync::Arc::clone(&store_arc),
+                            start: starts[i],
+                            desc: desc.clone(),
+                            objects: std::sync::Arc::clone(&objects),
+                            descriptors: std::sync::Arc::clone(&descriptors),
+                            limits,
+                            offset,
+                            end,
+                            avail,
+                        },
+                    )
+                    .collect();
+                let t_scope = std::time::Instant::now();
+                let submit = crate::store::workers::POOL.submit(request_id, tasks);
+                let (joined, metrics) = submit.join();
+                self.perf.record("worker_queue_wait", metrics.queue_wait_ns);
+                self.perf
+                    .record("worker_scope_wall", t_scope.elapsed().as_nanos() as u64);
+                self.perf.record("worker_useful_cpu", metrics.cpu_ns);
+                for wr in joined {
+                    match wr.result {
+                        Ok(crate::store::workers::WorkerOutcome::Decode((start, chunk))) => {
+                            assemble_extent_window(&mut out, start, &chunk, offset, end, avail);
+                        }
+                        _ => unreachable!("decode request produced a non-decode result"),
+                    }
                 }
                 return Ok(out);
             }
             // Phase-11C: the process-wide worker semaphore — concurrent
             // requests wait for the machine's workers instead of spawning
             // T×N threads (or burning CPU in a serial fallback).
+            let ctx =
+                crate::store::epoch::PrefetchContext::new(self, &objects, Some(&descriptors), None);
             let want = descs.len().min(
                 std::thread::available_parallelism()
                     .map(|n| n.get())
@@ -1768,16 +1851,7 @@ impl Store {
             // Assemble (extent ranges are disjoint and ordered).
             for run in runs {
                 for (start, chunk) in run? {
-                    let extent_end = start.saturating_add(chunk.len() as u64).min(end);
-                    let copy_start = start.max(offset);
-                    if copy_start >= extent_end {
-                        continue;
-                    }
-                    let s = (copy_start - start) as usize;
-                    let c = (extent_end - copy_start) as usize;
-                    let o = (copy_start - offset) as usize;
-                    let c = c.min(avail - o);
-                    out[o..o + c].copy_from_slice(&chunk[s..s + c]);
+                    assemble_extent_window(&mut out, start, &chunk, offset, end, avail);
                 }
             }
             Ok(out)
@@ -2824,7 +2898,16 @@ pub struct AttrUpdate {
 }
 
 /// One composed chunk ready for the concurrent search (Phase-10C).
-struct Composed {
+///
+/// Phase-11E: `Clone` — the persistent-pool probe moves an owned copy of
+/// each chunk into its `EncodeChunk` task (the pool's workers outlive the
+/// submit frame, so the task must own its inputs; the semaphore path keeps
+/// borrowing from this struct). The per-chunk clone is ~64 KiB of bytes
+/// plus the optional dictionary/synthetic state — caller-side cost, not
+/// worker CPU. `pub(crate)`: the pool's `WorkerTask::EncodeChunk` carries
+/// it (the task must own its inputs across the submit frame).
+#[derive(Clone)]
+pub(crate) struct Composed {
     chunk_off: u64,
     bytes: Vec<u8>,
     cid: crate::core::extent::ChunkId,
@@ -3257,6 +3340,54 @@ impl Store {
                 options,
                 fg,
             ));
+        } else if self.worker_pool.load(std::sync::atomic::Ordering::Relaxed) {
+            // Phase-11E PROBE: the persistent fair worker pool (see
+            // `workers.rs` — per-store opt-in; the FUSE daemon and every
+            // non-probe store keep the semaphore path). The composed chunks
+            // become one request of typed EncodeChunk tasks; the pool
+            // serves requests round-robin at task granularity and the
+            // results reassemble strictly by ordinal, so persisted semantic
+            // order never depends on scheduling order (the pool's
+            // determinism contract). Same DSFB, same policy, same corpus —
+            // only the scheduler changes (the 11E attribution rule).
+            let store_arc = crate::store::workers::POOL
+                .store_arc()
+                .expect("11E pool bound to a store");
+            let request_id = crate::store::workers::POOL.alloc_request_id();
+            let tasks: Vec<crate::store::workers::WorkerTask> = composed
+                .iter()
+                .enumerate()
+                .map(
+                    |(ordinal, c)| crate::store::workers::WorkerTask::EncodeChunk {
+                        request_id,
+                        ordinal,
+                        store: std::sync::Arc::clone(&store_arc),
+                        ino,
+                        composed: c.clone(),
+                        limits,
+                        options,
+                        fg,
+                    },
+                )
+                .collect();
+            let t_scope = std::time::Instant::now();
+            let submit = crate::store::workers::POOL.submit(request_id, tasks);
+            let (joined, metrics) = submit.join();
+            // Phase-11D oracle rows, pool-path semantics: queue wait =
+            // submit -> first service; scope wall = submit -> join; useful
+            // CPU = the request's summed task thread-CPU.
+            self.perf.record("worker_queue_wait", metrics.queue_wait_ns);
+            self.perf
+                .record("worker_scope_wall", t_scope.elapsed().as_nanos() as u64);
+            self.perf.record("worker_useful_cpu", metrics.cpu_ns);
+            for wr in joined {
+                match wr.result {
+                    Ok(crate::store::workers::WorkerOutcome::Encode(r)) => {
+                        results[wr.ordinal] = Some(r);
+                    }
+                    _ => unreachable!("encode request produced a non-encode result"),
+                }
+            }
         } else {
             // Phase-11C: the process-wide worker SEMAPHORE. Concurrent
             // requests wait for the machine's workers (T requests × N
@@ -4013,6 +4144,32 @@ fn materialize_into_window(
     let c = c.min(out.len() - o);
     out[o..o + c].copy_from_slice(&chunk[s..s + c]);
     Ok(())
+}
+
+/// Copy one ALREADY-materialized extent's window into `out` — the shared
+/// assembly step of the batched decode paths (the Phase-11C scoped-worker
+/// path and the Phase-11E pool path, which materialize per-extent first
+/// and assemble after). Extent ranges are disjoint and ordered, so
+/// assembly is safe in any order — scheduling order can never change the
+/// output bytes (the pool's determinism contract).
+fn assemble_extent_window(
+    out: &mut [u8],
+    start: u64,
+    chunk: &[u8],
+    offset: u64,
+    end: u64,
+    avail: usize,
+) {
+    let extent_end = start.saturating_add(chunk.len() as u64).min(end);
+    let copy_start = start.max(offset);
+    if copy_start >= extent_end {
+        return;
+    }
+    let s = (copy_start - start) as usize;
+    let c = (extent_end - copy_start) as usize;
+    let o = (copy_start - offset) as usize;
+    let c = c.min(avail - o);
+    out[o..o + c].copy_from_slice(&chunk[s..s + c]);
 }
 
 impl ObjectProvider for Store {

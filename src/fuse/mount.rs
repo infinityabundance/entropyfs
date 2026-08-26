@@ -64,6 +64,10 @@ pub struct MountParams {
     pub background_optimize: bool,
     /// Phase-10A: dump FUSE/phase instrumentation to this path on drop.
     pub stats_file: Option<PathBuf>,
+    /// Phase-11E worker pool: `Some(N)` routes the search/decode work
+    /// through the persistent fair pool with N workers (see the CLI flag
+    /// docs in `cli/mount.rs`). `None` keeps the 11C semaphore.
+    pub worker_pool_threads: Option<usize>,
 }
 
 /// Preflight: validate the environment and the mount configuration (§47).
@@ -106,7 +110,19 @@ pub fn preflight(params: &MountParams) -> Result<(), MountError> {
 /// Mount the store and return a background session (drop to unmount).
 pub fn mount(params: &MountParams, store: Store) -> Result<fuser::BackgroundSession, MountError> {
     preflight(params)?;
-    let fs = EntropyFs::with_stats(std::sync::Arc::new(store), params.stats_file.clone());
+    let store = std::sync::Arc::new(store);
+    if let Some(n) = params.worker_pool_threads {
+        // Phase-11E: the persistent fair worker pool (probe-sealed, see
+        // `workers.rs`). The pool is process-global and holds only a
+        // Weak<Store>; bind it to this store's Arc before any request
+        // traffic, then opt the store in (every other path keeps the 11C
+        // semaphore). The workers park on their condvar while the session
+        // is idle and are joined at unmount (see `cli/mount.rs`).
+        crate::store::workers::POOL.enable(n, 8);
+        crate::store::workers::POOL.bind(&store);
+        store.enable_worker_pool();
+    }
+    let fs = EntropyFs::with_stats(store, params.stats_file.clone());
     mount_fs(fs, params)
 }
 

@@ -56,6 +56,14 @@ pub struct MountArgs {
     /// io_uring submission queue capacity (UringIo only).
     #[arg(long, default_value_t = 256)]
     pub io_uring_entries: u32,
+    /// Phase-11E worker pool: route the search/decode work through the
+    /// persistent FAIR worker pool with N threads (capacity 8x N) instead
+    /// of the 11C batch semaphore. Probe-sealed (pool-16 cuts 16-writer
+    /// p99 178 -> ~80 ms and wall ~1.14 -> ~0.79 s at +2.6-3.7% useful
+    /// CPU). Default: off (the semaphore), pending the mounted-FUSE
+    /// validation.
+    #[arg(long, value_name = "N")]
+    pub worker_pool: Option<usize>,
 }
 
 /// Run the mount daemon.
@@ -83,6 +91,7 @@ pub fn run(args: &MountArgs) -> Result<(), String> {
         fs_name: args.fs_name.clone(),
         background_optimize: !args.no_background_optimize,
         stats_file: args.stats_file.clone(),
+        worker_pool_threads: args.worker_pool,
     };
     let session = do_mount(&params, store).map_err(|e| e.to_string())?;
     println!(
@@ -106,5 +115,9 @@ pub fn run(args: &MountArgs) -> Result<(), String> {
     session
         .umount_and_join()
         .map_err(|e| format!("unmount/join: {e}"))?;
+    // Phase-11E: stop the pool's worker threads (parked idle during the
+    // session; joined here so the process exits cleanly). A no-op when the
+    // pool was never enabled.
+    crate::store::workers::POOL.disable();
     Ok(())
 }

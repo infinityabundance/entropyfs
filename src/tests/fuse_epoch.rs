@@ -28,6 +28,7 @@ fn mount_params(store: &Path, mnt: &Path) -> MountParams {
         fs_name: "entropyfs-test".into(),
         background_optimize: false,
         stats_file: None,
+        worker_pool_threads: None,
     }
 }
 
