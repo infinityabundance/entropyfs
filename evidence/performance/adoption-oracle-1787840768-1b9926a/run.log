@@ -1,0 +1,141 @@
+   Compiling entropyfs v0.7.12 (/mnt/1tb_kingston/entropyfs)
+warning: variable does not need to be mutable
+   --> src/dsfb/semantics.rs:227:13
+    |
+227 |         let mut step = (sample.len() / 2048).max(1);
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src/store/mod.rs:6467:29
+     |
+6467 |                         let mut cur = Store::inode_for_tx(tx, *child)?;
+     |                             ----^^^
+     |                             |
+     |                             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/store/mod.rs:6590:29
+     |
+6590 |                         let mut cur = Store::inode_for_tx(tx, *src_ino)?;
+     |                             ----^^^
+     |                             |
+     |                             help: remove this `mut`
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:113:9
+    |
+113 |     for i in 0..4u64 {
+    |         ^ help: if this is intentional, prefix it with an underscore: `_i`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:126:9
+    |
+126 |     for i in 0..2u64 {
+    |         ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:255:10
+    |
+255 |     for (i, (path, v1)) in names.iter().enumerate() {
+    |          ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `start`
+   --> src/tests/grammar_oracle.rs:251:29
+    |
+251 |                         let start = pos.min(r.len());
+    |                             ^^^^^ help: if this is intentional, prefix it with an underscore: `_start`
+
+warning: unused variable: `prepared`
+   --> src/tests/perf_reconciled.rs:311:13
+    |
+311 |         let prepared = store
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_prepared`
+
+warning: type `Composed` is more private than the item `workers::WorkerTask::EncodeChunk::composed`
+    --> src/store/workers.rs:384:9
+     |
+ 384 |         composed: super::Composed,
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^ field `workers::WorkerTask::EncodeChunk::composed` is reachable at visibility `pub`
+     |
+note: but type `Composed` is only usable at visibility `pub(crate)`
+    --> src/store/mod.rs:3488:1
+     |
+3488 | pub(crate) struct Composed {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: function `percentile` is never used
+   --> src/tests/dsfb_semantics_probe.rs:190:4
+    |
+190 | fn percentile(sorted: &[f64], q: f64) -> f64 {
+    |    ^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `candidates`, `chunks`, and `raw_wins` are never read
+   --> src/tests/dsfb_semantics_probe.rs:200:5
+    |
+197 | struct ModeResult {
+    |        ---------- fields in this struct
+...
+200 |     candidates: u64,
+    |     ^^^^^^^^^^
+201 |     chunks: u64,
+    |     ^^^^^^
+...
+204 |     raw_wins: u64,
+    |     ^^^^^^^^
+
+warning: constant `MAX_MEMBERS` is never used
+  --> src/tests/grammar_oracle.rs:79:7
+   |
+79 | const MAX_MEMBERS: usize = 512;
+   |       ^^^^^^^^^^^
+
+warning: function `contains` is never used
+   --> src/tests/grammar_oracle.rs:214:4
+    |
+214 | fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    |    ^^^^^^^^
+
+warning: struct `NoProvider` is never constructed
+   --> src/tests/io_backend_parity.rs:171:24
+    |
+171 |                 struct NoProvider;
+    |                        ^^^^^^^^^^
+
+warning: missing documentation for a module
+    --> src/store/workers.rs:1036:1
+     |
+1036 | pub mod tests {
+     | ^^^^^^^^^^^^^
+     |
+note: the lint level is defined here
+    --> src/lib.rs:19:9
+     |
+  19 | #![warn(missing_docs)]
+     |         ^^^^^^^^^^^^
+
+warning: `entropyfs` (lib test) generated 15 warnings (run `cargo fix --lib -p entropyfs --tests` to apply 8 suggestions)
+    Finished `release` profile [optimized + debuginfo] target(s) in 57.55s
+     Running unittests src/lib.rs (target/release/deps/entropyfs-1656b57820206eef)
+
+running 1 test
+ADOPTION_ORACLE {"decision":{"rationale":"workload `build-artifacts` reaches footprint 0.049x of raw (<= 0.10x) — a 10x-class footprint wedge","verdict":"WEDGE-CANDIDATE"},"schema":"adoption-oracle-v1","workloads":{"build-artifacts":{"blobs":2400,"compact_reclaimed_bytes":1363985,"dedup_saved_bytes":13720960,"footprint_vs_raw":0.04866661309332476,"get_cpu_s":0.09999999999999998,"get_mbps":177.00337288435892,"get_p50_us":32.0,"get_p95_us":56.0,"get_p99_us":58.0,"get_wall_s":0.100570314,"logical_bytes":18666000,"physical_after_bytes":908411,"put_cpu_s":0.13,"put_mbps":139.83082139532604,"put_wall_s":0.127305873,"range_wall_s":0.012580868,"raw_physical_bytes":18666000,"raw_write_wall_s":0.009019133,"sync_wall_s":0.00473904,"unique_bytes":4945040},"ci-cache":{"blobs":300,"compact_reclaimed_bytes":425146,"dedup_saved_bytes":688805,"footprint_vs_raw":0.1051162358430202,"get_cpu_s":0.010000000000000009,"get_mbps":266.14472196076656,"get_p50_us":41.0,"get_p95_us":49.0,"get_p99_us":51.0,"get_wall_s":0.013725912,"logical_bytes":3830531,"physical_after_bytes":402651,"put_cpu_s":0.039999999999999925,"put_mbps":103.25214708231232,"put_wall_s":0.035380175,"range_wall_s":0.001199207,"raw_physical_bytes":3830531,"raw_write_wall_s":0.001231237,"sync_wall_s":0.001296328,"unique_bytes":3141726},"container-layers":{"blobs":800,"compact_reclaimed_bytes":847365,"dedup_saved_bytes":3440640,"footprint_vs_raw":0.084306640625,"get_cpu_s":0.030000000000000027,"get_mbps":245.16783032471872,"get_p50_us":29.0,"get_p95_us":32.0,"get_p99_us":35.0,"get_wall_s":0.025492741,"logical_bytes":6553600,"physical_after_bytes":552512,"put_cpu_s":0.040000000000000036,"put_mbps":140.60025330091716,"put_wall_s":0.044452267,"range_wall_s":0.002399736,"raw_physical_bytes":6553600,"raw_write_wall_s":0.002456953,"sync_wall_s":0.001227049,"unique_bytes":3112960},"generated-assets":{"blobs":50,"compact_reclaimed_bytes":94422,"dedup_saved_bytes":0,"footprint_vs_raw":0.09583740234375,"get_cpu_s":0.0,"get_mbps":706.3787926325031,"get_p50_us":20.0,"get_p95_us":21.0,"get_p99_us":28.0,"get_wall_s":0.001105993,"logical_bytes":819200,"physical_after_bytes":78510,"put_cpu_s":0.010000000000000009,"put_mbps":107.88409361066553,"put_wall_s":0.007241568,"range_wall_s":0.000100387,"raw_physical_bytes":819200,"raw_write_wall_s":0.000212828,"sync_wall_s":0.000316691,"unique_bytes":819200},"scientific-outputs":{"blobs":120,"compact_reclaimed_bytes":243868,"dedup_saved_bytes":0,"footprint_vs_raw":0.05512924181959304,"get_cpu_s":0.010000000000000009,"get_mbps":666.9598721598812,"get_p50_us":85.0,"get_p95_us":105.0,"get_p99_us":121.0,"get_wall_s":0.011458593,"logical_bytes":8013660,"physical_after_bytes":441787,"put_cpu_s":0.07999999999999996,"put_mbps":106.21669172570667,"put_wall_s":0.071951231,"range_wall_s":0.000522936,"raw_physical_bytes":8013660,"raw_write_wall_s":0.00184418,"sync_wall_s":0.00098073,"unique_bytes":8013660},"source-trees":{"blobs":1500,"compact_reclaimed_bytes":3782599,"dedup_saved_bytes":0,"footprint_vs_raw":0.19121763097523808,"get_cpu_s":0.07000000000000006,"get_mbps":115.90729216233156,"get_p50_us":47.0,"get_p95_us":57.0,"get_p99_us":59.0,"get_wall_s":0.074779736,"logical_bytes":9088550,"physical_after_bytes":1737891,"put_cpu_s":0.23999999999999994,"put_mbps":34.8084204190705,"put_wall_s":0.249006321,"range_wall_s":0.007064487,"raw_physical_bytes":9088550,"raw_write_wall_s":0.004701821,"sync_wall_s":0.005070208,"unique_bytes":9088550}}}
+adoption-oracle: best workload `build-artifacts` footprint 0.049x of raw -> WEDGE-CANDIDATE
+  build-artifacts      logical 17.80 MiB physical 0.87 MiB footprint 0.049x put 139.8 MiB/s get 177.0 MiB/s
+  ci-cache             logical 3.65 MiB physical 0.38 MiB footprint 0.105x put 103.3 MiB/s get 266.1 MiB/s
+  container-layers     logical 6.25 MiB physical 0.53 MiB footprint 0.084x put 140.6 MiB/s get 245.2 MiB/s
+  generated-assets     logical 0.78 MiB physical 0.07 MiB footprint 0.096x put 107.9 MiB/s get 706.4 MiB/s
+  scientific-outputs   logical 7.64 MiB physical 0.42 MiB footprint 0.055x put 106.2 MiB/s get 667.0 MiB/s
+  source-trees         logical 8.67 MiB physical 1.66 MiB footprint 0.191x put 34.8 MiB/s get 115.9 MiB/s
+test tests::adoption_oracle::adoption_oracle ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 462 filtered out; finished in 0.97s
+

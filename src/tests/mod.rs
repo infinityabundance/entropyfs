@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod adoption_oracle;
 pub mod base_sequence;
 pub mod compat_seal;
 pub mod concurrency;

@@ -325,7 +325,6 @@ fn decide(
         .map(|(_, v)| *v)
         .sum();
     let phys = physical_used_after.max(1);
-    let struct_share = structural as f64 / phys as f64;
     let overhead_before = if logical == 0 {
         0.0
     } else {
@@ -442,7 +441,6 @@ fn pack_oracle() {
     compact_full(&store, &hooks).expect("compact");
     let used_after = store.physical_used();
     let phys_after = physical_report(&store).expect("physical after");
-    let (by_total_a, _, _, _, _, _) = decompose(&store);
     let dead_before = phys_before
         .segments
         .iter()
