@@ -1,0 +1,4 @@
+10.2: Pulling from library/almalinux
+Digest: sha256:cc24bc5b6ac7e284f2f62a07bdaa1b15d3319fdcf46413c6b8fe9fa245068ddd
+Status: Image is up to date for almalinux:10.2
+docker.io/library/almalinux:10.2

@@ -1,0 +1,4 @@
+26.04: Pulling from library/ubuntu
+Digest: sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b
+Status: Image is up to date for ubuntu:26.04
+docker.io/library/ubuntu:26.04

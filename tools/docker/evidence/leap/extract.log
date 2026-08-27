@@ -1,0 +1,1 @@
+bash: line 26:   544 Killed                     unsquashfs -d /mnt/s /out/squashfs.img > /dev/null

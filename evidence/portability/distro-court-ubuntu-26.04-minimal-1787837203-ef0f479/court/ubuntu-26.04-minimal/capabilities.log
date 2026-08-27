@@ -1,0 +1,17 @@
+entropyfs version: 0.7.11
+format: v1.0 (fuse frontend via fuser 0.18)
+chunk classes: [4096, 16384, 65536, 262144]
+default chunk class: 65536
+max reference depth: 4
+representation families: ZERO FILL INLINE RAW RANS EXACT_REF BASE_RESIDUAL SPARSE PALETTE PERIODIC ENTROPY_REF PERMUTATION SEQUENCE_RANS SPARSE_BLOCK64
+rANS backends: ryg-rans-rs 0.5.1 (byte, interleaved2; scalar authority)
+DSFB observer: dsfb 0.1.2 (zero decoding authority)
+storage transport (Phase 10F): SyncIo (reference path, default) | UringIo (io_uring)
+safety ledger: 1 confined file (platform/io_uring.rs; see docs/security/unsafe-ledger.md)
+
+/dev/fuse: present
+fusermount3: present
+kernel fuse: registered
+kernel fuse io_uring: disabled (informational)
+io_uring transport: available
+io_uring ops: READ/WRITE (kernel 5.6+), FSYNC (5.1+), UNLINKAT (5.11+)

@@ -1,0 +1,31 @@
+# EntropyFS distribution-court base image — openSUSE Leap 16.0 minimal
+# (built from the provided Leap-16.0-Minimal-VM.x86_64-Cloud.qcow2 by
+# tools/docker/build-distro-images.sh; the legally distributable
+# equivalent base of the SUSE enterprise family — SLES 16 itself is
+# available through the documented authenticated lane).
+#
+# Phase 12E.8: documented build/runtime prerequisites + a pinned rustup
+# toolchain only; the repo is bind-mounted by the driver.
+
+FROM opensuse/leap:16.0
+
+# Stage 2: documented build/runtime prerequisites (zypper).
+# clang: libublk-rs-sys builds C bindings with bindgen (build-time
+# libclang — exposed by the 12E.8 court).
+RUN zypper --non-interactive install -y gcc gcc-c++ make curl file \
+        diffutils util-linux python3 attr fuse3 clang clang-devel \
+        ca-certificates findutils \
+    || zypper --non-interactive --gpg-auto-import-keys install -y \
+        gcc gcc-c++ make curl file diffutils util-linux python3 attr \
+        fuse3 clang clang-devel ca-certificates findutils \
+    && zypper clean --all
+
+# Stage 3: rustup pinned toolchain (never the distro's packaged Rust).
+ENV RUSTUP_HOME=/opt/rust CARGO_HOME=/opt/cargo \
+    PATH=/opt/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --default-toolchain stable \
+    && rustc --version
+
+WORKDIR /src
+CMD ["/bin/bash"]

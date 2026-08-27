@@ -1,0 +1,12 @@
+unreachable before: 17230 bytes
+reclaimed: 17230 bytes
+unreachable after: 246 bytes
+physical reconciliation: 6559 B files
+  live canonical              6555 B ( 99.9%)
+  dead indexed                   0 B (  0.0%)  [reclaimable]
+  index-hidden                   0 B (  0.0%)  [reclaimable]
+  unindexed                      0 B (  0.0%)  [reclaimable]
+  torn                           0 B (  0.0%)
+  zero padding                   0 B (  0.0%)
+  format overhead                4 B (  0.1%)
+  unexplained                    0 B  [must be 0]

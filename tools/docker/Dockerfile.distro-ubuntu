@@ -1,0 +1,25 @@
+# EntropyFS distribution-court base image — Ubuntu Server 26.04 LTS
+# minimal. Phase 12E.8: documented build/runtime prerequisites + a
+# pinned rustup toolchain only; the repo is bind-mounted by the driver.
+
+FROM ubuntu:26.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+# clang/libclang-dev: libublk-rs-sys builds C bindings with bindgen
+# (build-time libclang — a packaging assumption the 12E.8 court exposed).
+# ca-certificates: the minimal image ships NO CA trust store — curl's TLS
+# verification fails without it (the rustup download dies with exit 127).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc g++ make curl file \
+        diffutils mount util-linux fuse3 python3 attr clang libclang-dev \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV RUSTUP_HOME=/opt/rust CARGO_HOME=/opt/cargo \
+    PATH=/opt/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --default-toolchain stable \
+    && rustc --version
+
+WORKDIR /src
+CMD ["/bin/bash"]

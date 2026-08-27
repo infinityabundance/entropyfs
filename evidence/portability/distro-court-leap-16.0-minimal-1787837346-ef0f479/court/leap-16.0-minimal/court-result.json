@@ -1,0 +1,21 @@
+court: leap-16.0-minimal
+result: PASS (all stages passed or environment-waived)
+waivers: 0
+crates compiled: 167
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 451 filtered out; finished in 0.00s
+
+
+entropyfs 0.7.11
+metrics: blob_count=1 format=1.0 backend=sync
+engine smoke: OK
+uring smoke: OK
+fuse mount: OK (pid 4249)
+POSIX smoke: OK
+unmount: ok (or already detached)
+fsck status: clean | findings: 1
+reopen + verify: OK
+  torn                           0 B (  0.0%)
+  zero padding                   0 B (  0.0%)
+  format overhead                4 B (  0.1%)
+  unexplained                    0 B  [must be 0]
+post-gc fsck status: clean

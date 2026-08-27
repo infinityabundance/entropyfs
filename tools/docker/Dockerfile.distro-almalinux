@@ -1,0 +1,27 @@
+# EntropyFS distribution-court base image — Almalinux 10.2 minimal.
+#
+# Phase 12E.8: builds only the documented build/runtime prerequisites +
+# a pinned rustup toolchain; the repo itself is bind-mounted read-only by
+# the driver and the staged court runs against this pristine image.
+
+FROM almalinux:10.2
+
+# Stage 2: only explicitly documented build/runtime prerequisites.
+# clang: libublk-rs-sys builds C bindings with bindgen, which needs
+# libclang at BUILD time (a packaging assumption the 12E.8 court
+# exposed — bindgen was silently relying on host libclang before).
+RUN dnf -y install gcc gcc-c++ make curl file diffutils util-linux \
+        python3 attr fuse3 clang clang-devel \
+    && dnf clean all
+
+# Stage 3: rustup (pinned stable toolchain; NOT the distro's packaged
+# Rust — the compatibility claim is about the OS/kernel/userspace
+# environment, 12E.9).
+ENV RUSTUP_HOME=/opt/rust CARGO_HOME=/opt/cargo \
+    PATH=/opt/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --default-toolchain stable \
+    && rustc --version
+
+WORKDIR /src
+CMD ["/bin/bash"]
