@@ -1,0 +1,7 @@
+mode	writers	wall_ms	p50_us	p95_us	p99_us	mean_us	physical_barriers	fsync_requests	amplification	commit_lock_wait_ms	byte_exact
+baseline	1	24	26.5	44.4	44.4	29.8	18	18	1.00	0.0	ok
+baseline	2	24	34.9	41.5	43.8	35.0	35	35	1.00	0.0	ok
+baseline	4	25	45.9	65.5	78.6	46.4	66	69	0.96	0.0	ok
+baseline	8	30	73.5	202.4	394.5	94.1	120	137	0.88	0.8	ok
+baseline	16	43	190.8	830.6	1266.2	280.4	159	273	0.58	3.1	ok
+baseline	32	88	1368.0	3454.3	4636.5	1559.7	152	545	0.28	11.4	ok

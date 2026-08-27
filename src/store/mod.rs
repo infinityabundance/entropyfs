@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 pub mod directory;
+pub mod durability;
 pub mod epoch;
 pub mod extent_tree;
 pub mod gc;
@@ -312,6 +313,21 @@ pub struct Store {
     /// as a delta into each materialization's [`ReadCostSample`]).
     model_cache_hits: std::sync::atomic::AtomicU64,
     model_cache_misses: std::sync::atomic::AtomicU64,
+    /// Phase-12B durability generations: the highest logical sequence
+    /// known to survive power loss (the `durable_seq` of the 12B model;
+    /// advanced to a completed barrier's cut). Lock-free readiness
+    /// marker — the state it certifies is synchronized by the store's
+    /// own locks.
+    durable_seq: std::sync::atomic::AtomicU64,
+    /// Phase-12B: the durable root generation coordinate (covers direct
+    /// non-epoch commits, which never advance the epoch sequence).
+    durable_gen: std::sync::atomic::AtomicU64,
+    /// Phase-12B: the group-commit coordinator (waiters + the in-flight
+    /// generation's cut; `store/durability.rs`).
+    durability_group: std::sync::Mutex<crate::store::durability::DurabilityGroup>,
+    /// Phase-12B: the coordinator's condition variable (waiters park
+    /// until their requirement is covered or their generation fails).
+    durability_cv: std::sync::Condvar,
 }
 
 impl std::fmt::Debug for Store {
@@ -419,6 +435,12 @@ impl Store {
             hotness: std::sync::Mutex::new(crate::store::readcost::HotnessTracker::default()),
             model_cache_hits: std::sync::atomic::AtomicU64::new(0),
             model_cache_misses: std::sync::atomic::AtomicU64::new(0),
+            durable_seq: std::sync::atomic::AtomicU64::new(0),
+            durable_gen: std::sync::atomic::AtomicU64::new(0),
+            durability_group: std::sync::Mutex::new(
+                crate::store::durability::DurabilityGroup::default(),
+            ),
+            durability_cv: std::sync::Condvar::new(),
         };
         store.open_segment(0)?;
         // Create the root directory inode (ino 1) and commit the initial
@@ -504,6 +526,12 @@ impl Store {
             hotness: std::sync::Mutex::new(crate::store::readcost::HotnessTracker::default()),
             model_cache_hits: std::sync::atomic::AtomicU64::new(0),
             model_cache_misses: std::sync::atomic::AtomicU64::new(0),
+            durable_seq: std::sync::atomic::AtomicU64::new(0),
+            durable_gen: std::sync::atomic::AtomicU64::new(0),
+            durability_group: std::sync::Mutex::new(
+                crate::store::durability::DurabilityGroup::default(),
+            ),
+            durability_cv: std::sync::Condvar::new(),
         };
         // Phase-10D: replay any un-checkpointed mutation log tail left by
         // a process crash (the last checkpoint root is authoritative; the
@@ -1150,6 +1178,15 @@ impl Store {
     /// power-durable), but recovery can never wedge: it validates the
     /// chosen slot's root and falls back to the newest valid root record
     /// in the segments.
+    ///
+    /// Phase-12B: the GROUP gate — concurrent callers coalesce onto ONE
+    /// physical barrier whose cut covers every waiter registered before
+    /// the physical work starts (the fsync convoy measured in 11B/11C is
+    /// amortized, not removed: the linearizability requirement is
+    /// unchanged, each waiter still completes only after a cut that
+    /// includes its writes). The physical steps, the commit-lock hold,
+    /// and the crash hooks are identical to the pre-12B barrier; only
+    /// WHO runs them and WHO waits changes. See `store/durability.rs`.
     pub fn durability_barrier(
         &self,
         hooks: &crate::store::transaction::CrashHooks,
@@ -1158,6 +1195,139 @@ impl Store {
         // inside an outer request). The checkpoint's cp_* rows and the
         // barrier rows below partition it.
         let _req = self.perf.request("durability_barrier");
+        // The requirement: the acknowledged mutation state this fsync
+        // must make power-durable — the epoch's envelope sequence (staged
+        // epoch ops) AND the published root's generation (direct
+        // non-epoch commits, which never advance the epoch sequence).
+        let required_seq = self.epoch().seq;
+        let required_gen = self
+            .commit
+            .read()
+            .expect("commit state poisoned")
+            .root
+            .generation;
+        self.durability_gate(required_seq, required_gen, hooks)
+    }
+
+    /// The Phase-12B group gate: register as a waiter and either join the
+    /// in-flight physical barrier's generation or become the owner of a
+    /// new one (the coordinator model in `store/durability.rs`). Returns
+    /// only after a completed barrier whose cut covers the requirement, or
+    /// the failure of the generation that covered it.
+    fn durability_gate(
+        &self,
+        required_seq: u64,
+        required_gen: u64,
+        hooks: &crate::store::transaction::CrashHooks,
+    ) -> Result<(), StoreError> {
+        use crate::store::durability::DurabilityGroup;
+        // Fast path: the requirement is already durable (back-to-back
+        // fsyncs after a completed barrier).
+        if DurabilityGroup::covers(
+            self.durable_seq.load(std::sync::atomic::Ordering::Relaxed),
+            self.durable_gen.load(std::sync::atomic::Ordering::Relaxed),
+            required_seq,
+            required_gen,
+        ) {
+            return Ok(());
+        }
+        let mut g = self
+            .durability_group
+            .lock()
+            .expect("durability group poisoned");
+        if DurabilityGroup::covers(
+            self.durable_seq.load(std::sync::atomic::Ordering::Relaxed),
+            self.durable_gen.load(std::sync::atomic::Ordering::Relaxed),
+            required_seq,
+            required_gen,
+        ) {
+            return Ok(());
+        }
+        // Register; `joined_gen` is the generation that will cover this
+        // waiter (the next owner takeover's generation).
+        let waiter = g.register(required_seq, required_gen);
+        loop {
+            // Covered by a completed generation?
+            if DurabilityGroup::covers(
+                self.durable_seq.load(std::sync::atomic::Ordering::Relaxed),
+                self.durable_gen.load(std::sync::atomic::Ordering::Relaxed),
+                required_seq,
+                required_gen,
+            ) {
+                return Ok(());
+            }
+            if g.owner_cut.is_none() {
+                // No generation in flight: become the owner. The cut is
+                // the componentwise max of the CURRENT waiters — every
+                // waiter registered before the physical work starts. A
+                // mutation acknowledged after this point has a higher
+                // seq/gen and stays pending for the next generation (the
+                // brief's barrier-inheritance example).
+                let (cut_seq, cut_gen) = g.max_required();
+                let generation = g.next_gen;
+                g.next_gen = g.next_gen.saturating_add(1);
+                g.owner_cut = Some((cut_seq, cut_gen));
+                g.owner_error = None;
+                drop(g);
+                // Run the physical barrier (the exact pre-12B sequence;
+                // the crash hooks fire at the same points).
+                let result = self.physical_durability_barrier(hooks);
+                // Publish the generation's outcome.
+                let mut g2 = self
+                    .durability_group
+                    .lock()
+                    .expect("durability group poisoned");
+                match &result {
+                    Ok(()) => {
+                        // Advance the durable state to the CUT — never
+                        // beyond what this generation was required to
+                        // cover, even if the checkpoint flushed more (a
+                        // late mutation must not inherit the barrier).
+                        self.durable_seq
+                            .store(cut_seq, std::sync::atomic::Ordering::Release);
+                        self.durable_gen
+                            .store(cut_gen, std::sync::atomic::Ordering::Release);
+                        g2.owner_error = None;
+                    }
+                    Err(e) => {
+                        g2.owner_error = Some((generation, e.to_string()));
+                    }
+                }
+                g2.owner_cut = None;
+                self.durability_cv.notify_all();
+                drop(g2);
+                // The owner's own requirement was, by construction, within
+                // the cut it just ran.
+                return result;
+            }
+            // A generation is in flight. If MY generation already failed,
+            // surface the error (durability is not guaranteed; retrying
+            // would loop on a persistent failure).
+            if let Some((failed_gen, err)) = &g.owner_error {
+                if *failed_gen == waiter.joined_gen {
+                    return Err(StoreError::Io(err.clone()));
+                }
+            }
+            // Park until the generation completes (the parked time is the
+            // exclusive `durability_group_wait` row of this envelope).
+            let guard = self.perf.time_request("durability_group_wait", || {
+                self.durability_cv
+                    .wait(g)
+                    .expect("durability group poisoned")
+            });
+            g = guard;
+        }
+    }
+
+    /// The physical durability barrier: the epoch checkpoint (its own
+    /// commit, covered by this barrier) then the commit-lock-held
+    /// fdatasync → directory sync → superblock write → superblock fsync
+    /// with the crash hooks at every step. Identical to the pre-12B
+    /// barrier's body; the group gate decides who runs it.
+    fn physical_durability_barrier(
+        &self,
+        hooks: &crate::store::transaction::CrashHooks,
+    ) -> Result<(), StoreError> {
         // Phase-10D: the barrier also makes the epoch's acknowledged
         // mutations power-durable — checkpoint the epoch first (its own
         // commit is then covered by this barrier; a no-op when empty). The
@@ -1168,14 +1338,7 @@ impl Store {
         // that completed mid-barrier would ack after the fsync started but
         // before its cut — the fsync would then report durable writes the
         // barrier never covered, breaking write->fsync durability
-        // linearizability (the crash courts pin this). The hold is why
-        // concurrent fsyncs queue: the "fsync convoy" the 11B/11C
-        // reconciliation measured as `commit_lock_wait` (34.7% of
-        // 16-thread request time pre-11C, 10.8-16.4% after). It is
-        // contract-inherent; a future "group durability" could amortize
-        // the physical barrier across concurrent fsyncs (each waiter
-        // completes only after a cut that includes its writes) without
-        // removing the linearizability requirement.
+        // linearizability (the crash courts pin this).
         let _guard = self.perf.time_request("barrier_commit_lock_wait", || {
             self.commit_lock.lock().expect("commit lock poisoned")
         });

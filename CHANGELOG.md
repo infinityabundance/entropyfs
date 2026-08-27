@@ -1,5 +1,48 @@
 # EntropyFS changelog
 
+## v0.7.9 (2026-08-27)
+
+**12B — durability generations + group commit: concurrent fsyncs
+coalesce onto one physical barrier per generation; the convoy is gone.**
+
+- **The model** (`docs/performance/durability-generations.md`, coordinator
+  `src/store/durability.rs`): `logical_seq` (the epoch's mutation-log
+  sequence) and `durable_seq` (the highest sequence through a completed
+  barrier) — with a SECOND coordinate, the published root's `generation`
+  (bumped by every commit, epoch and direct), because direct non-epoch
+  writes never advance the epoch sequence. `fsync` may return iff the
+  durable state covers its requirement; a mutation acknowledged after
+  the cut is chosen never inherits the barrier (the brief's
+  seq-100/101 example).
+- **The coordinator**: waiters park on a condition variable; the first
+  waiter when idle becomes the OWNER, fixes the cut at the componentwise
+  max of the current waiters, runs the UNCHANGED physical barrier (epoch
+  checkpoint → commit-lock-held fdatasync → dir sync → superblock write
+  → superblock fsync, same crash hooks at every step), advances the
+  durable atomics to the cut on success, stores a generation-tagged
+  error on failure (each waiter surfaces only ITS generation's error —
+  late arrivals retry as the next owner). The physical barrier is
+  byte-for-byte the pre-12B sequence; only who runs it and who waits
+  changed.
+- **The oracle** (`src/tests/fsync_group_probe.rs`, sealed
+  `fsync-group-probe-baseline-1787792160-91cc1ba/` + `group-*`):
+  concurrent write+fsync loops at 1/2/4/8/16/32 writers. Baseline:
+  amplification 1.00 at every concurrency (545 physical barriers for 545
+  fsyncs at 32 writers), p99 45 µs → 7.9 ms (the convoy), commit-lock
+  wait 366 ms. After: **amplification 0.23 at 32 writers (127 physical
+  barriers for 545 fsyncs)**, p99 7.9 → 4.1 ms (−48%), commit-lock wait
+  −96% — the convoy is gone. The median shifts up at high concurrency
+  (a waiter parks for the generation cycle — the brief's explicit
+  trade) while the wall still drops (94 → 80 ms at 32 writers).
+- **The crash court** (`src/tests/durability_group_crash.rs`): a crash
+  injected at EVERY physical-barrier stage (AfterRecordAppend,
+  AfterSegmentFdatasync, AfterSegmentDirFsync, AfterSuperblockWrite,
+  AfterSuperblockFsync) under 8 concurrent writers; after recovery every
+  RETURNED fsync's bytes read back exactly (the brief's oracle: returned
+  ⇒ recoverable; unreturned ⇒ admissible) and fsck is clean. The
+  unmodified `durability`, `crash_recovery`, and `io_backend_parity`
+  power-loss courts stay green. 431 lib tests green.
+
 ## v0.7.8 (2026-08-27)
 
 **12A-0 — the Hot-DAG read-cost oracle: depth does NOT predict read
@@ -1039,11 +1082,11 @@ commit, 12C DSFB structural semiotics, 12D grammar-addressed entropy
 (offline oracle first).
 
 **Phase 12 progress:** 12A-0 (the Hot-DAG read-cost oracle, v0.7.8)
-REJECTED the terminalization daemon on measured evidence: depth predicts
-read latency only through object/decode width (~3.3× at d4 for
-object-backed chains, ~1.35× for the search-natural inline chains),
-fanout is flat, and the existing machinery (rebase at depth 2 + `λ_depth`
-candidate cost) already prices the costly shape. The `ReadCostSample`
-instrumentation and the hotness tracker remain as the 12B/12C
-measurement surface. Next: 12B durability generations / group commit
-over the existing MutationLog.
+REJECTED the terminalization daemon on measured evidence (depth predicts
+read latency only through object/decode width; the `ReadCostSample`
+instrumentation stays as the measurement surface). 12B (durability
+generations / group commit, v0.7.9) amortizes concurrent fsyncs onto one
+physical barrier per generation: amplification 1.00 → 0.23 at 32
+writers, fsync p99 −48%, commit-lock wait −96%, crash court green at
+every barrier stage. Next: 12C DSFB structural semiotics, then 12D
+grammar-addressed entropy (offline oracle first).
