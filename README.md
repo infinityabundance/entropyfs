@@ -51,25 +51,28 @@ For sealed performance and experimental evidence, see
 
 ### Current development focus
 
-- Latest completed phase: **12C-0 — the DSFB structural-semiotics
-  oracle** (`docs/performance/dsfb-semantics.md`, sealed
-  `evidence/performance/dsfb-semantics-probe-*/`): the semantic prior
-  (name- and byte-derived classes → learned per-class channel prior)
-  really reorders the search (winner rank 4.41 → 1.02) with byte-exact,
-  density-identical correctness across the semantic-deception exhibits;
-  the standalone CPU gain is ~3% (the plan's budget is a channel count)
-  — RECORDED, not wired as the default; the adaptive foreground budget
-  is the identified continuation. 12B (durability generations, v0.7.9)
-  sealed the group commit (amplification 0.23 at 32 writers, crash
-  courts green at every barrier stage); 12A-0 (v0.7.8) REJECTED the
-  terminalization daemon on measured evidence. **Phase 11 is closed**
-  (11A hostile input → 11B reconciliation → 11C synchronization removal
-  → 11D oracle → 11E fair pool, mount default → 11F observer shard);
-  see `docs/performance/worker-pool-probe.md` and CHANGELOG v0.7.4–0.7.10.
+- Latest completed phase: **12D-0 — the grammar-addressed entropy OFFLINE
+  oracle** (`docs/performance/grammar-oracle.md`, sealed
+  `evidence/performance/grammar-oracle-*/`): a bounded template grammar
+  (literal skeleton + slots, full accounting) beats EntropyFS settled
+  7.0× on a non-periodic shared-skeleton corpus and loses as expected on
+  the diverse control, but zstd-whole beats it 2.2× — **STOP per the
+  brief's gate**; the "persisted entropy" refinement (the grammar object
+  must itself be entropy-coded) is recorded. 12C-0 (v0.7.10) RECORDED
+  the semantic prior's ordering value; 12B (v0.7.9) sealed the durability
+  group commit; 12A-0 (v0.7.8) REJECTED terminalization. **Phase 11 is
+  closed** (11A hostile input → 11B reconciliation → 11C synchronization
+  removal → 11D oracle → 11E fair pool, mount default → 11F observer
+  shard); see `docs/performance/worker-pool-probe.md` and CHANGELOG
+  v0.7.4–0.7.11.
 - Current decision: the pool is the mount default
   (`available_parallelism()` workers; `--no-worker-pool` restores the 11C
-  semaphore as the fallback). The next research step is 12D
-  grammar-addressed entropy (offline oracle first).
+  semaphore as the fallback). Phase 12's four research oracles are all
+  sealed: 12A terminalization (REJECTED), 12B durability generations
+  (ADOPTED — the mount's fsyncs coalesce), 12C structural semiotics
+  (RECORDED — the adaptive foreground budget is the continuation), 12D
+  grammar-addressed entropy (STOPPED at the offline oracle — the
+  entropy-coded-skeleton round is the only path to the format bit).
 - Persistent format: explicit, versioned, incompat-feature-gated.
 - Correctness: crash courts + hostile-media court + fsck, byte-exact
   read-back under every scheduler.

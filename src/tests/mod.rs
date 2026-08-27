@@ -22,6 +22,7 @@ pub mod epoch_seq_monotonic;
 pub mod fsck;
 pub mod fsync_group_probe;
 pub mod fuse_epoch;
+pub mod grammar_oracle;
 pub mod helpers;
 pub mod hostile_media;
 pub mod io_backend_parity;

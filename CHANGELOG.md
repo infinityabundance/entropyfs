@@ -1,5 +1,37 @@
 # EntropyFS changelog
 
+## v0.7.11 (2026-08-27)
+
+**12D-0 — the grammar-addressed entropy OFFLINE oracle: the fully-accounted
+template grammar beats EntropyFS settled 7.0× on the grammar-friendly
+corpus but loses to zstd-whole 2.2× — STOP per the brief's gate, with the
+"persisted entropy" refinement recorded.**
+
+- **The offline oracle** (`src/tests/grammar_oracle.rs`, sealed
+  `evidence/performance/grammar-oracle-*/`; no format change): a bounded
+  template-grammar induction (longest common prefix/suffix → leading /
+  trailing literals; the middle split on the longest common internal
+  substring, capped at 8 slots; `Repeat`-compressed periodic segments)
+  encodes a 200-member non-periodic shared-skeleton config corpus with
+  FULL accounting (grammar once + Σ(state + descriptor) per member;
+  state raw — the conservative bound). Incumbents: EntropyFS foreground,
+  EntropyFS settled (+ `optimize_pass` + `shared_dict_pass`), zstd -19
+  whole pack. Plus a diverse negative control.
+- **Sealed (release):** grammar 66 059 B (181.9× logical) vs EntropyFS
+  foreground 5 899 905 B (2.04×) and settled 465 068 B (25.8×) — the
+  grammar beats the settled machinery 7.0×; the diverse control loses as
+  expected (grammar 1.00× ≈ RAW vs EntropyFS 2.45×). But zstd-whole
+  (29 731 B) is 2.2× smaller than the grammar — the grammar stores its
+  irregular shared skeleton LITERALLY while zstd entropy-codes it.
+- **The verdict: STOP per the brief's gate** (the fully-accounted
+  grammar must beat EVERY incumbent; it beats the in-repo machinery but
+  not zstd). The identified refinement is the brief's own "persisted
+  entropy": the grammar object is itself data and must be
+  entropy-coded — a rANS-coded skeleton would close the zstd gap, but
+  the gate applies to the conservative raw accounting, so the format-bit
+  investigation (12D-1) is not justified on this evidence. The oracle
+  stays as the offline measurement surface. 436 lib tests green.
+
 ## v0.7.10 (2026-08-27)
 
 **12C-0 — the DSFB structural-semiotics oracle: the semantic prior really
@@ -1132,17 +1164,16 @@ commit, 12C DSFB structural semiotics, 12D grammar-addressed entropy
 (offline oracle first).
 
 **Phase 12 progress:** 12A-0 (the Hot-DAG read-cost oracle, v0.7.8)
-REJECTED the terminalization daemon on measured evidence (depth predicts
-read latency only through object/decode width; the `ReadCostSample`
-instrumentation stays as the measurement surface). 12B (durability
-generations / group commit, v0.7.9) amortizes concurrent fsyncs onto one
-physical barrier per generation: amplification 1.00 → 0.23 at 32
-writers, fsync p99 −48%, commit-lock wait −96%, crash court green at
-every barrier stage. 12C-0 (DSFB structural semiotics, v0.7.10): the
-semantic prior really reorders the search (winner rank 4.41 → 1.02) with
-byte-exact, density-identical correctness across the deception exhibits,
-but the standalone CPU gain is ~3% (the plan's budget is a channel
-count) — RECORDED, not wired as the default; the adaptive foreground
-budget (search effort = f(pressure, queue depth, class confidence)) is
-the identified continuation. Next: 12D grammar-addressed entropy
-(offline oracle first).
+REJECTED the terminalization daemon on measured evidence. 12B (durability
+generations / group commit, v0.7.9) sealed the fsync coalescing
+(amplification 0.23 at 32 writers, crash courts green at every stage).
+12C-0 (DSFB structural semiotics, v0.7.10) RECORDED that the semantic
+prior reorders the search (winner rank 4.41 → 1.02) with byte-exact,
+density-identical correctness, but the standalone CPU gain is ~3% — the
+adaptive foreground budget is the identified continuation. 12D-0 (the
+grammar-addressed entropy OFFLINE oracle, v0.7.11) STOPPED per the
+brief's gate: the fully-accounted template grammar beats EntropyFS
+settled 7.0× on the grammar-friendly corpus and loses as expected on the
+diverse control, but zstd-whole beats it 2.2× (the grammar's skeleton
+must itself be entropy-coded — the brief's "persisted entropy" — before
+any format-bit investigation).
