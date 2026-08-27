@@ -16,3 +16,8 @@ Cargo.lock.orig
 /fuzz/corpus
 # Evidence staging
 /evidence/.staging
+# Compiled binaries sealed by the distro court (regenerable from the
+# pinned revision in each manifest; never commit ELF artifacts)
+/evidence/portability/*/bin/
+# Offline docker-lane container images (multi-hundred-MB build artifacts)
+/tools/docker/evidence/
