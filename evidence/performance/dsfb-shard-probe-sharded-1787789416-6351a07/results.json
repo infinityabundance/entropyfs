@@ -1,0 +1,259 @@
+{
+  "probe": "phase-11f-dsfb-observer-shard",
+  "mode": "sharded",
+  "rev": "6351a07",
+  "machine": "AMD Ryzen 7 9800X3D 8-Core Processor",
+  "kernel": "7.2.0-1-cachyos",
+  "workload": "pool-16; epoch_write sweeps (1/8/16 writers x 64 files; stress 16 writers x 256 files = 16k chunks, 1 GiB); per-write-distinct LCG content; byte-exact read-back + checkpoint + logical-identity + reachable-bytes + family histogram per run",
+  "rows": [
+    {
+      "mode": "sharded",
+      "writers": "1",
+      "wall_ms": "1476",
+      "p50_us": "5039",
+      "p99_us": "5641",
+      "mean_us": "4960",
+      "max_us": "6140",
+      "useful_cpu_ms": "10068",
+      "search_ms": "10623",
+      "prepare_ms": "1103",
+      "dsfb_observe_ms": "2.51",
+      "dsfb_plan_ms": "1.95",
+      "dsfb_trust_ms": "0.73",
+      "queue%": "0.1",
+      "peak_in_flight": "64",
+      "candidates": "4096",
+      "logical_bytes": "268435456",
+      "reachable_bytes": "269219336",
+      "byte_exact": "ok",
+      "families": "RAW=4096"
+    },
+    {
+      "mode": "sharded",
+      "writers": "8",
+      "wall_ms": "763",
+      "p50_us": "21502",
+      "p99_us": "32174",
+      "mean_us": "21326",
+      "max_us": "34656",
+      "useful_cpu_ms": "10569",
+      "search_ms": "11916",
+      "prepare_ms": "5031",
+      "dsfb_observe_ms": "3.06",
+      "dsfb_plan_ms": "3.75",
+      "dsfb_trust_ms": "0.82",
+      "queue%": "4.3",
+      "peak_in_flight": "124",
+      "candidates": "4096",
+      "logical_bytes": "268435456",
+      "reachable_bytes": "269219336",
+      "byte_exact": "ok",
+      "families": "RAW=4096"
+    },
+    {
+      "mode": "sharded",
+      "writers": "16",
+      "wall_ms": "778",
+      "p50_us": "47624",
+      "p99_us": "83385",
+      "mean_us": "44407",
+      "max_us": "93379",
+      "useful_cpu_ms": "10485",
+      "search_ms": "11421",
+      "prepare_ms": "10734",
+      "dsfb_observe_ms": "4.95",
+      "dsfb_plan_ms": "2.21",
+      "dsfb_trust_ms": "0.82",
+      "queue%": "2.3",
+      "peak_in_flight": "128",
+      "candidates": "4096",
+      "logical_bytes": "268435456",
+      "reachable_bytes": "269219336",
+      "byte_exact": "ok",
+      "families": "RAW=4096"
+    },
+    {
+      "mode": "sharded",
+      "writers": "16",
+      "wall_ms": "3169",
+      "p50_us": "47179",
+      "p99_us": "74878",
+      "mean_us": "46211",
+      "max_us": "100858",
+      "useful_cpu_ms": "42241",
+      "search_ms": "46575",
+      "prepare_ms": "44088",
+      "dsfb_observe_ms": "14.42",
+      "dsfb_plan_ms": "13.48",
+      "dsfb_trust_ms": "3.40",
+      "queue%": "3.0",
+      "peak_in_flight": "128",
+      "candidates": "16384",
+      "logical_bytes": "1073741824",
+      "reachable_bytes": "1076876689",
+      "byte_exact": "ok",
+      "families": "RAW=16384"
+    }
+  ],
+  "decision": {
+    "verdict": "ADOPT the sharded observer",
+    "kind": "recorded falsification with an adoption",
+    "summary": "The 11D brief predicted the single DSFB-observer mutex would become visible as independent requests advanced through search simultaneously under the 11E pool. The oracle shows the prediction was TRUE IN THE OBSERVER ROWS but NOT END-TO-END: the plan call (the largest critical section, a 9-element sort under the lock) lost ~66% of its wall under 16-way concurrency (34-38 ms -> 10.5-11.5 ms at the 4x scale; 3.3-20.1 ms -> 2.1-2.2 ms at the sealed scale), but all observer calls together are ~1 us each, 0.1% of prepare even at 4x scale, so wall, p50/p99, and useful CPU are unchanged within +/-1% run-to-run noise. The +2.6-3.7% useful-CPU delta the 11E probe measured for the pool is therefore NOT DSFB mutex wait (a mutex wait is wall, not CPU); it is the pool's higher effective parallelism.",
+    "adoption_rationale": [
+      "architecture: the observer's state is per-key, so its locking should be per-key; the write path is now synchronization-free end to end except the commit coordinator and the per-inode locks (real shared state, not advisory evidence)",
+      "future-proofing: Phase-12C (DSFB structural semiotics) deepens the per-call work, which would make a single mutex matter",
+      "zero measured regression in every row (byte identity exact, logical bytes == input exactly, candidates and families identical)"
+    ],
+    "comparison": {
+      "1": {
+        "wall_ms": {
+          "mutex": 1466.0,
+          "sharded": 1476.0
+        },
+        "p50_us": {
+          "mutex": 5010.0,
+          "sharded": 5039.0
+        },
+        "p99_us": {
+          "mutex": 5589.0,
+          "sharded": 5641.0
+        },
+        "useful_cpu_ms": {
+          "mutex": 10019.0,
+          "sharded": 10068.0
+        },
+        "dsfb_plan_ms": {
+          "mutex": 1.97,
+          "sharded": 1.95
+        },
+        "dsfb_observe_ms": {
+          "mutex": 2.52,
+          "sharded": 2.51
+        },
+        "dsfb_trust_ms": {
+          "mutex": 0.74,
+          "sharded": 0.73
+        },
+        "candidates": {
+          "mutex": "4096",
+          "sharded": "4096"
+        },
+        "logical_bytes": {
+          "mutex": "268435456",
+          "sharded": "268435456"
+        },
+        "reachable_bytes": {
+          "mutex": "269219336",
+          "sharded": "269219336"
+        },
+        "byte_exact": {
+          "mutex": "ok",
+          "sharded": "ok"
+        }
+      },
+      "8": {
+        "wall_ms": {
+          "mutex": 739.0,
+          "sharded": 763.0
+        },
+        "p50_us": {
+          "mutex": 20276.0,
+          "sharded": 21502.0
+        },
+        "p99_us": {
+          "mutex": 29189.0,
+          "sharded": 32174.0
+        },
+        "useful_cpu_ms": {
+          "mutex": 10544.0,
+          "sharded": 10569.0
+        },
+        "dsfb_plan_ms": {
+          "mutex": 2.1,
+          "sharded": 3.75
+        },
+        "dsfb_observe_ms": {
+          "mutex": 4.35,
+          "sharded": 3.06
+        },
+        "dsfb_trust_ms": {
+          "mutex": 1.57,
+          "sharded": 0.82
+        },
+        "candidates": {
+          "mutex": "4096",
+          "sharded": "4096"
+        },
+        "logical_bytes": {
+          "mutex": "268435456",
+          "sharded": "268435456"
+        },
+        "reachable_bytes": {
+          "mutex": "269219336",
+          "sharded": "269219336"
+        },
+        "byte_exact": {
+          "mutex": "ok",
+          "sharded": "ok"
+        }
+      },
+      "16": {
+        "wall_ms": {
+          "mutex": 3163.0,
+          "sharded": 3169.0
+        },
+        "p50_us": {
+          "mutex": 46669.0,
+          "sharded": 47179.0
+        },
+        "p99_us": {
+          "mutex": 80194.0,
+          "sharded": 74878.0
+        },
+        "useful_cpu_ms": {
+          "mutex": 42106.0,
+          "sharded": 42241.0
+        },
+        "dsfb_plan_ms": {
+          "mutex": 9.87,
+          "sharded": 13.48
+        },
+        "dsfb_observe_ms": {
+          "mutex": 15.77,
+          "sharded": 14.42
+        },
+        "dsfb_trust_ms": {
+          "mutex": 3.39,
+          "sharded": 3.4
+        },
+        "candidates": {
+          "mutex": "16384",
+          "sharded": "16384"
+        },
+        "logical_bytes": {
+          "mutex": "1073741824",
+          "sharded": "1073741824"
+        },
+        "reachable_bytes": {
+          "mutex": "1076876689",
+          "sharded": "1076876689"
+        },
+        "byte_exact": {
+          "mutex": "ok",
+          "sharded": "ok"
+        }
+      }
+    },
+    "invariants_held": {
+      "byte_exact_readback": "ok on every run of both sides",
+      "logical_identity": "logical committed bytes == logical input exactly (268435456 / 1073741824)",
+      "density": "reachable bytes identical per scale across sides",
+      "candidates": "identical per scale across sides (4096 / 16384)",
+      "families": "identical (RAW=4096 / RAW=16384; the LCG corpus)"
+    },
+    "repeated_runs": {
+      "mutex": "3 runs at f103248 (11F-0): 16-writer wall 769-781 ms, p50 45.6-47.7 ms, p99 74.5-78.1 ms, useful CPU 10.42-10.47 s; dsfb plan 3.3-20.1 ms",
+      "sharded": "3 runs at 6351a07 (0.7.7): 16-writer wall 775-779 ms, p50 46.6-47.0 ms, p99 75.5-79.8 ms, useful CPU 10.47-10.48 s; dsfb plan 2.1-2.2 ms"
+    }
+  }
+}
