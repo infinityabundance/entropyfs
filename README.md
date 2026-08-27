@@ -67,6 +67,15 @@ For sealed performance and experimental evidence, see
   at 1.25–4.29×, with build-artifacts/source-trees bounded by
   NON-SEARCH write-path cost — the pressure term (12C-1-2) is the
   identified continuation.
+- Also sealed (v0.7.15): **12D-1 — the entropy-coded grammar skeleton,
+  STOPPED per the brief's gate** (`grammar_ec_oracle`): the grammar
+  skeleton entropy-codes at 3.88 bits/byte via SEQ_RANS (60 059 →
+  29 156 B), cutting the fully-accounted grammar from 66 059 B to
+  35 156 B (341.8×, −47%) and closing the zstd gap from 2.2× to 1.18× —
+  but zstd-whole remains 1.2× smaller, so the format-bit investigation
+  is not justified; the remaining gap is context-modeling quality + raw
+  state encoding (the not-yet-justified "contextual entropy models"
+  direction).
 - Previous phase: **12E — the adoption-engineering line**
   (v0.7.12–0.7.13): the stable embeddable Engine facade + format-v1
   compatibility seal (12E.1/3), optional frontend features (12E.2),
@@ -95,8 +104,10 @@ For sealed performance and experimental evidence, see
   (RECORDED) + 12C-1 the adaptive foreground budget (ADOPTED as
   `ForegroundMode::Focused`; the FUSE/engine defaults stay `Full`
   pending the prior-wiring court — the pressure term is 12C-1-2), 12D
-  grammar-addressed entropy (STOPPED at the offline oracle — the
-  entropy-coded-skeleton round is the only path to the format bit).
+  grammar-addressed entropy (STOPPED at the offline oracle — 12D-0 raw
+  skeleton, then 12D-1 the entropy-coded skeleton: gap to zstd-whole
+  2.2× → 1.18×, still STOPPED; the contextual-entropy-models direction
+  is the only path to the format bit).
 - Persistent format: explicit, versioned, incompat-feature-gated.
 - Correctness: crash courts + hostile-media court + fsck, byte-exact
   read-back under every scheduler.

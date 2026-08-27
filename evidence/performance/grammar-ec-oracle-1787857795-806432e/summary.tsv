@@ -1,0 +1,3 @@
+mode	corpus	logical	grammar_raw	grammar_ec	grammar_ec_ratio	chunk_family	skeleton_bits_byte	efs_fg	efs_settled	zstd_whole	verdict
+12d1	generated-config	12015600	66059	35156	341.78	SEQ_RANS	3.88	5899905	465068	29731	stop
+12d1	diverse	13107200	13109200	13109241	1.00	RAW	328.00	5350054	5347872	5377719	loses-as-expected

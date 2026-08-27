@@ -60,6 +60,25 @@
 //! concept is real, not coincidence). Any other outcome: record and
 //! stop, per the brief.
 //!
+//! # Phase-12D-1 (the second round, `grammar_ec_oracle`)
+//!
+//! The 12D-0 verdict STOPPED because zstd-whole (29 731 B) beat the
+//! fully-accounted RAW-skeleton grammar (66 059 B): the grammar stored
+//! its irregular skeleton LITERALLY while zstd entropy-coded it. The
+//! 12D-1 round is the brief's own "persisted entropy" refinement: the
+//! grammar object is itself a byte string, so in the real design it
+//! would be stored as a normal content-addressed CHUNK — put through
+//! the store's representation search and charged its smallest valid
+//! candidate's persisted bytes (descriptor + model + objects +
+//! integrity). `grammar_ec_total = chunk_cost(skeleton) + Σ(state +
+//! descriptor)` with nothing hidden, exactly the 12D-0 accounting with
+//! the literal skeleton replaced by its entropy-coded form.
+//!
+//! The 12D-1 gate is the same: the entropy-coded grammar must beat
+//! EVERY incumbent (zstd-whole included) on the grammar-friendly corpus
+//! while the diverse control still loses — only then is the format-bit
+//! investigation justified.
+//!
 //! The probe prints the table and writes its TSV to `$GRAMMAR_ORACLE_OUT`
 //! when set; `$GRAMMAR_ORACLE_MODE` stamps the header. Debug runs a
 //! reduced smoke sweep.
@@ -135,6 +154,26 @@ impl TemplateGrammar {
                 }
             })
             .sum()
+    }
+
+    /// The ACTUAL persisted skeleton payload bytes (exactly the bytes
+    /// [`TemplateGrammar::grammar_bytes`] accounts): each segment stored
+    /// either literally or as `block + 2-byte count` under the brief's
+    /// `Repeat` node. This is the grammar object's literal form; 12D-1
+    /// entropy-codes it (see [`grammar_chunk_cost`]).
+    fn skeleton_payload(&self) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(self.grammar_bytes() as usize);
+        for seg in &self.segments {
+            let (block, count) = repeat_shape(seg);
+            if count >= 2 {
+                payload.extend_from_slice(&seg[..block]);
+                payload.push((count & 0xff) as u8);
+                payload.push(((count >> 8) & 0xff) as u8);
+            } else {
+                payload.extend_from_slice(seg);
+            }
+        }
+        payload
     }
 
     /// The fully-accounted total for all members: grammar once +
@@ -412,6 +451,74 @@ fn zstd_whole(members: &[Vec<u8>]) -> Option<u64> {
     std::fs::metadata(out_path).ok().map(|m| m.len())
 }
 
+/// Phase 12D-1: the persisted cost of the grammar skeleton as a CHUNK —
+/// the smallest candidate over the standalone families the write path
+/// would give a grammar object (byte-rANS, sequence-rANS, the
+/// configurational families, RAW), charged the candidate's FULL
+/// accounted persisted bytes (descriptor + model + objects + integrity
+/// — `CostBreakdown::persisted_bytes`, the store's own authority).
+/// Returns `(bytes, winning family name)`.
+///
+/// This is the "the grammar object is itself data" refinement: in the
+/// real `Representation::Grammar { grammar: ChunkId, .. }` design the
+/// skeleton would be a normal content-addressed object, and this is
+/// exactly what the store would charge for it.
+fn grammar_chunk_cost(
+    limits: &crate::core::limits::Limits,
+    policy: &crate::core::cost::Policy,
+    payload: &[u8],
+) -> (u64, &'static str) {
+    use crate::core::candidate::{Candidate, Encoder};
+    let cid = crate::core::extent::ChunkId::of(payload);
+    let base_ctx = crate::core::candidate::CandidateContext {
+        limits,
+        policy,
+        content_id: cid,
+        bases: &[],
+        dedup: None,
+    };
+    let mut best: Option<(u64, &'static str)> = None;
+    let mut consider = |cands: Vec<Candidate>, name: &'static str| {
+        for c in cands {
+            let b = c.cost.persisted_bytes();
+            if best.map(|(x, _)| b < x).unwrap_or(true) {
+                best = Some((b, name));
+            }
+        }
+    };
+    consider(
+        crate::rans::residual::RansEncoder.encode(payload, &base_ctx),
+        "RANS",
+    );
+    consider(
+        crate::rans::sequence::SequenceEncoder.encode(payload, &base_ctx),
+        "SEQ_RANS",
+    );
+    consider(
+        crate::entropy::sparse::SparseEncoder.encode(payload, &base_ctx),
+        "SPARSE",
+    );
+    consider(
+        crate::entropy::palette::PaletteEncoder.encode(payload, &base_ctx),
+        "PALETTE",
+    );
+    consider(
+        crate::entropy::periodic::PeriodicEncoder.encode(payload, &base_ctx),
+        "PERIODIC",
+    );
+    consider(
+        crate::entropy::sparse64::SparseBlock64Encoder.encode(payload, &base_ctx),
+        "SPARSE64",
+    );
+    if let Some(r) = crate::core::candidate::raw_candidate(payload, cid, limits) {
+        let b = r.cost.persisted_bytes();
+        if best.map(|(x, _)| b < x).unwrap_or(true) {
+            best = Some((b, "RAW"));
+        }
+    }
+    best.unwrap_or_else(|| (payload.len() as u64 + 64, "RAW"))
+}
+
 #[test]
 fn grammar_oracle() {
     let n = if cfg!(debug_assertions) { 24 } else { 200 };
@@ -523,6 +630,163 @@ fn grammar_oracle() {
     tsv.push_str(&format!(
         "{stamp}\tdiverse\t{div_logical}\t{div_total}\t{:.2}\t{div_efs_fg}\t{div_efs_settled}\t{}\t{}\n",
         div_logical as f64 / div_total.max(1) as f64,
+        div_zstd.map(|z| z.to_string()).unwrap_or_else(|| "na".into()),
+        if diverse_loses { "loses-as-expected" } else { "wins-unexpectedly" }
+    ));
+    if let Ok(path) = std::env::var("GRAMMAR_ORACLE_OUT") {
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(&path, &tsv).expect("write oracle summary");
+        println!("oracle summary written to {path}");
+    }
+}
+
+/// Phase 12D-1: the entropy-coded grammar skeleton round.
+///
+/// The 12D-0 round STOPPED because the grammar stored its irregular
+/// skeleton LITERALLY (66 059 B fully accounted) while zstd-whole
+/// entropy-coded it (29 731 B) — 2.2× smaller. This round applies the
+/// brief's own "persisted entropy" refinement: the grammar object is
+/// itself a byte string, so in the real design it is stored as a normal
+/// content-addressed chunk and charged its smallest valid candidate's
+/// persisted bytes (`grammar_chunk_cost`, the store's own accounting
+/// authority: byte-rANS / sequence-rANS / configurational / RAW, exact
+/// cost selection). Full accounting: `chunk_cost(skeleton) + Σ(state +
+/// descriptor)`. The gate is unchanged: the entropy-coded grammar must
+/// beat EVERY incumbent (zstd-whole included) on the grammar-friendly
+/// corpus while the diverse control still loses — only then is the
+/// format-bit investigation justified.
+#[test]
+fn grammar_ec_oracle() {
+    let n = if cfg!(debug_assertions) { 24 } else { 200 };
+    let t0 = Instant::now();
+    let limits = crate::core::limits::Limits::default();
+    let policy = crate::core::cost::Policy::balanced();
+
+    // ---- Corpus 1: the grammar-friendly generated-config tree. ----
+    let configs: Vec<Vec<u8>> = (0..n).map(|i| config_file(i, 7)).collect();
+    let config_refs: Vec<&[u8]> = configs.iter().map(|c| c.as_slice()).collect();
+    let grammar = induce(&config_refs);
+    let skeleton = grammar.skeleton_payload();
+    let (chunk_cost, chunk_family) = grammar_chunk_cost(&limits, &policy, &skeleton);
+    let state_descriptors = grammar.total_bytes() - grammar.grammar_bytes();
+    let grammar_raw_total = grammar.total_bytes(); // the 12D-0 baseline
+    let grammar_ec_total = chunk_cost + state_descriptors;
+    let logical: u64 = configs.iter().map(|c| c.len() as u64).sum();
+    let (_, efs_fg) = efs_reachable(&configs, false);
+    let (_, efs_settled) = efs_reachable(&configs, true);
+    let zstd_w = zstd_whole(&configs);
+
+    // ---- Corpus 2: the diverse negative control. ----
+    let diverse: Vec<Vec<u8>> = (0..n).map(|i| diverse_file(i, 13)).collect();
+    let div_refs: Vec<&[u8]> = diverse.iter().map(|c| c.as_slice()).collect();
+    let div_grammar = induce(&div_refs);
+    let div_skeleton = div_grammar.skeleton_payload();
+    let (div_chunk_cost, div_chunk_family) = grammar_chunk_cost(&limits, &policy, &div_skeleton);
+    let div_state_descriptors = div_grammar.total_bytes() - div_grammar.grammar_bytes();
+    let div_ec_total = div_chunk_cost + div_state_descriptors;
+    let div_logical: u64 = diverse.iter().map(|c| c.len() as u64).sum();
+    let (_, div_efs_fg) = efs_reachable(&diverse, false);
+    let (_, div_efs_settled) = efs_reachable(&diverse, true);
+    let div_zstd = zstd_whole(&diverse);
+
+    println!(
+        "\n==== Phase-12D-1 entropy-coded grammar oracle (n = {n}; {} s) ====",
+        t0.elapsed().as_secs_f32()
+    );
+    println!(
+        "corpus: generated-config — {} files, {logical} logical B, skeleton {} B (chunk-coded by {chunk_family}: {chunk_cost} B), state+descriptors {state_descriptors} B",
+        n,
+        skeleton.len(),
+    );
+    println!("{:<26} {:>12} {:>9}", "representation", "bytes", "ratio");
+    let ratio_of = |b: u64| logical as f64 / b.max(1) as f64;
+    println!(
+        "{:<26} {:>12} {:>8.2}x",
+        "grammar raw skeleton (12D-0)",
+        grammar_raw_total,
+        ratio_of(grammar_raw_total)
+    );
+    println!(
+        "{:<26} {:>12} {:>8.2}x",
+        "grammar entropy-coded (12D-1)",
+        grammar_ec_total,
+        ratio_of(grammar_ec_total)
+    );
+    println!(
+        "{:<26} {:>12} {:>8.2}x",
+        "EntropyFS settled (+dict)",
+        efs_settled,
+        ratio_of(efs_settled)
+    );
+    if let Some(z) = zstd_w {
+        println!(
+            "{:<26} {:>12} {:>8.2}x",
+            "zstd -19 whole pack",
+            z,
+            ratio_of(z)
+        );
+    }
+    println!(
+        "skeleton chunk-cost decomposition: {chunk_cost} B via {chunk_family}; skeleton literal {skeleton_len} B (entropy-coded at {:.2} bits/byte)",
+        chunk_cost as f64 * 8.0 / skeleton.len().max(1) as f64,
+        skeleton_len = skeleton.len(),
+    );
+    println!(
+        "diverse control: skeleton {div_skeleton_len} B chunk-coded {div_chunk_cost} B ({div_chunk_family}), EC total {div_ec_total} B vs EntropyFS fg {div_efs_fg} B, zstd {:?}",
+        div_zstd,
+        div_skeleton_len = div_skeleton.len(),
+    );
+
+    // ---- The verdict rule (the same gate as 12D-0, now with the
+    // entropy-coded grammar) ----
+    let zstd_beats = zstd_w.map(|z| z < grammar_ec_total).unwrap_or(false);
+    let grammar_wins = grammar_ec_total < efs_fg
+        && grammar_ec_total < efs_settled
+        && zstd_w.map(|z| grammar_ec_total < z).unwrap_or(true)
+        && grammar_ec_total < logical;
+    let diverse_loses = div_ec_total >= div_efs_fg;
+    println!("\n-- 12D-1 verdict --");
+    if grammar_wins && diverse_loses {
+        println!(
+            "ADOPT-FOR-INVESTIGATION: the entropy-coded grammar ({grammar_ec_total} B, {:.1}x) beats EVERY incumbent (EntropyFS settled {efs_settled} B, zstd-whole {} B) on the grammar-friendly corpus and loses on the diverse control — the format-bit investigation is justified.",
+            ratio_of(grammar_ec_total),
+            zstd_w.map(|z| z.to_string()).unwrap_or_else(|| "na".into())
+        );
+    } else if grammar_wins && !diverse_loses {
+        println!(
+            "CONDITIONAL: the entropy-coded grammar wins on the config corpus but also 'wins' on the diverse control (likely an induction artifact — investigate before any format work)."
+        );
+    } else if zstd_beats {
+        let z = zstd_w.unwrap_or(0);
+        println!(
+            "STOP per the brief's gate: the entropy-coded grammar ({grammar_ec_total} B) beats EntropyFS settled ({efs_settled} B) and the raw-skeleton 12D-0 grammar ({grammar_raw_total} B) but NOT every incumbent — zstd-whole ({z} B) remains {:.1}x smaller. The skeleton entropy-codes to {:.2} bits/byte (via {chunk_family}); zstd's context modeling on the LCG-text skeleton still wins. The format-bit investigation is NOT justified on this evidence.",
+            grammar_ec_total as f64 / z.max(1) as f64,
+            chunk_cost as f64 * 8.0 / skeleton.len().max(1) as f64
+        );
+    } else {
+        println!(
+            "STOP: the entropy-coded grammar does not beat the incumbents ({grammar_ec_total} B vs EntropyFS settled {efs_settled} B) — the format-bit investigation is NOT justified (the brief's 'if it loses, stop')."
+        );
+    }
+
+    // ---- TSV ----
+    let mut tsv = String::new();
+    tsv.push_str("mode\tcorpus\tlogical\tgrammar_raw\tgrammar_ec\tgrammar_ec_ratio\tchunk_family\tskeleton_bits_byte\tefs_fg\tefs_settled\tzstd_whole\tverdict\n");
+    let stamp = std::env::var("GRAMMAR_ORACLE_MODE").unwrap_or_else(|_| "unknown".into());
+    tsv.push_str(&format!(
+        "{stamp}\tgenerated-config\t{logical}\t{grammar_raw_total}\t{grammar_ec_total}\t{:.2}\t{chunk_family}\t{:.2}\t{efs_fg}\t{efs_settled}\t{}\t{}\n",
+        ratio_of(grammar_ec_total),
+        chunk_cost as f64 * 8.0 / skeleton.len().max(1) as f64,
+        zstd_w.map(|z| z.to_string()).unwrap_or_else(|| "na".into()),
+        if grammar_wins { "adopt-for-investigation" } else { "stop" }
+    ));
+    tsv.push_str(&format!(
+        "{stamp}\tdiverse\t{div_logical}\t{}\t{div_ec_total}\t{:.2}\t{div_chunk_family}\t{:.2}\t{div_efs_fg}\t{div_efs_settled}\t{}\t{}\n",
+        div_grammar.total_bytes(),
+        div_logical as f64 / div_ec_total.max(1) as f64,
+        div_chunk_cost as f64 * 8.0 / div_skeleton.len().max(1) as f64,
         div_zstd.map(|z| z.to_string()).unwrap_or_else(|| "na".into()),
         if diverse_loses { "loses-as-expected" } else { "wins-unexpectedly" }
     ));

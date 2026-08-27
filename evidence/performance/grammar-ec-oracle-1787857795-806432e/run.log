@@ -1,0 +1,23 @@
+   Compiling entropyfs v0.7.14 (/mnt/1tb_kingston/entropyfs)
+    Finished `release` profile [optimized + debuginfo] target(s) in 1m 00s
+     Running unittests src/lib.rs (target/release/deps/entropyfs-18ce74913b699fcc)
+
+running 1 test
+
+==== Phase-12D-1 entropy-coded grammar oracle (n = 200; 9.245483 s) ====
+corpus: generated-config — 200 files, 12015600 logical B, skeleton 60059 B (chunk-coded by SEQ_RANS: 29156 B), state+descriptors 6000 B
+representation                    bytes     ratio
+grammar raw skeleton (12D-0)        66059   181.89x
+grammar entropy-coded (12D-1)        35156   341.78x
+EntropyFS settled (+dict)        465068    25.84x
+zstd -19 whole pack               29731   404.14x
+skeleton chunk-cost decomposition: 29156 B via SEQ_RANS; skeleton literal 60059 B (entropy-coded at 3.88 bits/byte)
+diverse control: skeleton 0 B chunk-coded 41 B (RAW), EC total 13109241 B vs EntropyFS fg 5350054 B, zstd Some(5377719)
+
+-- 12D-1 verdict --
+STOP per the brief's gate: the entropy-coded grammar (35156 B) beats EntropyFS settled (465068 B) and the raw-skeleton 12D-0 grammar (66059 B) but NOT every incumbent — zstd-whole (29731 B) remains 1.2x smaller. The skeleton entropy-codes to 3.88 bits/byte (via SEQ_RANS); zstd's context modeling on the LCG-text skeleton still wins. The format-bit investigation is NOT justified on this evidence.
+oracle summary written to /mnt/1tb_kingston/entropyfs/evidence/performance/grammar-ec-oracle-1787857795-806432e/summary.tsv
+test tests::grammar_oracle::grammar_ec_oracle ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 469 filtered out; finished in 9.25s
+

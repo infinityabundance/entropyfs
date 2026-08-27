@@ -1,5 +1,44 @@
 # EntropyFS changelog
 
+## v0.7.15 (2026-08-27)
+
+**Phase 12D-1 — the entropy-coded grammar skeleton (the "persisted
+entropy" refinement the 12D-0 verdict identified), STOPPED per the
+brief's gate.** The refinement is real and large: the grammar skeleton
+is not literal — the sequence matcher entropy-codes it at **3.88
+bits/byte** (60 059 B → 29 156 B), cutting the fully-accounted grammar
+from 66 059 B to **35 156 B (341.8×, −47%)** and closing the zstd gap
+from **2.2× to 1.18×** while beating EntropyFS settled 13.2×. But the
+gate requires beating EVERY incumbent: **zstd-whole (29 731 B) remains
+1.2× smaller**, so **the format-bit investigation is NOT justified** and
+the 12D line records its boundary. The remaining 1.18× is decomposed:
+context-modeling quality (the sequence matcher's order-1 vs zstd's
+order-2+ on the LCG-text skeleton) + raw state encoding (17% of the
+grammar cost) — the 12C/12D "contextual entropy models" direction is
+the only (not-yet-justified) path to the format bit.
+
+- **`grammar_ec_oracle`** (`src/tests/grammar_oracle.rs`, `tools/
+  court-grammar-ec.sh`, sealed
+  `evidence/performance/grammar-ec-oracle-1787857795-806432e/`): the
+  12D-0 grammar with the skeleton stored as a normal content-addressed
+  CHUNK — `grammar_chunk_cost` charges the smallest valid candidate's
+  full persisted bytes (byte-rANS / sequence-rANS / the four
+  configurational families / RAW, exact-cost selection, descriptor +
+  model + objects + integrity). Full accounting:
+  `chunk_cost(skeleton) + Σ(state + descriptor)`, state still raw
+  (conservative). Generated-config (200 × 64 KiB): grammar EC 35 156 B
+  (341.8×) vs the 12D-0 raw grammar 66 059 B (181.9×), EntropyFS
+  settled 465 068 B (25.8×), zstd-whole 29 731 B (404.1×). Diverse
+  negative control loses as expected (EC total 13 109 241 B vs
+  EntropyFS 5 350 054 B; the induction finds no shared skeleton).
+- **Verdict: STOP (recorded).** The entropy-coded grammar is within 18%
+  of whole-pack zstd while providing per-member RANDOM ACCESS (an
+  architectural property the pack lacks), but the gate is the gate — no
+  format bit without beating every incumbent. The oracle stays in the
+  suite as the offline measurement surface; the identified (not
+  justified) continuation is an order-2+ contextual coder + rank-coded
+  state, each requiring its own evidence round.
+
 ## v0.7.14 (2026-08-27)
 
 **Phase 12C-1 — the adaptive foreground search budget: the cost–density

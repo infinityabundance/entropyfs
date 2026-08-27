@@ -1,0 +1,56 @@
+{
+  "oracle": "phase-12d1-grammar-ec",
+  "rev": "806432e",
+  "machine": "AMD Ryzen 7 9800X3D 8-Core Processor",
+  "kernel": "7.2.0-1-cachyos",
+  "workload": "phase-12D-1: the 12D-0 grammar with the skeleton ENTROPY-CODED as a chunk (grammar_chunk_cost: byte-rANS / sequence-rANS / configurational / RAW, exact-cost selection, full persisted-bytes accounting = descriptor + model + objects + integrity) on the same generated-config corpus + diverse negative control; incumbents: the 12D-0 raw-skeleton grammar, EntropyFS settled (+optimize_pass +shared_dict_pass), zstd -19 whole pack",
+  "rows": [
+    {
+      "mode": "12d1",
+      "corpus": "generated-config",
+      "logical": "12015600",
+      "grammar_raw": "66059",
+      "grammar_ec": "35156",
+      "grammar_ec_ratio": "341.78",
+      "chunk_family": "SEQ_RANS",
+      "skeleton_bits_byte": "3.88",
+      "efs_fg": "5899905",
+      "efs_settled": "465068",
+      "zstd_whole": "29731",
+      "verdict": "stop"
+    },
+    {
+      "mode": "12d1",
+      "corpus": "diverse",
+      "logical": "13107200",
+      "grammar_raw": "13109200",
+      "grammar_ec": "13109241",
+      "grammar_ec_ratio": "1.00",
+      "chunk_family": "RAW",
+      "skeleton_bits_byte": "328.00",
+      "efs_fg": "5350054",
+      "efs_settled": "5347872",
+      "zstd_whole": "5377719",
+      "verdict": "loses-as-expected"
+    }
+  ],
+  "decision": {
+    "verdict": "STOP per the brief's gate: the entropy-coded grammar (35 156 B, 341.8x) beats EntropyFS settled (465 068 B) 13.2x and the 12D-0 raw-skeleton grammar (66 059 B) 1.9x, closing the zstd gap from 2.2x to 1.18x (the skeleton entropy-codes at 3.88 bits/byte via SEQ_RANS), but does NOT beat every incumbent \u2014 zstd-whole (29 731 B, 404.1x) remains 1.2x smaller. The format-bit investigation is NOT justified on this evidence. The diverse control loses as expected. Identified (not justified) continuation: order-2+ context modeling of the skeleton + rank-coded state.",
+    "config_corpus": {
+      "logical_bytes": 12015600,
+      "grammar_raw": 66059,
+      "grammar_ec": 35156,
+      "grammar_ec_ratio": 341.78,
+      "chunk_family": "SEQ_RANS",
+      "skeleton_bits_byte": 3.88,
+      "efs_settled": 465068,
+      "zstd_whole": 29731
+    },
+    "diverse_control": {
+      "grammar_ec": 13109241,
+      "efs_fg": 5350054,
+      "efs_settled": 5347872
+    },
+    "verdict_flag": "stop"
+  }
+}
