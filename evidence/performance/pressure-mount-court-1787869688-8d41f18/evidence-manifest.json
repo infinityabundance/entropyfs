@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "court_schema_version": "2",
+  "entropyfs_version": "0.7.15",
+  "git_revision": "8d41f1832e71b0183fef45483f6acce30d293379",
+  "format_major": 1,
+  "format_minor": 0,
+  "compat_bits": "0x0000000000000000",
+  "ro_compat_bits": "0x0000000000000000",
+  "incompat_bits": "0x0000000000000000",
+  "entropy_universe_versions": [
+    "uniform-xof-v1"
+  ],
+  "representation_encoder_policy_version": "none",
+  "io_backend": "sync",
+  "worker_scheduler": "pool",
+  "kernel": "7.2.0-1-cachyos",
+  "architecture": "x86_64",
+  "distribution": "cachyos",
+  "distribution_version": "unknown",
+  "container_image_digest": "",
+  "host": "vanir | : AMD Ryzen 7 9800X3D 8-Core Processor",
+  "compiler_version": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+  "rustc_version": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+  "timestamp_unix": 1787870559
+}

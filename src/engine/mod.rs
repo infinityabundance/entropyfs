@@ -175,7 +175,7 @@ pub mod metrics;
 
 pub use metrics::{
     AccountingMetrics, CacheMetrics, DsfbMetrics, EngineMetrics, FormatInfo, GcMetrics,
-    METRIC_REGISTRY, MetricDef, PhaseMetrics, PhysicalMetrics,
+    METRIC_REGISTRY, MetricDef, PhaseMetrics, PhysicalMetrics, PressureMetrics,
 };
 
 /// Stable engine error classes (Phase 12E.1/12E.14/12E.15).
@@ -1193,6 +1193,20 @@ pub fn collect_engine_metrics(store: &Store) -> Result<EngineMetrics, EngineErro
             slew_events: dsfb.slew_events,
             narrowed_searches: dsfb.narrowed_searches,
             candidates_evaluated: store.candidates_evaluated(),
+        },
+        pressure: PressureMetrics {
+            pressured: store.pressure_state(),
+            rans_skips: store.focused_rans_skips(),
+            deferred_extents: store.deferred_debt().0,
+            deferred_logical_bytes: store.deferred_debt().1,
+            deferred_age_ms: {
+                let (_, _, since) = store.deferred_debt();
+                if since == 0 {
+                    0
+                } else {
+                    (crate::perf::wall_ns().saturating_sub(since)) / 1_000_000
+                }
+            },
         },
         cache: CacheMetrics {
             model_cache_hits: store.model_cache_hits(),

@@ -51,31 +51,25 @@ For sealed performance and experimental evidence, see
 
 ### Current development focus
 
-- Latest completed phase: **12C-1 — the adaptive foreground search
-  budget** (v0.7.14): the cost–density frontier on the sealed 12E.13
-  adoption corpora (`adaptive_budget_probe`, sealed
-  `evidence/performance/adaptive-budget-probe-*/` — the `full` arm
-  replays the sealed court to +0.000–0.011%) plus the first-class
-  `ForegroundMode::Focused` adaptive gate (entropy probe + semantic
-  class-prior rANS deferral). Result: the wedge's search is genuine
-  work — the prior certifies it — so the adaptive budget preserves the
-  10–20× wedge **byte-for-byte (settled +0.000% on every workload)**
-  while cutting search CPU 10.7× on incompressible content and 1.7× on
-  distrustful classes (the engagement counter: 0 skips on the wedge, 44
-  on the mixed sparse class). The ≥2× put-wall gate is not met on the
-  wedge by a confidence gate: the frontier bounds the deferral ceiling
-  at 1.25–4.29×, with build-artifacts/source-trees bounded by
-  NON-SEARCH write-path cost — the pressure term (12C-1-2) is the
-  identified continuation.
-- Also sealed (v0.7.15): **12D-1 — the entropy-coded grammar skeleton,
-  STOPPED per the brief's gate** (`grammar_ec_oracle`): the grammar
-  skeleton entropy-codes at 3.88 bits/byte via SEQ_RANS (60 059 →
-  29 156 B), cutting the fully-accounted grammar from 66 059 B to
-  35 156 B (341.8×, −47%) and closing the zstd gap from 2.2× to 1.18× —
-  but zstd-whole remains 1.2× smaller, so the format-bit investigation
-  is not justified; the remaining gap is context-modeling quality + raw
-  state encoding (the not-yet-justified "contextual entropy models"
-  direction).
+- Latest completed phase: **12C-1-2 — the pressure-aware foreground
+  deferral** (v0.7.16): the class gate (12C-1) answered "is rANS
+  valuable?"; the pressure gate answers "is NOW the right time?" —
+  the worker pool's live `in_flight/capacity` pressure (hysteresis
+  band, debt accounting, starvation cap, `--foreground pressure`,
+  `PressureMetrics`). Direct-engine court: **every gate row MET** —
+  foreground wall ≥2× on all 4 workloads the frontier said possible
+  (container-layers 2.07×, ci-cache 2.73×, generated-assets 3.51×,
+  scientific-outputs 3.03×), search CPU capture 0.89–0.97, settled
+  density +0.00–0.08%, the hysteresis kills the oscillation flap (639
+  toggles → 1), the debt cap bounds the debt exactly, RAW controls
+  unchanged. Mounted court: incompressible bursts 11× lower latency /
+  95% less daemon CPU, sustained writes 43% less CPU with bounded
+  latency, readback + fsck clean. The pressure shape is adopted as
+  `--foreground pressure`; the mount default stays `full` pending the
+  mounted pressure-engagement lane.
+- Previous: **12C-1 — the adaptive foreground search budget** (v0.7.14)
+  and **12D-1 — the entropy-coded grammar skeleton** (v0.7.15, STOPPED
+  per the brief's gate).
 - Previous phase: **12E — the adoption-engineering line**
   (v0.7.12–0.7.13): the stable embeddable Engine facade + format-v1
   compatibility seal (12E.1/3), optional frontend features (12E.2),
@@ -102,12 +96,14 @@ For sealed performance and experimental evidence, see
   sealed: 12A terminalization (REJECTED), 12B durability generations
   (ADOPTED — the mount's fsyncs coalesce), 12C structural semiotics
   (RECORDED) + 12C-1 the adaptive foreground budget (ADOPTED as
-  `ForegroundMode::Focused`; the FUSE/engine defaults stay `Full`
-  pending the prior-wiring court — the pressure term is 12C-1-2), 12D
-  grammar-addressed entropy (STOPPED at the offline oracle — 12D-0 raw
-  skeleton, then 12D-1 the entropy-coded skeleton: gap to zstd-whole
-  2.2× → 1.18×, still STOPPED; the contextual-entropy-models direction
-  is the only path to the format bit).
+  `ForegroundMode::Focused`) + 12C-1-2 the pressure-aware deferral
+  (ADOPTED as `--foreground pressure`; the mount default stays `full`
+  pending the mounted pressure-engagement lane — the prior wiring is
+  the other follow-on), 12D grammar-addressed entropy (STOPPED at the
+  offline oracle — 12D-0 raw skeleton, then 12D-1 the entropy-coded
+  skeleton: gap to zstd-whole 2.2× → 1.18×, still STOPPED; the
+  contextual-entropy-models direction is the only path to the format
+  bit).
 - Persistent format: explicit, versioned, incompat-feature-gated.
 - Correctness: crash courts + hostile-media court + fsck, byte-exact
   read-back under every scheduler.

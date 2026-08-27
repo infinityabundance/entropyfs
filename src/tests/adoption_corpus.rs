@@ -214,3 +214,31 @@ pub fn workloads() -> Vec<Workload> {
 
     out
 }
+
+/// The hostile-media RAW control: 200 deterministic random blobs of
+/// 1–64 KiB — the SAME bytes the 12C-1 adaptive-budget probe used (the
+/// identical generator, shared here so the 12C-1-2 pressure-deferral
+/// probe's RAW-control rows are byte-comparable to the sealed 12C-1
+/// numbers). The arms must all be byte-exact here; the RAW winner must
+/// stay ~100% in every arm (a budget or policy change must never turn
+/// random bytes into a "compressed" winner — the "RAW controls
+/// unchanged" gate row).
+pub fn noise_control() -> Workload {
+    let mut blobs = Vec::new();
+    let mut state: u64 = 0x0123_4567_89AB_CDEF;
+    for i in 0..200u64 {
+        let len = 1024 + ((i * 2654435761) % (63 * 1024)) as usize;
+        let mut b = Vec::with_capacity(len);
+        while b.len() < len {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            b.push((state >> 33) as u8);
+        }
+        blobs.push(b);
+    }
+    Workload {
+        name: "noise-control",
+        blobs,
+    }
+}

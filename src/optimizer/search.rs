@@ -434,41 +434,87 @@ pub fn encode_guided(
     };
 
     // -------------------------------------------------------------------
-    // Phase 12C-1: the Focused adaptive refinement — the class-prior rANS
-    // deferral.
+    // Phase 12C-1/12C-1-2: the Focused adaptive refinement — the
+    // class-prior rANS deferral + the pressure deferral.
     //
     // The 12C-1-0 frontier measured the adoption-wedge search CPU
     // composition: the byte-rANS + sequence-rANS sweep is ~67% of the
     // `search` row, and — decisively — the foreground search is
     // density-OPTIONAL on the wedge corpora (the background optimizer
-    // recovers the full footprint to 0.00–0.62% regression). The Focused
-    // policy therefore defers the rANS families to the background when
-    // the chunk's semantic class prior says they rarely win, and keeps
-    // them when the class says they win. The gate is self-calibrating:
-    // `focused_min_observations` keeps cold classes on the full search,
-    // and a class that genuinely wins with rANS accumulates a high
-    // `P(Rans)` share that disengages the gate.
+    // recovers the full footprint to 0.00–0.62% regression). Two gates
+    // therefore compose:
     //
-    // SAFETY: a wrong gate costs foreground CPU or foreground density
-    // (recovered by the background pass — the settled footprint is the
-    // 12C-1 gate's authority), never bytes: every candidate still
-    // encodes, costs, materializes, hashes, and validates (§32) before it
-    // can win.
+    // 1. CLASS gate (12C-1): when the chunk's semantic class prior says
+    //    rANS rarely wins (`P(Rans) < focused_rans_skip_share`, with
+    //    `focused_min_observations` confidence), the sweep is skipped
+    //    regardless of pressure — the work is low-value.
+    // 2. PRESSURE gate (12C-1-2): when the class says rANS IS valuable
+    //    but the store's worker pool is saturated (the pressure scalar
+    //    reached `pressure_enter`, hysteresis by `pressure_leave`), the
+    //    sweep is DEFERRED to the background optimizer — the work is
+    //    valuable but NOW is the wrong time to pay for it. The deferral
+    //    is accounted as explicit optimization debt (bounded by
+    //    `pressure_max_deferred_bytes` — the starvation invariant:
+    //    continuous pressure cannot defer optimization forever).
+    //
+    // SAFETY: both gates are advisory (ADR-0004): they change only which
+    // candidates are SEARCHED. Every candidate still encodes, costs,
+    // materializes, hashes, and validates (§32) before it can win; RAW/
+    // exact storage keeps every byte correct; materialization
+    // validation, hash validation, resource bounds, and durability are
+    // never skipped. A wrong gate costs foreground CPU or foreground
+    // density (recovered by the background pass — the settled footprint
+    // is the 12C-1 gate's authority), never bytes.
     // -------------------------------------------------------------------
     let fg_set = if ctx.mode == SearchMode::Foreground
         && fg.mode == crate::optimizer::foreground::ForegroundMode::Focused
         && (fg_set.byte_rans || fg_set.sequence_rans)
     {
-        match store.dsfb_class_rans_share(ctx.semantic) {
-            Some((count, share)) if fg.focused_skips_rans(count, share) => {
-                store.record_focused_rans_skip();
-                crate::optimizer::foreground::ForegroundFamilySet {
-                    byte_rans: false,
-                    sequence_rans: false,
-                    ..fg_set
-                }
+        // The pressure sample + hysteresis transition run unconditionally
+        // in Focused mode so the per-store state stays current even when
+        // the class gate already deferred (the next write's decision
+        // must see the up-to-date pressure state).
+        let pressured = store.pressure_engaged(&fg);
+        let class_defer = match store.dsfb_class_rans_share(ctx.semantic) {
+            Some((count, share)) => fg.focused_skips_rans(count, share),
+            None => false,
+        };
+        let (_, debt_bytes, _) = store.deferred_debt();
+        let debt_ok = debt_bytes < fg.pressure_max_deferred_bytes;
+        let pressure_defer = pressured && debt_ok;
+        if class_defer || pressure_defer {
+            store.record_focused_rans_skip();
+            if pressure_defer {
+                // The debt accounting: a pressure-deferred chunk is
+                // rANS-valuable work POSTPONED — the background optimizer
+                // pays it (the frontier proved the recovery). Class-gate
+                // skips are near-density-neutral by construction (the
+                // class rarely wins with rANS) and are NOT debt.
+                store.record_deferred_extent(ctx.target.len() as u64);
             }
-            _ => fg_set,
+            // The pressure mask: rANS always; the configurational
+            // families (SPARSE/PALETTE/PERIODIC/SPARSE_BLOCK64) when the
+            // policy says the expensive representation search is deferred
+            // wholesale (the 12C-1-2 matrix's p*cfg arm — the evidence
+            // picks the default). The CHEAP exact families (dedup,
+            // ZERO/FILL, dictionaries, bases, RAW) always stay: they are
+            // the "cheap exact representation" the pressured foreground
+            // persists.
+            crate::optimizer::foreground::ForegroundFamilySet {
+                byte_rans: false,
+                sequence_rans: false,
+                // The configurational mask applies to the PRESSURE
+                // deferral only (the 12C-1 class gate's sealed behavior
+                // is rANS-only); the class gate never touches it.
+                configurational: if pressure_defer {
+                    !fg.pressure_defer_configurational && fg_set.configurational
+                } else {
+                    fg_set.configurational
+                },
+                ..fg_set
+            }
+        } else {
+            fg_set
         }
     } else {
         fg_set

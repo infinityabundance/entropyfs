@@ -79,10 +79,16 @@ pub struct MountArgs {
     /// reads it).
     #[arg(long, value_name = "PATH")]
     pub stats_file: Option<PathBuf>,
-    /// Phase-10B foreground representation policy: how much search CPU
-    /// the write path spends per chunk. full = every family (pre-10B);
+    /// Phase-10B/12C-1 foreground representation policy: how much search
+    /// CPU the write path spends per chunk. full = every family (pre-10B);
     /// cheap = probe first, high-entropy chunks go dedup+ZERO/FILL+RAW;
-    /// raw = hash->CAS->RAW (the background optimizer still densifies).
+    /// focused = the Phase-12C-1 adaptive budget (the entropy probe + the
+    /// semantic class-prior rANS deferral); pressure = the Phase-12C-1-2
+    /// pressure-aware shape (focused + the worker-pool pressure gate with
+    /// the hysteresis band enter 0.80 / leave 0.60, the configurational
+    /// deferral, and the 1 GiB debt cap — the sealed 12C-1-2 evidence
+    /// parameters); raw = hash->CAS->RAW (the background optimizer still
+    /// densifies).
     #[arg(long, value_name = "MODE", default_value = "full")]
     pub foreground: String,
     /// Phase-10F storage transport (sync reference path | uring).
@@ -115,10 +121,23 @@ pub fn run(args: &MountArgs) -> Result<(), String> {
         foreground: match args.foreground.as_str() {
             "full" => crate::optimizer::foreground::ForegroundPolicy::full(),
             "cheap" => crate::optimizer::foreground::ForegroundPolicy::cheap(),
+            "focused" => crate::optimizer::foreground::ForegroundPolicy::focused(),
+            "pressure" => crate::optimizer::foreground::ForegroundPolicy {
+                // Phase 12C-1-2: the evidence-backed pressure-aware shape
+                // (the sealed court's hysteresis band against flap, the
+                // configurational deferral that closed the container-layers
+                // wall gate, and a generous starvation cap the operator can
+                // tighten — the debt bound mechanism the court pinned).
+                pressure_enter: 0.80,
+                pressure_leave: 0.60,
+                pressure_defer_configurational: true,
+                pressure_max_deferred_bytes: 1024 * 1024 * 1024,
+                ..crate::optimizer::foreground::ForegroundPolicy::focused()
+            },
             "raw" => crate::optimizer::foreground::ForegroundPolicy::raw_only(),
             other => {
                 return Err(format!(
-                    "unknown --foreground mode {other:?} (expected full | cheap | raw)"
+                    "unknown --foreground mode {other:?} (expected full | cheap | focused | pressure | raw)"
                 ));
             }
         },

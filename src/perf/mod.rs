@@ -160,6 +160,17 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Instant;
 
+/// Phase 12C-1-2: monotonic nanoseconds since the first call (the
+/// optimization-debt age clock). Anchored once per process: `Instant`
+/// deltas are monotonic (NTP-proof), and the anchor makes the value
+/// comparable across stores in the same process (the debt age reported
+/// by [`crate::store::Store::deferred_debt`]).
+pub fn wall_ns() -> u64 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let start = *START.get_or_init(Instant::now);
+    start.elapsed().as_nanos() as u64
+}
+
 /// Sample-ring bound per phase and per opcode (keeps the memory bounded
 /// and the percentile sort cheap: 4096 samples per ring).
 const MAX_SAMPLES: usize = 4096;

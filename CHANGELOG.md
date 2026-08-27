@@ -1,5 +1,62 @@
 # EntropyFS changelog
 
+## v0.7.16 (2026-08-27)
+
+**Phase 12C-1-2 — the pressure-aware foreground deferral, ADOPTED.** The
+12C-1 class gate answered "is rANS valuable for this class?"; the
+12C-1-2 pressure gate answers "even if rANS is valuable, is NOW the
+right time to pay for it?" — valuable + idle runs rANS now, valuable +
+pressured persists the cheap exact representation and enqueues explicit
+optimization debt, and the background optimizer pays the deferred density
+debt. The direct-engine court (the authority) meets EVERY gate row.
+
+- **The mechanism** (`src/optimizer/foreground.rs` pressure parameters +
+  the hysteresis `pressure_transition`; `src/store/workers.rs`
+  `SearchPool::pressure` — the pool's live `in_flight / capacity`, the
+  brief's "use what the engine knows, not load average"; `src/store/`
+  pressure state + `foreground_pressure` + `pressure_engaged` + the
+  debt accounting; `encode_guided`'s pressure mask (rANS + optional
+  configurational); `optimize_pass` completion resets the debt;
+  `--foreground focused|pressure` on `entropyfs mount`;
+  `PressureMetrics` in `entropyfs metrics --json` — the operator's
+  "compact and settled" vs "accepted writes quickly and has N bytes of
+  optimization debt" distinction).
+- **The direct-engine court** (sealed `pressure-deferral-probe-*/`): the
+  p50c shape (rANS + configurational deferral) meets **foreground wall
+  ≥2× on all 4 workloads the frontier said possible** (container-layers
+  2.07×, ci-cache 2.73×, generated-assets 3.51×, scientific-outputs
+  3.03×); the prepare-limited pair (build-artifacts 1.46×, source-trees
+  1.28×) captures 0.78–0.91 of its measured headroom; **search CPU
+  capture 0.89–0.97 (the ≥0.70 bar); settled density +0.00–0.08% (the
+  +1% preferred bar; the +5% reject never approached)**; p99 improved
+  0.26–0.93; RAW controls unchanged; the foreground footprint
+  temporarily regresses +473–1705% (allowed and reported — the settled
+  footprint is the authority). **The hysteresis kills the flap**: the
+  plain p75 toggles **639×** under the 0.70/0.80 oscillation, the
+  p50hyst (enter 0.80 / leave 0.60) toggles **once**. **The starvation
+  bound is exact**: the 2 MiB cap bounds the debt at the cap + one
+  chunk (regression-pinned); the settle converges to full's footprint.
+  Condition lanes: idle ≈ Full (0 deferrals), saturated defers
+  aggressively (640), pressure clears → the foreground resumes and the
+  background catches up (settled identical).
+- **The mounted-FUSE court** (sealed `pressure-mount-court-*/`):
+  incompressible bursts — full p50 22.5 ms / 24.8 s daemon CPU vs
+  focused/pressure 2.0 ms / 1.17 s (**11× latency, 95% CPU**);
+  sustained distinct writes — full 105.5 s CPU vs 59.5–60 s (**43%
+  cut**) with latency bounded; readback + fsck clean everywhere; the
+  settled is within the mounted write-order variance (the deterministic
+  direct-engine +0.00–0.08% is the convergence authority). Recorded
+  boundary: the mounted corpora did not saturate the pool with
+  expensive search, so the pressure gate's mounted differentiation did
+  not engage measurably — a mounted expensive-search saturation lane is
+  the follow-on.
+- **Decision**: the pressure-aware shape is ADOPTED as `--foreground
+  pressure` (hysteresis band + configurational deferral + 1 GiB debt
+  cap); `ForegroundMode::Focused` is the first-class policy behind it;
+  the mount default stays `full` pending the mounted pressure-engagement
+  lane (the brief's "don't flip the default to satisfy a roadmap
+  bullet" discipline).
+
 ## v0.7.15 (2026-08-27)
 
 **Phase 12D-1 — the entropy-coded grammar skeleton (the "persisted

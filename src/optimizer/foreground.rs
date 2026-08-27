@@ -109,6 +109,18 @@
 //!     win, and keeps them when the class says they win (self-calibrating:
 //!     the gate engages only for classes with enough observations whose
 //!     winner distribution distrusts rANS).
+//!     Phase 12C-1-2 added the PRESSURE dimension to `Focused` (evidence
+//!     `evidence/performance/pressure-deferral-probe-*/`, CHANGELOG
+//!     v0.7.16): the class prior answers "is rANS valuable for this
+//!     class?"; the pressure gate answers "is NOW the right time to pay
+//!     for it?". When the store's worker pool is saturated
+//!     (`pressure_enter` reached, hysteresis by `pressure_leave`), the
+//!     rANS sweep is DEFERRED to the background optimizer even for
+//!     rANS-valuable classes, and the deferral is accounted as explicit
+//!     optimization debt (bounded by `pressure_max_deferred_bytes` — the
+//!     starvation invariant). Valuable + idle runs rANS now; valuable +
+//!     pressured persists the cheap exact representation + enqueues debt;
+//!     the background pays the debt.
 
 #![forbid(unsafe_code)]
 
@@ -179,6 +191,39 @@ pub struct ForegroundPolicy {
     /// gets the full search — the winner distribution is unreliable until
     /// the class has earned its confidence. 16 default.
     pub focused_min_observations: u64,
+    /// Phase 12C-1-2 (Focused only): the pressure level at which the
+    /// foreground enters the pressured state (idle → pressured; the
+    /// hysteresis ENTER threshold). `2.0` disables the pressure gate
+    /// (the plain 12C-1 `focused()` policy; the 12C-1-2 evidence picks
+    /// the production threshold).
+    pub pressure_enter: f64,
+    /// Phase 12C-1-2 (Focused only): the pressure level below which the
+    /// foreground leaves the pressured state (pressured → idle; the
+    /// hysteresis LEAVE threshold). With `pressure_enter ==
+    /// pressure_leave` the gate has no hysteresis band (the plain
+    /// Pressure-25/50/75 matrix arms); a band (`enter 0.80 / leave
+    /// 0.60`, the brief's example) prevents search/skip flapping when the
+    /// pressure oscillates around the threshold.
+    pub pressure_leave: f64,
+    /// Phase 12C-1-2 (Focused only): the starvation bound — the
+    /// cumulative deferred logical bytes at which the pressure gate stops
+    /// deferring (the foreground pays the search again, bounding the
+    /// optimization debt). `u64::MAX` = unbounded (the matrix arms; the
+    /// starvation lane sweeps the cap). The brief's "continuous
+    /// foreground pressure must not prevent deferred optimization
+    /// forever" invariant: debt cannot grow past the cap, and the
+    /// background optimizer pays whatever was deferred.
+    pub pressure_max_deferred_bytes: u64,
+    /// Phase 12C-1-2 (Focused only): whether the pressure gate ALSO
+    /// defers the configurational families (SPARSE/PALETTE/PERIODIC/
+    /// SPARSE_BLOCK64) alongside rANS. False = rANS-only deferral (the
+    /// brief's named mechanism; ~67% of the search row — the 12C-1
+    /// frontier's composition). True = the full "expensive
+    /// representation-search work" deferral (rANS + configurational,
+    /// ~80% of the search row), leaving the CHEAP exact families
+    /// (dedup, ZERO/FILL, dictionaries, bases, RAW) in the foreground.
+    /// The 12C-1-2 matrix measures both; the evidence picks the default.
+    pub pressure_defer_configurational: bool,
 }
 
 impl Default for ForegroundPolicy {
@@ -189,6 +234,10 @@ impl Default for ForegroundPolicy {
             probe_bytes: 4096,
             focused_rans_skip_share: 0.10,
             focused_min_observations: 16,
+            pressure_enter: 2.0,
+            pressure_leave: 2.0,
+            pressure_max_deferred_bytes: u64::MAX,
+            pressure_defer_configurational: false,
         }
     }
 }
@@ -202,6 +251,10 @@ impl ForegroundPolicy {
             probe_bytes: 4096,
             focused_rans_skip_share: 0.10,
             focused_min_observations: 16,
+            pressure_enter: 2.0,
+            pressure_leave: 2.0,
+            pressure_max_deferred_bytes: u64::MAX,
+            pressure_defer_configurational: false,
         }
     }
 
@@ -220,15 +273,21 @@ impl ForegroundPolicy {
             probe_bytes: 4096,
             focused_rans_skip_share: 0.10,
             focused_min_observations: 16,
+            pressure_enter: 2.0,
+            pressure_leave: 2.0,
+            pressure_max_deferred_bytes: u64::MAX,
+            pressure_defer_configurational: false,
         }
     }
 
     /// Phase 12C-1: the adaptive foreground budget — the entropy probe
     /// plus the semantic class-prior rANS deferral (see
     /// [`ForegroundMode::Focused`] for the full semantics and the sealed
-    /// 12C-1 evidence). The probe/oracle arms sweep the two `focused_*`
-    /// parameters by constructing this struct directly (the fields are
-    /// public policy parameters, not hidden state).
+    /// 12C-1 evidence). The 12C-1-2 pressure gate is DISABLED here
+    /// (`pressure_enter` 2.0 — never reached); the 12C-1-2 evidence picks
+    /// the production pressure threshold, and the probe constructs the
+    /// pressure variants directly (the fields are public policy
+    /// parameters, not hidden state).
     pub const fn focused() -> Self {
         Self {
             mode: ForegroundMode::Focused,
@@ -236,6 +295,10 @@ impl ForegroundPolicy {
             probe_bytes: 4096,
             focused_rans_skip_share: 0.10,
             focused_min_observations: 16,
+            pressure_enter: 2.0,
+            pressure_leave: 2.0,
+            pressure_max_deferred_bytes: u64::MAX,
+            pressure_defer_configurational: false,
         }
     }
 
@@ -247,6 +310,10 @@ impl ForegroundPolicy {
             probe_bytes: 4096,
             focused_rans_skip_share: 0.10,
             focused_min_observations: 16,
+            pressure_enter: 2.0,
+            pressure_leave: 2.0,
+            pressure_max_deferred_bytes: u64::MAX,
+            pressure_defer_configurational: false,
         }
     }
 
@@ -283,6 +350,28 @@ impl ForegroundPolicy {
         self.mode == ForegroundMode::Focused
             && observations >= self.focused_min_observations
             && rans_share < self.focused_rans_skip_share
+    }
+
+    /// Phase 12C-1-2: the pressure-state transition (idle ↔ pressured
+    /// with the hysteresis band). Pure — the store owns the state, this
+    /// owns the policy's thresholds.
+    ///
+    /// ```text
+    /// idle      -> pressured  when  P >= pressure_enter
+    /// pressured -> idle       when  P <= pressure_leave
+    /// ```
+    ///
+    /// With `enter == leave` the band is empty (the plain Pressure-25/50/75
+    /// matrix arms: a single threshold). With a band (`enter 0.80 / leave
+    /// 0.60` — the brief's example) a pressure oscillating around the
+    /// threshold does not flap the gate across adjacent requests: the
+    /// state enters once and stays until the pressure genuinely clears.
+    pub fn pressure_transition(&self, pressured: bool, p: f64) -> bool {
+        if pressured {
+            p > self.pressure_leave
+        } else {
+            p >= self.pressure_enter
+        }
     }
 }
 

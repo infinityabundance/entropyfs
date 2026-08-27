@@ -375,6 +375,25 @@ pub struct Store {
     /// adaptive-budget engagement witness. Identical accounting in every
     /// configuration, so cross-configuration deltas measure the gate.
     focused_rans_skips: std::sync::atomic::AtomicU64,
+    /// Phase 12C-1-2: the pressure-deferral state (0 idle, 1 pressured;
+    /// hysteresis-transitioned by [`ForegroundPolicy::pressure_transition`]
+    /// on the store's sampled pressure). Lock-free — written by the
+    /// search path in Focused mode, read by the probe/oracle diagnostics.
+    pressure_state: std::sync::atomic::AtomicU8,
+    /// Phase 12C-1-2: the probe's deterministic pressure override — `f64`
+    /// bits, NaN = unset (then [`Store::foreground_pressure`] falls back
+    /// to the worker pool's live signal). Oracle/tests only; the
+    /// production daemon never sets it.
+    pressure_override: std::sync::atomic::AtomicU64,
+    /// Phase 12C-1-2 optimization-debt accounting (never a behavior; the
+    /// operator's "how much deferred optimization work is pending"
+    /// witness). `deferred_extents`/`deferred_logical_bytes` accumulate
+    /// the pressure-deferred rANS sweeps since the last completed
+    /// background pass (which pays the debt); `deferred_since_ns` is the
+    /// wall timestamp of the first pending deferral (the debt age).
+    deferred_extents: std::sync::atomic::AtomicU64,
+    deferred_logical_bytes: std::sync::atomic::AtomicU64,
+    deferred_since_ns: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for Store {
@@ -494,6 +513,11 @@ impl Store {
             semantic_rank_count: std::sync::atomic::AtomicU64::new(0),
             semantic_raw_wins: std::sync::atomic::AtomicU64::new(0),
             focused_rans_skips: std::sync::atomic::AtomicU64::new(0),
+            pressure_state: std::sync::atomic::AtomicU8::new(0),
+            pressure_override: std::sync::atomic::AtomicU64::new(f64::NAN.to_bits()),
+            deferred_extents: std::sync::atomic::AtomicU64::new(0),
+            deferred_logical_bytes: std::sync::atomic::AtomicU64::new(0),
+            deferred_since_ns: std::sync::atomic::AtomicU64::new(0),
         };
         store.open_segment(0)?;
         // Create the root directory inode (ino 1) and commit the initial
@@ -615,6 +639,11 @@ impl Store {
             semantic_rank_count: std::sync::atomic::AtomicU64::new(0),
             semantic_raw_wins: std::sync::atomic::AtomicU64::new(0),
             focused_rans_skips: std::sync::atomic::AtomicU64::new(0),
+            pressure_state: std::sync::atomic::AtomicU8::new(0),
+            pressure_override: std::sync::atomic::AtomicU64::new(f64::NAN.to_bits()),
+            deferred_extents: std::sync::atomic::AtomicU64::new(0),
+            deferred_logical_bytes: std::sync::atomic::AtomicU64::new(0),
+            deferred_since_ns: std::sync::atomic::AtomicU64::new(0),
         };
         // Phase-10D: replay any un-checkpointed mutation log tail left by
         // a process crash (the last checkpoint root is authoritative; the
@@ -937,6 +966,127 @@ impl Store {
     pub(crate) fn record_focused_rans_skip(&self) {
         self.focused_rans_skips
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Phase 12C-1-2: the deterministic pressure override (oracle/tests
+    /// only — the production daemon never sets it). `None` clears the
+    /// override and restores the worker-pool signal. The value is the
+    /// pressure scalar P in [0, 1] the gate samples.
+    pub fn set_pressure_override(&self, p: Option<f64>) {
+        let bits = match p {
+            Some(v) => v.clamp(0.0, 1.0).to_bits(),
+            None => f64::NAN.to_bits(),
+        };
+        self.pressure_override
+            .store(bits, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Phase 12C-1-2: the foreground pressure scalar P in [0, 1] — the
+    /// probe's deterministic override when set, else the worker pool's
+    /// live queue-pressure (`in_flight / capacity`) when this store uses
+    /// the pool, else 0.0.
+    ///
+    /// # Why the pool is the primary signal
+    ///
+    /// The 12C-1-2 brief: "do not use load average; use things the
+    /// storage engine actually knows". The pool's in-flight fraction is
+    /// exactly the engine's own queue pressure — a deep in-flight set
+    /// means expensive search tasks are already waiting, so adding more
+    /// now stretches every write's latency. The non-pool (11C semaphore)
+    /// path reports 0.0 in this round: the semaphore has a waiter count
+    /// but no queue-depth analogue, and the mounted default IS the pool;
+    /// wiring the semaphore's waiters as a secondary signal is the
+    /// documented follow-on.
+    pub fn foreground_pressure(&self) -> f64 {
+        let bits = self
+            .pressure_override
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let v = f64::from_bits(bits);
+        if !v.is_nan() {
+            return v.clamp(0.0, 1.0);
+        }
+        if self.worker_pool.load(std::sync::atomic::Ordering::Relaxed) {
+            crate::store::workers::POOL.pressure()
+        } else {
+            0.0
+        }
+    }
+
+    /// Phase 12C-1-2: sample the foreground pressure and apply the
+    /// policy's hysteresis transition, persisting the new pressured
+    /// state. Returns whether the gate is ENGAGED (pressured) for this
+    /// chunk. Called once per search-path chunk in Focused mode; the
+    /// state is per-store and lock-free.
+    pub fn pressure_engaged(&self, fg: &crate::optimizer::foreground::ForegroundPolicy) -> bool {
+        let p = self.foreground_pressure();
+        let was = self
+            .pressure_state
+            .load(std::sync::atomic::Ordering::Relaxed)
+            != 0;
+        let engaged = fg.pressure_transition(was, p);
+        self.pressure_state.store(
+            if engaged { 1 } else { 0 },
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        engaged
+    }
+
+    /// Phase 12C-1-2: the current pressured state (0 idle, 1 pressured;
+    /// diagnostic).
+    pub fn pressure_state(&self) -> bool {
+        self.pressure_state
+            .load(std::sync::atomic::Ordering::Relaxed)
+            != 0
+    }
+
+    /// Phase 12C-1-2: record one pressure-deferred extent (the debt
+    /// accounting; the search calls this when the pressure gate defers a
+    /// rANS-valuable chunk). The first deferral after a reset also stamps
+    /// the debt age clock.
+    pub(crate) fn record_deferred_extent(&self, logical: u64) {
+        self.deferred_extents
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.deferred_logical_bytes
+            .fetch_add(logical, std::sync::atomic::Ordering::Relaxed);
+        // The debt-age clock starts at the first PENDING deferral; a
+        // completed background pass resets it via `reset_deferred_debt`.
+        let _ = self.deferred_since_ns.compare_exchange(
+            0,
+            crate::perf::wall_ns(),
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// Phase 12C-1-2: the pending optimization debt — `(deferred_extents,
+    /// deferred_logical_bytes, deferred_since_ns)` since the last
+    /// completed background pass. The operator's distinction between
+    /// "compact and settled" and "accepted writes quickly and has N bytes
+    /// of optimization debt".
+    pub fn deferred_debt(&self) -> (u64, u64, u64) {
+        (
+            self.deferred_extents
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.deferred_logical_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.deferred_since_ns
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// Phase 12C-1-2: pay the debt — a COMPLETED (untruncated) background
+    /// pass re-searched every extent, so every deferred candidate has been
+    /// re-examined: the pending debt returns to zero and the age clock
+    /// restarts at the next deferral. Explicitly non-persistent (the
+    /// brief's decision: recovery from a process restart merely means the
+    /// normal optimizer rediscovers candidates later).
+    pub fn reset_deferred_debt(&self) {
+        self.deferred_extents
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.deferred_logical_bytes
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.deferred_since_ns
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Phase-12C oracle diagnostics: record one winning-channel rank (the

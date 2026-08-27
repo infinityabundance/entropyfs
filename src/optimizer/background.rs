@@ -313,6 +313,14 @@ pub fn optimize_pass(
         if let Some(c) = cursor {
             *c = PassCursor::default();
         }
+        // Phase 12C-1-2: a COMPLETED pass re-searched every extent, so
+        // every pressure-deferred candidate has been re-examined: the
+        // pending optimization debt is paid. This is the "background
+        // pays the deferred density debt" step — the operator's debt
+        // witness returns to zero here (explicitly non-persistent; a
+        // process restart merely means the next pass rediscovers
+        // candidates, per the 12C-1-2 brief's decision).
+        store.reset_deferred_debt();
     }
     // ---------------------------------------------------------------------
     // Stage 5: Phase-10E convergence sweep.

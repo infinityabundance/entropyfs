@@ -1,0 +1,4 @@
+policy	fuse_threads	readback	fsck
+full	8	OK	OK
+focused	8	OK	OK
+pressure	8	OK	OK

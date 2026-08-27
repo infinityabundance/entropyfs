@@ -902,6 +902,36 @@ impl SearchPool {
             },
         }
     }
+
+    /// Phase 12C-1-2: the pool's LIVE pressure — the fraction of the
+    /// backpressure capacity currently consumed (`in_flight / capacity`,
+    /// clamped to [0, 1], 0 when the pool is disabled).
+    ///
+    /// This is the storage engine's own queue-pressure signal for the
+    /// foreground deferral gate: a deep in-flight set means the pool is
+    /// saturated, so adding MORE expensive search work now would only
+    /// deepen the queue and stretch every write's latency — the 12C-1-2
+    /// policy defers such work to the background optimizer instead. The
+    /// read is one lock-free atomic load + a division; the runtime mutex
+    /// is held only to find the shared state (the same acquisition the
+    /// other pool accessors take).
+    ///
+    /// The brief's full scalar is `max(worker_utilization,
+    /// normalized_queue_depth, normalized_queue_wait)`; this first
+    /// implementation uses the queue-depth term (`in_flight / capacity`),
+    /// which the pool already accounts exactly and lock-free. The
+    /// queue-wait EWMA is the documented follow-on refinement.
+    pub fn pressure(&self) -> f64 {
+        let rt = self.runtime.lock().expect("pool runtime poisoned");
+        match rt.as_ref() {
+            Some(rt) => {
+                let inflight = rt.shared.in_flight.load(Ordering::Relaxed);
+                let cap = rt.shared.capacity.max(1);
+                (inflight as f64 / cap as f64).min(1.0)
+            }
+            None => 0.0,
+        }
+    }
 }
 
 /// The process-wide pool (Phase-11E probe; disabled by default).
@@ -1140,5 +1170,81 @@ pub mod tests {
 
         POOL.disable();
         assert!(!POOL.enabled());
+    }
+
+    #[test]
+    fn pool_pressure_reflects_in_flight_work() {
+        // Phase 12C-1-2: the pool's pressure scalar (in_flight/capacity)
+        // is the foreground deferral gate's live signal — it must rise
+        // with in-flight work, normalize to [0, 1], and read 0 when the
+        // pool is idle. Also verifies the store's pressure wiring: the
+        // override wins, else the pool's signal when the store uses the
+        // pool, else 0.
+        let _guard = POOL_LOCK.lock().expect("pool test lock poisoned");
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(
+            crate::store::Store::create(dir.path(), &Default::default(), [0x22; 16]).unwrap(),
+        );
+        POOL.enable(2, 8);
+        POOL.bind(&store);
+        assert_eq!(POOL.pressure(), 0.0, "idle pool has zero pressure");
+
+        // The store wiring: without the pool flag, pressure is 0; with
+        // the flag, it reads the pool; the override always wins.
+        assert_eq!(store.foreground_pressure(), 0.0);
+        store.enable_worker_pool();
+        assert_eq!(store.foreground_pressure(), POOL.pressure());
+        store.set_pressure_override(Some(0.5));
+        assert_eq!(store.foreground_pressure(), 0.5);
+        store.set_pressure_override(None);
+        assert_eq!(store.foreground_pressure(), POOL.pressure());
+        store.set_pressure_override(Some(1.5)); // clamped
+        assert_eq!(store.foreground_pressure(), 1.0);
+        store.set_pressure_override(None);
+
+        // 16 medium decodes (64 KiB RAW) against 2 workers: the drain
+        // takes long enough that in-flight work is observable. The read
+        // is a bounded spin (a slow CI machine cannot miss a >0 window
+        // entirely) — an observation, never a timing gate.
+        let payload = vec![0x5au8; 65536];
+        let cid = crate::core::extent::ChunkId::of(&payload);
+        let mut objects = HashMap::new();
+        objects.insert(cid, payload);
+        let objects = Arc::new(objects);
+        let descriptors = Arc::new(HashMap::new());
+        let limits = *store.limits();
+        let rid = POOL.alloc_request_id();
+        let tasks = (0..16usize)
+            .map(|i| WorkerTask::DecodeExtent {
+                ordinal: i,
+                store: Arc::clone(&store),
+                start: 0,
+                desc: crate::core::representation::Representation::Raw {
+                    obj: cid,
+                    len: 65536,
+                },
+                objects: Arc::clone(&objects),
+                descriptors: Arc::clone(&descriptors),
+                limits,
+            })
+            .collect();
+        let submit = POOL.submit(rid, tasks);
+        let mut observed = 0.0f64;
+        for _ in 0..100_000 {
+            let p = POOL.pressure();
+            assert!(p <= 1.0, "pressure is normalized to [0, 1]");
+            observed = observed.max(p);
+            if p > 0.0 {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        let (results, m) = submit.join();
+        assert_eq!(results.len(), 16);
+        assert_eq!(m.tasks, 16);
+        assert!(observed > 0.0, "pressure rose with in-flight work");
+
+        POOL.disable();
+        assert_eq!(POOL.pressure(), 0.0, "disabled pool has zero pressure");
     }
 }

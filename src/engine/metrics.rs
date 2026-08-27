@@ -137,6 +137,30 @@ pub struct DsfbMetrics {
     pub candidates_evaluated: u64,
 }
 
+/// Phase 12C-1-2 pressure-deferral accounting (the operator's
+/// optimization-debt witness — advisory; the background optimizer pays
+/// the debt).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PressureMetrics {
+    /// Whether the foreground pressure gate is currently engaged
+    /// (hysteresis-transitioned; snapshot).
+    pub pressured: bool,
+    /// Cumulative rANS/configurational deferrals by the `Focused` gate
+    /// (cumulative since open; class-gate + pressure-gate skips).
+    pub rans_skips: u64,
+    /// Pending pressure-deferred extents since the last completed
+    /// background pass (snapshot; the debt).
+    pub deferred_extents: u64,
+    /// Pending pressure-deferred logical bytes since the last completed
+    /// background pass (snapshot; the debt — the operator's "accepted
+    /// writes quickly and has N bytes of optimization debt" number).
+    pub deferred_logical_bytes: u64,
+    /// Age of the oldest pending deferral (unit: milliseconds since the
+    /// first deferral after the last background pass; snapshot).
+    pub deferred_age_ms: u64,
+}
+
 /// Performance-cache accounting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheMetrics {
@@ -180,6 +204,9 @@ pub struct EngineMetrics {
     pub gc: GcMetrics,
     /// DSFB observer accounting.
     pub dsfb: DsfbMetrics,
+    /// Phase 12C-1-2 pressure-deferral accounting (the optimization-debt
+    /// witness; advisory).
+    pub pressure: PressureMetrics,
     /// Performance-cache accounting.
     pub cache: CacheMetrics,
     /// Write-path phase latencies (only phases with samples are listed).
@@ -447,6 +474,46 @@ pub const METRIC_REGISTRY: &[MetricDef] = &[
         authority: "Store::candidates_evaluated",
     },
     MetricDef {
+        key: "pressure.pressured",
+        unit: "flag",
+        kind: "snapshot",
+        scope: "store",
+        reset: "at open",
+        authority: "Store::pressure_state",
+    },
+    MetricDef {
+        key: "pressure.rans_skips",
+        unit: "extents",
+        kind: "cumulative",
+        scope: "store",
+        reset: "at open",
+        authority: "Store::focused_rans_skips",
+    },
+    MetricDef {
+        key: "pressure.deferred_extents",
+        unit: "extents",
+        kind: "snapshot",
+        scope: "store",
+        reset: "at completed background pass",
+        authority: "Store::deferred_debt",
+    },
+    MetricDef {
+        key: "pressure.deferred_logical_bytes",
+        unit: "bytes",
+        kind: "snapshot",
+        scope: "store",
+        reset: "at completed background pass",
+        authority: "Store::deferred_debt",
+    },
+    MetricDef {
+        key: "pressure.deferred_age_ms",
+        unit: "milliseconds",
+        kind: "snapshot",
+        scope: "store",
+        reset: "at completed background pass",
+        authority: "Store::deferred_debt",
+    },
+    MetricDef {
         key: "cache.model_cache_hits",
         unit: "objects",
         kind: "cumulative",
@@ -518,6 +585,13 @@ mod tests {
                 slew_events: 0,
                 narrowed_searches: 0,
                 candidates_evaluated: 0,
+            },
+            pressure: PressureMetrics {
+                pressured: false,
+                rans_skips: 0,
+                deferred_extents: 0,
+                deferred_logical_bytes: 0,
+                deferred_age_ms: 0,
             },
             cache: CacheMetrics {
                 model_cache_hits: 0,

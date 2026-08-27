@@ -230,3 +230,207 @@ surface.
 - The frontier's numbers — including the failed rows (cheap: no wedge
   headroom; the ≥2× wall: not met; build-artifacts/source-trees:
   non-search-bounded) — are the phase's evidence, preserved verbatim.
+
+---
+
+# Phase-12C-1-2 court: the pressure-aware foreground deferral
+
+Sealed: `evidence/performance/pressure-deferral-probe-1787860601-8d41f18/`
+(direct-engine) and `evidence/performance/pressure-mount-court-1787869688-8d41f18/`
+(mounted-FUSE). Oracle: `src/tests/pressure_deferral_probe.rs`.
+Drivers: `tools/court-pressure-deferral.sh`,
+`tools/court-pressure-mount.sh`. Production change:
+`ForegroundMode::Focused` gains the pressure dimension
+(`src/optimizer/foreground.rs`, `src/optimizer/search.rs`,
+`src/store/workers.rs` `SearchPool::pressure`, `src/store/mod.rs`
+pressure state + debt accounting, `--foreground focused|pressure` on
+`entropyfs mount`, `PressureMetrics` in the engine metrics DTO).
+
+## The question
+
+12C-1 answered "is rANS valuable for this class?" and adopted the class
+gate. 12C-1-2 answers the complementary question:
+
+> Even if rANS is valuable, is NOW the right time to pay for it?
+
+The 12C-1-0 frontier gave the empirical permission: raw foreground +
+background optimization converges to +0.000–0.618% of full settled
+density on the adoption corpora, so some foreground search is DEFERRABLE
+work, not mandatory write-path work. The policy under test:
+
+```text
+valuable + idle       -> run rANS now
+valuable + pressured  -> persist the cheap exact representation,
+                         enqueue explicit optimization debt
+low-value             -> the class gate skips regardless of pressure
+background            -> pay the deferred density debt
+```
+
+with the pressure scalar measured from the STORAGE ENGINE ITSELF (the
+worker pool's `in_flight / capacity` — the brief's "do not use load
+average" rule), a hysteresis band (enter 0.80 / leave 0.60) against
+search/skip flapping, and a hard starvation bound
+(`pressure_max_deferred_bytes`).
+
+## The mechanism (production)
+
+- `SearchPool::pressure()`: the pool's live `in_flight / capacity`
+  (lock-free; the queue-depth term of the brief's scalar).
+- `Store::foreground_pressure()`: the probe's deterministic override
+  when set, else the pool's live signal when the store uses the pool,
+  else 0.
+- `Store::pressure_engaged(&fg)`: sample + hysteresis transition
+  (`ForegroundPolicy::pressure_transition`: idle→pressured at
+  `pressure_enter`, pressured→idle below `pressure_leave`), per-store
+  lock-free state.
+- `encode_guided` (Focused mode): the rANS sweep is deferred when the
+  class gate fires (low-value) OR the pressure gate is engaged AND the
+  debt is under the cap. The pressure mask also covers the
+  configurational families when `pressure_defer_configurational` is set
+  (the p50c shape). The CHEAP exact families (dedup, ZERO/FILL,
+  dictionaries, bases, RAW) always stay.
+- Debt accounting: `deferred_extents` / `deferred_logical_bytes` /
+  `deferred_since_ns` — the pressure-deferred work since the last
+  COMPLETED background pass (which re-searches every extent and resets
+  the debt). Explicitly non-persistent (the brief's decision).
+- Operator surface: `PressureMetrics` in `entropyfs metrics --json`
+  (`pressure.pressured/rans_skips/deferred_extents/deferred_logical_bytes/
+  deferred_age_ms`, registry-defined) — the "compact and settled" vs
+  "accepted writes quickly and has N bytes of optimization debt"
+  distinction.
+- The mounted daemon: `--foreground full|cheap|focused|pressure|raw`;
+  `pressure` = Focused + enter 0.80 / leave 0.60 + configurational
+  deferral + the 1 GiB debt cap.
+
+## The direct-engine court (the authority)
+
+The sealed 12E.13 corpora + the shared noise control, driven through the
+engine's put protocol under a deterministic pressure matrix (the probe
+override — the pool signal is validated separately by the pool test).
+
+### The matrix (sustained P = 0.9), p50c arm (rANS + configurational)
+
+| workload | wall gain | ceiling | wall capture | search capture | settled reg | p99 ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| build-artifacts | 1.46× | 1.52× | 0.91 | 0.95 | +0.08% | 0.61 |
+| source-trees | 1.28× | 1.40× | 0.78 | 0.93 | +0.02% | 0.93 |
+| container-layers | **2.07×** | 2.25× | 0.93 | 0.95 | +0.03% | 0.64 |
+| generated-assets | **3.51×** | 3.94× | 0.96 | 0.97 | +0.00% | 0.32 |
+| ci-cache | **2.73×** | 2.98× | 0.95 | 0.97 | +0.05% | 0.26 |
+| scientific-outputs | **3.03×** | 4.16× | 0.88 | 0.89 | +0.00% | 0.37 |
+| noise-control | 3.70× | 4.15× | 0.96 | 0.98 | +0.00% | 0.17 |
+
+- **Foreground wall ≥2× on all 4 workloads the frontier said possible**
+  (container-layers 2.07×, ci-cache 2.73×, generated-assets 3.51×,
+  scientific-outputs 3.03×); the prepare-limited pair (build-artifacts
+  1.46×, source-trees 1.28×) captures 0.78–0.91 of its measured
+  available headroom — the search portion is captured (0.93–0.95) and
+  the non-search `prepare` term bounds the wall, exactly as the 12C-1-0
+  frontier predicted. The rANS-only p50 arm missed the container-layers
+  2× (1.85×); the configurational deferral (p50c) closed it — the
+  evidence picks the p50c shape.
+- **Settled density +0.00% to +0.08%** everywhere (the +1% preferred
+  bar; the +5% hard reject never approached). The foreground footprint
+  temporarily regresses +473% to +1705% (allowed and reported — the
+  brief's "foreground footprint vs eventual settled footprint"
+  distinction).
+- **Search CPU capture 0.89–0.97** — the ≥70% bar met on every
+  workload. **p99 improved everywhere** (0.26–0.93).
+- **RAW controls unchanged**: noise-control byte-exact, 100% RAW,
+  footprint identical, 3.7× wall, zero debt (the entropy probe handles
+  it before the pressure gate is consulted).
+
+### The condition lanes (p50hyst: enter 0.80 / leave 0.60)
+
+| lane | build-artifacts | scientific-outputs | noise-control |
+| --- | ---: | ---: | ---: |
+| idle | 0 deferrals | 0 deferrals | 0 |
+| pressured (P=0.9) | 640 deferrals | 234 deferrals | 0 |
+| oscillating (0.70/0.80) | **1 transition** | 1 | 0 |
+| clearing | 400 deferrals, 2 transitions | 117, 2 | 0 |
+| settled (idle == pressured) | 0.049 == 0.049 | 0.055 == 0.055 | 1.018 |
+
+- **Idle behaves close to Full** (zero deferrals; the brief's "idle ≈
+  Full" row).
+- **Saturated defers aggressively**; **pressure clears → the foreground
+  resumes and the background catches up** (the settled footprint is
+  identical idle vs pressured).
+- **The hysteresis kills the flap**: the plain p75 (0.75/0.75) under the
+  0.70/0.80 oscillation toggles **639 times**; the hysteresis p50hyst
+  toggles **once**. The brief's exact bad case, measured and fixed.
+
+### The starvation lane
+
+Sustained pressure (P=0.9) with a 2 MiB debt cap on build-artifacts:
+**capped debt 2,106,689 B (the cap + one chunk — the bound is exact;
+regression-pinned) vs uncapped 4,945,040 B**; the foreground resumes the
+search at the cap; the settled footprint converges to 0.049 (== full).
+The "continuous pressure cannot defer optimization forever" invariant
+holds.
+
+## The mounted-FUSE court
+
+`full` vs `focused` vs `pressure` (`--foreground`) at 8 FUSE threads
+against the brief's battery (parallel write, tree copy, untar, make -j,
+mixed R/W, bursty writers, continuous saturation of DISTINCT content,
+structured bursts). Readback + fsck clean in every cell.
+
+| workload | full | focused | pressure |
+| --- | ---: | ---: | ---: |
+| bursty writers p50 / CPU | 22.5 ms / 24.8 s | 2.09 ms / 1.18 s | 2.00 ms / 1.17 s |
+| continuous distinct p50 / CPU | 114 ms / 105.5 s | 107 ms / 59.5 s | 105 ms / 60.0 s |
+| structured burst p50 | 1.69 ms | 1.39 ms | 1.38 ms |
+
+- **The 12C-1 adaptive gate, mounted**: incompressible bursts — full p50
+  22.5 ms → 2.0 ms (**11× lower latency**) and daemon CPU 24.8 s →
+  1.17 s (**95% cut**).
+- **Sustained distinct writes**: full burns 105.5 s of daemon CPU vs
+  59.5–60.0 s for focused/pressure (**~43% cut**) with latency bounded
+  (~105–114 ms p50 — the write-path-dominated regime; no unbounded
+  growth under sustained writes).
+- **Settled within run variance**: the full-vs-focused delta on cells
+  whose policies are behaviorally identical under FUSE (no semantic
+  input → the class gate is dormant) is the ±5% noise floor of the
+  mounted court's write-order variance; the DETERMINISTIC convergence
+  authority is the direct-engine court (+0.00–0.08%).
+- **Recorded boundary**: the mounted corpora did not saturate the pool
+  with expensive search work (the saturation content is probe-skipped;
+  the structured content searches in ~0.3 ms/chunk), so the pressure
+  gate's mounted DIFFERENTIATION did not engage measurably — the
+  deterministic direct-engine court is the pressure gate's authority, and
+  a mounted expensive-search saturation lane is the recorded follow-on.
+
+## The gate decision (direct-engine authority)
+
+```text
+byte exactness        MET (asserted in every arm)
+settled density       MET (+0.00% to +0.08%; the +1% preferred bar)
+10x wedge             MET (settled byte-equal to full everywhere)
+foreground wall       MET (>=2x on all 4 workloads the frontier said
+                       possible; the prepare-limited pair captures
+                       0.78-0.91 of its measured headroom)
+search CPU            MET (0.89-0.97 capture vs the >=0.70 bar)
+p99                   MET (improved 0.26-0.93)
+background convergence MET (settled == full; the debt resets at pass
+                       completion; background rewrites identical)
+starvation            MET (debt bounded at the cap + one chunk,
+                       regression-pinned)
+raw controls          MET (noise unchanged, zero debt)
+write amplification   measured (bg_rewrites/bg_saved identical across
+                       the pressure arms and raw — the debt pays once)
+```
+
+**The pressure-aware deferral is ADOPTED** as the `--foreground
+pressure` shape (the hysteresis band + the configurational deferral +
+1 GiB debt cap) and `ForegroundMode::Focused` is the first-class policy
+behind it. The mount default stays `full` (the flip needs the mounted
+pressure-engagement lane — the brief's own "don't flip the default to
+satisfy a roadmap bullet" discipline; the opt-in `--foreground
+pressure` is available). The architectural story the phase seals:
+
+```text
+12C      context tells us what is probably valuable
+12C-1    confidence tells us what can be skipped permanently
+12C-1-2  pressure tells us what valuable work can be postponed
+background optimizer pays the deferred density debt
+```
