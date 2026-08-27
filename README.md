@@ -51,23 +51,29 @@ For sealed performance and experimental evidence, see
 
 ### Current development focus
 
-- Latest completed phase: **12D-0 — the grammar-addressed entropy OFFLINE
-  oracle** (`docs/performance/grammar-oracle.md`, sealed
-  `evidence/performance/grammar-oracle-*/`): a bounded template grammar
-  (literal skeleton + slots, full accounting) beats EntropyFS settled
-  7.0× on a non-periodic shared-skeleton corpus and loses as expected on
-  the diverse control, but zstd-whole beats it 2.2× — **STOP per the
-  brief's gate**; the "persisted entropy" refinement (the grammar object
-  must itself be entropy-coded) is recorded. 12C-0 (v0.7.10) RECORDED
-  the semantic prior's ordering value; 12B (v0.7.9) sealed the durability
-  group commit; 12A-0 (v0.7.8) REJECTED terminalization. **Phase 11 is
-  closed** (11A hostile input → 11B reconciliation → 11C synchronization
-  removal → 11D oracle → 11E fair pool, mount default → 11F observer
-  shard); see `docs/performance/worker-pool-probe.md` and CHANGELOG
-  v0.7.4–0.7.12.
+- Latest completed phase: **12E — the adoption-engineering line**
+  (v0.7.12–0.7.13): the stable embeddable Engine facade + format-v1
+  compatibility seal (12E.1/3), optional frontend features (12E.2),
+  golden-store compatibility court (12E.4), sealed evidence manifests
+  (12E.5), versioned JSON surfaces (12E.6), structured tracing (12E.7),
+  the hard distribution-court gate — AlmaLinux 10.2 / Ubuntu Server
+  26.04 / openSUSE Leap 16, Docker Hub images, OOM-limited, all PASS
+  with zero waivers (12E.8) — MSRV policy (12E.9), the one-command
+  trial path (12E.10), the real-device SyncIo/UringIo transport court
+  (12E.11, Sync retained), the small-object packing oracle (12E.12,
+  REJECTED), the object-store adoption court (12E.13 — a 20×
+  footprint wedge on versioned build artifacts), the stable C ABI
+  (12E.14), the Go binding over the C ABI with the mandatory `-race`
+  gate green on all three distros (12E.15), the no-impossible-media-
+  claims policy (12E.16), the ublk adoption state (12E.17), the Miri
+  lane (12E.18), the CI/release matrix (12E.19 — fmt/clippy/msrv/
+  features/audit/deny all PASS), the documentation deliverables
+  (12E.20), and the 21-point release-gate checklist — **21 passed,
+  0 failed** (12E.23/24, `tools/check-release-gates.sh`).
 - Current decision: the pool is the mount default
   (`available_parallelism()` workers; `--no-worker-pool` restores the 11C
-  semaphore as the fallback). Phase 12's four research oracles are all
+  semaphore as the fallback); SyncIo remains the transport default per
+  the real-device 12E.11 court. Phase 12's research oracles are all
   sealed: 12A terminalization (REJECTED), 12B durability generations
   (ADOPTED — the mount's fsyncs coalesce), 12C structural semiotics
   (RECORDED — the adaptive foreground budget is the continuation), 12D
@@ -77,6 +83,33 @@ For sealed performance and experimental evidence, see
 - Correctness: crash courts + hostile-media court + fsck, byte-exact
   read-back under every scheduler.
 - Evidence: all material performance claims point to sealed artifacts.
+
+## Getting started
+
+Supported platforms: Linux x86_64; AlmaLinux 10.2, Ubuntu Server 26.04
+LTS, and openSUSE Leap 16 pass the sealed distribution court
+(`docs/portability/support-matrix.md`). Rust 1.87+ (rustup-pinned
+stable recommended), Go 1.24+ for the Go binding.
+
+```sh
+cargo install entropyfs --locked
+
+# the filesystem
+entropyfs mkfs /var/lib/efs-store
+entropyfs mount /var/lib/efs-store /mnt/efs
+
+# the embeddable engine (no FUSE required) — Rust, C, or Go
+cargo add entropyfs
+let id = engine.put_blob(b"exact bytes")?;
+assert_eq!(engine.get_blob(id)?, b"exact bytes");
+```
+
+The stable Engine API is `docs/api/engine.md`; the C ABI is
+`include/entropyfs.h` + `docs/api/c-abi.md`; the Go binding is
+`docs/api/go.md` (with the content-store example). Machine-readable
+operations: `entropyfs status --json`, `entropyfs metrics --json`,
+`entropyfs fsck --json` (`docs/operations/`). Format-compatibility
+policy: `docs/format/compatibility-policy.md`.
 
 ## Measured results
 

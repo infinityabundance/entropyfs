@@ -1,5 +1,104 @@
 # EntropyFS changelog
 
+## v0.7.13 (2026-08-27)
+
+**Phase 12E.11–12E.24 — the completion of the adoption-engineering line:
+real-device transport court, small-object packing oracle, object-store
+adoption court, the stable C ABI, the Go binding, the Miri lane, the CI
+matrix, the documentation deliverables, and the 21-point release gate —
+ALL PASS.** Phase 12E is CLOSED; the release gates
+(`tools/check-release-gates.sh`) report **21 passed, 0 failed**.
+
+- **12E.11 — SyncIo/UringIo real-device transport court**
+  (`src/tests/transport_real_court.rs`, `tools/court-transport-real.sh`,
+  sealed `evidence/performance/transport-real-*/`): one fresh store per
+  (device × backend) on the device itself — group-commit write, fsync-
+  heavy write, sequential + random reads, mixed R/W, self-CPU deltas —
+  across real NVMe (CT2000T705SSD3), SATA SSD (RBU-SC100S37256GD) and
+  the tmpfs control. Sealed tally (sync/uring/tie of 13): **NVMe
+  10/1/2, SATA 12/0/1, tmpfs 14/0/0** — writes at parity on real
+  storage, reads favor sync ~10% (the 10F read delta reproduced on
+  hardware), the 10F direction reproduced on the control. **Sync
+  remains the default** (the crash-consistency oracle); the small-QD/
+  high-QD `auto` branch recorded as the follow-up oracle.
+- **12E.12 — physical small-object packing oracle, REJECTED**
+  (`pack_oracle.rs`, `tools/court-pack-oracle.sh`, sealed): a realistic
+  95-file small-file tree (726 849 logical B) decomposed per-tag with
+  the exact cross-check; **settled physical 0.306× logical (3.3×
+  density; overhead above the live set = 4 B)**, packable envelope
+  share 4.7% (a perfect pack saves ~3.5% at most), dominant
+  pre-compaction term = tree/log write-path churn (reclaimed by
+  compaction, untouched by packs). No pack format; no INLINE_PACKED;
+  no representation-algebra contamination.
+- **12E.13 — object-store adoption court, WEDGE-CANDIDATE**
+  (`adoption_oracle.rs`, `tools/court-adoption.sh`, sealed): the six
+  brief workloads benchmarked + verified byte-exact through the stable
+  Engine facade only, per-workload stores, raw-file baselines. Settled
+  footprint vs raw: **build-artifacts 0.049× (20×; 73% dedup),
+  scientific-outputs 0.055×, container-layers 0.084×, generated-assets
+  0.096×** — four workloads clear the 10× bar; the wedge is a
+  **storage-density wedge for versioned/structured immutable object
+  populations**; recorded tradeoff: put ~14× slower than raw file
+  writes (CPU-bound foreground search), get 114–691 MiB/s.
+- **12E.14 — the stable C ABI** (`src/ffi`, `include/entropyfs.h`,
+  `docs/api/c-abi.md`): the narrow opaque-handle facade
+  (`entropyfs_engine_open/close`, `blob_put/get/read_range`,
+  `contains/sync/compact/metrics_json/last_error/free/abi_version`),
+  ABI v1 independent of the on-disk format, stable error classes, one
+  free mechanism for callee-allocated outputs, panic containment at
+  every boundary, the crate's SECOND ledger-designated unsafe file with
+  exact preconditions in `docs/security/unsafe-ledger.md`. Rust FFI
+  court (5 tests) + C smoke (21 checks) PASS; cdylib added to the
+  build.
+- **12E.15 — the Go binding over the stable C ABI** (`go/`, `docs/api/
+  go.md`, `tools/go-test.sh`): thin cgo adapter (no bespoke Rust↔Go
+  path), opaque handle, RWMutex lifecycle (concurrent ops + exclusive
+  close), copy-then-free ownership, stable error classes with
+  `errors.Is` sentinels, hostile-input validation, the 32-goroutine
+  race/stress court — **`go test -race` green** — the content-store
+  example (`go/examples/content-store/`), FFI-overhead benches, and the
+  **enterprise gate: the 18-stage distro court now includes the Go
+  binding stage (pinned upstream Go 1.24.6) — all three lanes PASS with
+  zero waivers** (almalinux 10.2 / ubuntu 26.04 / leap 16.0, immutable
+  digests sealed).
+- **12E.16 — the no-impossible-media-claims policy** (in
+  `docs/adoption/object-store.md`): adoption demos must prove their
+  exact result with all reconstructive state accounted; no pre-picked
+  ratios; RAW-fallback controls stay controls.
+- **12E.17 — ublk adoption path** (`docs/adoption/ublk.md`):
+  experimental state, kernel/root requirements, supported ops,
+  durability (flush IS the 12B group barrier) and discard semantics
+  documented; `ublk bench` runs kernel-free (32 MiB byte-exact).
+- **12E.18 — the Miri lane** (`tools/court-miri.sh`, `docs/security/
+  miri-lane.md`, sealed `evidence/security/miri-lane-*/`): the bounded
+  deterministic subset (descriptor decode, representation validation,
+  materialization, residual application, bounded hostile graphs — 9
+  tests) passes under Miri; the doc states EXACTLY what is and is not
+  covered (no "Miri verifies EntropyFS" claim).
+- **12E.19 — the CI/release matrix** (`tools/ci-matrix.sh`, sealed
+  `evidence/ci/ci-matrix-*/`): fmt + clippy + msrv + feature-matrix +
+  audit + deny + release suite + ffi smoke + go binding — **all PASS**
+  (deny policy in `deny.toml`); privileged probes recorded, never
+  hidden. The matrix caught and fixed a real base-build regression
+  (the 12E.10 transport classifier referenced the uring-gated variant
+  unguarded); the entire tree is now **clippy- and fmt-clean** (85
+  pre-existing warnings eliminated).
+- **12E.20–12E.24 — docs + gates**: `docs/api/engine.md`,
+  `docs/format/compatibility-policy.md`, `docs/operations/metrics.md`,
+  `docs/operations/fsck-json.md`, `docs/adoption/object-store.md`,
+  `docs/adoption/release-gates.md`; the 21-point release-gate checker
+  (`tools/check-release-gates.sh`) — **21 passed, 0 failed**; the
+  trial path (12E.10) re-verified for the 12E.24 success criterion;
+  README updated to the adoption present (the phase history stays in
+  CHANGELOG).
+
+Release evidence: `evidence/performance/transport-real-*/` +
+`pack-oracle-*/` + `adoption-oracle-*/`, `evidence/portability/
+distro-court-*-27f3c41/` (three lanes, zero waivers, Go stage), `evidence/
+security/miri-lane-*/`, `evidence/ci/ci-matrix-*/`. The C ABI, the Go
+binding, the docs and the release-gate checker are the stable adoption
+surface going forward.
+
 ## v0.7.12 (2026-08-27)
 
 **Phase 12E.1–12E.10 — the adoption-engineering line: the embeddable
