@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod base_sequence;
+pub mod compat_seal;
 pub mod concurrency;
 pub mod court_repro;
 pub mod crash_recovery;

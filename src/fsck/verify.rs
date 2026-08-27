@@ -189,18 +189,22 @@ pub fn verify_all(ctx: &mut FsckCtx) -> Result<(), String> {
 fn verify_superblock_features(ctx: &mut FsckCtx) {
     match crate::format::features::check(ctx.active.features(), false) {
         crate::format::features::Compatibility::Ok => {}
-        crate::format::features::Compatibility::ReadOnlyOnly => {
+        crate::format::features::Compatibility::ReadOnlyOnly(e) => {
             ctx.issues.push(FsckIssue::new(
                 Severity::Warning,
                 Category::Superblock,
-                "store carries unknown ro_compat features".to_string(),
+                format!(
+                    "store carries unknown ro_compat features (0x{:016x}); \
+                     writable opens are refused, read-only access is safe: {}",
+                    e.unknown_ro_compat, e.remediation
+                ),
             ));
         }
-        crate::format::features::Compatibility::Refused(msg) => {
+        crate::format::features::Compatibility::Refused(e) => {
             ctx.issues.push(FsckIssue::new(
                 Severity::Error,
                 Category::Superblock,
-                format!("store features refuse mount: {msg}"),
+                format!("store features refuse access: {e}"),
             ));
         }
     }

@@ -211,3 +211,62 @@ fn concurrent_writes_without_setattr_stay_byte_exact() {
         "concurrent writes + checkpoint lost extents (read-back mismatches: {bad})"
     );
 }
+
+/// Phase 12E.3/12E.1 regression: the rename-replay stale-root vector.
+///
+/// # The bug this pins
+///
+/// The Phase-11E stale-root rule was applied to the Setattr and Unlink
+/// replay arms but NOT the Rename arm: `replay_op`'s Rename arm put the
+/// log-staged moved inode wholesale, overwriting the extent_root that an
+/// EARLIER Write replay in the same transaction had just built with
+/// `put_extent_in_tx` — orphaning every extent (silent zero reads after
+/// reopen). The Phase-12E engine's write-then-rename blob protocol
+/// (create + write + rename in one epoch, close without a barrier,
+/// reopen) exposed it deterministically — the same shape as tar's
+/// extract-to-temp-then-rename, which is why a mounted 11E court could
+/// have seen it too.
+///
+/// The replay arm now applies the staged metadata while PRESERVING the
+/// transaction's current data root (the same rule the Setattr/Unlink
+/// arms enforce).
+#[test]
+fn write_then_rename_in_one_epoch_survives_reopen() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = StoreConfig {
+        segment_size: 1024 * 1024,
+        ..Default::default()
+    };
+    let store = Store::create(dir.path(), &cfg, [0x55; 16]).unwrap();
+    let hooks = CrashHooks::none();
+    let ino = store
+        .epoch_create(1, b"tmp", NewEntry::file(0o600, 1000, 1000), &hooks)
+        .unwrap();
+    store
+        .epoch_write(
+            ino,
+            0,
+            b"log-only blob",
+            OptimizeOptions::default(),
+            ForegroundPolicy::full(),
+            &hooks,
+        )
+        .unwrap();
+    store.epoch_rename(1, b"tmp", 1, b"final", &hooks).unwrap();
+    // Close WITHOUT a barrier: the ops stay in the mutation log (the
+    // durability barrier is what checkpoints). Reopen must replay them.
+    drop(store);
+
+    let reopened = Store::open(dir.path(), &StoreConfig::default()).unwrap();
+    let out = reopened.read_file(ino, 0, 64).unwrap();
+    assert_eq!(
+        out, b"log-only blob",
+        "rename replay clobbered the moved file's extent root"
+    );
+    // The final name resolves to the same inode.
+    let entry = reopened
+        .dir_lookup(1, b"final")
+        .unwrap()
+        .expect("final entry exists");
+    assert_eq!(entry.ino, ino);
+}

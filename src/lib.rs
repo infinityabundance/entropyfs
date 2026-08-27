@@ -32,6 +32,11 @@ pub mod rans;
 // Storage-specific DSFB observer (zero decoding authority).
 pub mod dsfb;
 
+// Phase 12E.1: the stable embeddable storage-engine facade (content-
+// addressed blobs over the persistent store; FUSE/ublk/Engine API are
+// peers above the same store).
+pub mod engine;
+
 // Permanent on-disk format: explicit little-endian byte codecs.
 pub mod format;
 

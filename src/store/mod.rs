@@ -73,6 +73,13 @@ pub enum StoreError {
     CrashSimulated(String),
     /// Invariant violation (bug).
     Invariant(String),
+    /// Write attempted on a read-only open (Phase 12E.3).
+    ReadOnly,
+    /// The on-disk format/features cannot be opened in the requested
+    /// mode (unknown incompat bits, unknown ro_compat for a writable
+    /// open, format major mismatch). Carries the typed compatibility
+    /// error (Phase 12E.3).
+    IncompatibleFormat(crate::format::features::CompatibilityError),
 }
 
 impl std::fmt::Display for StoreError {
@@ -145,6 +152,11 @@ pub struct StoreConfig {
     /// Phase-10F io_uring submission queue capacity (ops per submit
     /// batch; `UringIo` only).
     pub io_uring_entries: u32,
+    /// Phase 12E.3: open the store READ-ONLY. Unknown `ro_compat` bits
+    /// are permitted (the documented read-only fallback); every write
+    /// path fails with `StoreError::ReadOnly`. Read-only opens still hold
+    /// the exclusive mount lock (one reader OR writer at a time).
+    pub read_only: bool,
 }
 
 impl Default for StoreConfig {
@@ -163,6 +175,7 @@ impl Default for StoreConfig {
             foreground: crate::optimizer::foreground::ForegroundPolicy::default(),
             io_backend: crate::store::io::IoBackendKind::Sync,
             io_uring_entries: 256,
+            read_only: false,
         }
     }
 }
@@ -259,6 +272,11 @@ pub struct Store {
     stats: std::sync::Mutex<StoreStats>,
     /// Advisory lock file.
     _lock: File,
+    /// Phase 12E.3: read-only open mode. When set, every write funnel
+    /// (`begin_tx`, epoch ops, the durability barrier, superblock
+    /// rewrites) fails with `StoreError::ReadOnly`, and open skips the
+    /// segment-writer creation and epoch replay (both write).
+    read_only: bool,
     /// Bounded decoded-model cache (performance only).
     model_cache: std::sync::Mutex<crate::cache::model::ModelCache>,
     /// DSFB storage observer (performance-only; zero decoding authority).
@@ -420,6 +438,7 @@ impl Store {
         let store = Self {
             dir: dir.to_path_buf(),
             config: *config,
+            read_only: false,
             object_index: std::sync::Arc::new(ObjectIndex::new()),
             commit: std::sync::RwLock::new(CommitState {
                 root,
@@ -512,9 +531,34 @@ impl Store {
         // may observe the complete previous or complete new transaction,
         // never an impossible hybrid).
         let (sb, root) = Self::choose_root(&pair, dir, &object_index, config)?;
+        // -----------------------------------------------------------------
+        // Phase 12E.3: the normative compatibility gate. Unknown incompat
+        // bits refuse every open; unknown ro_compat bits refuse a writable
+        // open but PERMIT a read-only one (the documented RO fallback,
+        // previously refused by the implementation despite the documented
+        // contract and fsck's ReadOnlyOnly warning path). The typed error
+        // carries format major/minor, the unknown bit masks, the access
+        // mode, and a remediation hint — never a prose-only refusal.
+        // -----------------------------------------------------------------
+        use crate::format::features::Compatibility as Compat;
+        match crate::format::features::check_with_version(
+            sb.features(),
+            !config.read_only,
+            sb.format_major,
+            sb.format_minor,
+        ) {
+            Compat::Ok => {}
+            Compat::ReadOnlyOnly(_) => {
+                // Permitted: the caller asked for read-only access.
+            }
+            Compat::Refused(e) => {
+                return Err(StoreError::IncompatibleFormat(e));
+            }
+        }
         let store = Self {
             dir: dir.to_path_buf(),
             config: *config,
+            read_only: config.read_only,
             object_index: std::sync::Arc::new(object_index),
             commit: std::sync::RwLock::new(CommitState {
                 root: root.clone(),
@@ -560,7 +604,13 @@ impl Store {
             .lock()
             .expect("stats poisoned")
             .physical_capacity = store.physical_capacity();
-        store.open_segment(sb.segment_seq)?;
+        // Read-only open (Phase 12E.3): the segment writer and the epoch
+        // replay are both writes (fresh-magic/truncate and checkpoint +
+        // barrier respectively) and are skipped entirely. Reads resolve
+        // through the object index, which needs neither.
+        if !config.read_only {
+            store.open_segment(sb.segment_seq)?;
+        }
         // Deep-verify the chosen root quickly (structural).
         recovery::verify_root(&store)?;
         // Phase-10D: replay any un-checkpointed mutation log tail left by
@@ -568,8 +618,10 @@ impl Store {
         // envelopes with a higher sequence are the acknowledged-but-
         // unmerged mutations). The replay commits its own checkpoint root
         // and runs a durability barrier, so the mounted state is fully
-        // consistent.
-        store.epoch_replay()?;
+        // consistent. Skipped for read-only opens (a write).
+        if !config.read_only {
+            store.epoch_replay()?;
+        }
         Ok(store)
     }
 
@@ -697,6 +749,27 @@ impl Store {
             .read()
             .expect("commit state poisoned")
             .features_in_use
+    }
+
+    /// The full feature-bit view of the committed superblock (Phase 12E.3:
+    /// compat / ro_compat / incompat, used by the engine metrics DTO and
+    /// the compatibility gate).
+    pub fn feature_bits(&self) -> crate::format::features::FeatureBits {
+        self.commit
+            .read()
+            .expect("commit state poisoned")
+            .superblock
+            .features()
+    }
+
+    /// Phase 12E.3: refuse every write funnel on a read-only open. The
+    /// error is the typed `StoreError::ReadOnly`, never a silent no-op.
+    fn ensure_writable(&self) -> Result<(), StoreError> {
+        if self.read_only {
+            Err(StoreError::ReadOnly)
+        } else {
+            Ok(())
+        }
     }
 
     /// The DSFB search plan for a chunk (trust-ordered, budget-bounded).
@@ -1033,6 +1106,9 @@ impl Store {
     // ------------------------------------------------------------------
 
     fn open_segment(&self, seq: u64) -> Result<(), StoreError> {
+        // Phase 12E.3: opening a segment writer is a write (fresh magic /
+        // torn-tail truncation); read-only stores never have a writer.
+        self.ensure_writable()?;
         let w = SegmentWriter::open(&self.io, seq)?;
         *self.segment.lock().expect("segment poisoned") = Some(w);
         Ok(())
@@ -1045,6 +1121,8 @@ impl Store {
 
     /// Replace the current segment writer (offline GC compaction).
     pub(crate) fn install_segment(&self, w: SegmentWriter) {
+        self.ensure_writable()
+            .expect("install_segment on read-only store");
         *self.segment.lock().expect("segment poisoned") = Some(w);
     }
 
@@ -1147,6 +1225,7 @@ impl Store {
 
     /// fdatasync the current segment.
     pub fn fdatasync_segment(&self) -> Result<(), StoreError> {
+        self.ensure_writable()?;
         let mut seg = self.segment.lock().expect("segment poisoned");
         if let Some(w) = seg.as_mut() {
             // Flush buffered bytes first (the caller appended them).
@@ -1158,6 +1237,7 @@ impl Store {
 
     /// Flush buffered segment bytes.
     pub fn flush_segment(&self) -> Result<(), StoreError> {
+        self.ensure_writable()?;
         let mut seg = self.segment.lock().expect("segment poisoned");
         if let Some(w) = seg.as_mut() {
             w.flush()?;
@@ -1168,6 +1248,7 @@ impl Store {
     /// Ensure the segments directory entries are durable (Phase 10F: via
     /// the storage transport).
     pub fn sync_segments_dir(&self) -> Result<(), StoreError> {
+        self.ensure_writable()?;
         self.io.sync_segments_dir()
     }
 
@@ -1240,6 +1321,7 @@ impl Store {
     /// fsync at the barrier). Runs under the commit coordinator
     /// (`commit_lock`). Phase 10F: through the storage transport.
     pub fn write_superblock(&self, root_id: ChunkId, root: &Root) -> Result<(), StoreError> {
+        self.ensure_writable()?;
         let mut cs = self.commit.write().expect("commit state poisoned");
         let mut sb = cs.superblock.clone();
         sb.generation = root.generation;
@@ -1281,6 +1363,9 @@ impl Store {
         &self,
         hooks: &crate::store::transaction::CrashHooks,
     ) -> Result<(), StoreError> {
+        // Phase 12E.3: the barrier is a write (fdatasync + superblock
+        // fsync); a read-only open refuses it with a typed error.
+        self.ensure_writable()?;
         // Phase-11B: the fsync path gets its own envelope (pass-through
         // inside an outer request). The checkpoint's cp_* rows and the
         // barrier rows below partition it.
@@ -1459,6 +1544,7 @@ impl Store {
     /// Publish a committed root to the in-memory state (under the commit
     /// coordinator).
     pub fn publish_commit(&self, root: &Root, _root_id: ChunkId) -> Result<(), StoreError> {
+        self.ensure_writable()?;
         let mut cs = self.commit.write().expect("commit state poisoned");
         cs.root = root.clone();
         cs.generation = root.generation;
@@ -1474,6 +1560,9 @@ impl Store {
     /// serialized, while candidate encoding (the expensive part of a
     /// write) happens before `begin_tx` and runs concurrently.
     pub fn begin_tx(&self) -> Result<crate::store::transaction::Tx<'_>, StoreError> {
+        // Phase 12E.3: a transaction is a write (it stages records and may
+        // open the segment writer); a read-only open refuses it.
+        self.ensure_writable()?;
         let guard = self.commit_lock.lock().expect("commit lock poisoned");
         // Ensure the segment writer is present.
         if self.segment.lock().expect("segment poisoned").is_none() {
@@ -5197,6 +5286,9 @@ impl Store {
     /// are only referenced by the log, which GC's reachability walk does
     /// not see as roots.
     pub fn epoch_checkpoint(&self, hooks: &CrashHooks) -> Result<(), StoreError> {
+        // Phase 12E.3: a checkpoint merges + publishes a new root (a
+        // write); a read-only open refuses it.
+        self.ensure_writable()?;
         // Fast path: nothing pending (also avoids taking the commit lock
         // for the common empty-epoch case).
         if self.epoch().is_empty() {
@@ -5571,6 +5663,7 @@ impl Store {
         entry: NewEntry,
         hooks: &CrashHooks,
     ) -> Result<u64, StoreError> {
+        self.ensure_writable()?;
         if !Self::validate_name(name) {
             return Err(StoreError::Config("invalid entry name".into()));
         }
@@ -5679,6 +5772,7 @@ impl Store {
         update: &AttrUpdate,
         hooks: &CrashHooks,
     ) -> Result<Inode, StoreError> {
+        self.ensure_writable()?;
         if update.size.is_some() {
             // Flush the epoch first so the truncate sees a clean,
             // committed file state.
@@ -5739,6 +5833,7 @@ impl Store {
         is_dir: bool,
         hooks: &CrashHooks,
     ) -> Result<u64, StoreError> {
+        self.ensure_writable()?;
         if !Self::validate_name(name) {
             return Err(StoreError::Config("invalid entry name".into()));
         }
@@ -5833,6 +5928,7 @@ impl Store {
         dst_name: &[u8],
         hooks: &CrashHooks,
     ) -> Result<crate::store::RenameOutcome, StoreError> {
+        self.ensure_writable()?;
         if !Self::validate_name(src_name) || !Self::validate_name(dst_name) {
             return Err(StoreError::Config("invalid entry name".into()));
         }
@@ -6032,6 +6128,7 @@ impl Store {
         semantic: Option<crate::dsfb::semantics::SemanticContext>,
         hooks: &CrashHooks,
     ) -> Result<(), StoreError> {
+        self.ensure_writable()?;
         if data.is_empty() {
             return Ok(());
         }
@@ -6463,7 +6560,25 @@ impl Store {
                 match src_child_inode_id {
                     Some(id) => {
                         let child = fetch_inode(tx, id)?;
-                        Store::put_inode_in_tx(tx, *src_ino, &child)?;
+                        // STALE-ROOT RULE (the Phase-11E corruption
+                        // vector, rename form): the log-staged inode's data
+                        // root is unbuilt — the epoch never rebuilds
+                        // trees, and a Write replayed EARLIER in this same
+                        // transaction already built the moved file's
+                        // extent_root via `put_extent_in_tx`. Applying the
+                        // staged inode wholesale here overwrites that root
+                        // with ZERO, orphaning every extent — silent zero
+                        // reads after reopen. (Found by the Phase-12E
+                        // engine's write-then-rename blob protocol: create
+                        // + write + rename in one epoch, close without a
+                        // barrier, reopen → the blob read back as zeros.)
+                        // Preserve the current data root; apply the staged
+                        // metadata (nlink/times/size) only — the same rule
+                        // the Setattr and Unlink arms already enforce.
+                        let mut cur = Store::inode_for_tx(tx, *src_ino)?;
+                        let mut staged = child;
+                        staged.data = cur.data;
+                        Store::put_inode_in_tx(tx, *src_ino, &staged)?;
                     }
                     None => Store::remove_inode_in_tx(tx, *src_ino)?,
                 }
