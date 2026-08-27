@@ -10,6 +10,7 @@ pub mod base_sequence;
 pub mod concurrency;
 pub mod court_repro;
 pub mod crash_recovery;
+pub mod dag_read_cost_probe;
 pub mod dsfb_shard_probe;
 pub mod durability;
 pub mod enospc;

@@ -1,0 +1,72 @@
+{
+  "oracle": "phase-12a-read-cost",
+  "rev": "ef6508b",
+  "machine": "AMD Ryzen 7 9800X3D 8-Core Processor",
+  "kernel": "7.2.0-1-cachyos",
+  "workload": "controlled DAG families (raw d0; exactref d1 fanout 8; base-inline d1-4 search-natural residuals; base-object d1-4 forced rANS residuals; diamond fanout-3 + d2; seqdict d1 dict refs) x cold/warm/hot cache states; seeded random 64 KiB reads; per-read wall latency -> p50/p95/p99; ReadCostSample aggregates per family/depth",
+  "gate": "depth predicts p99 within a family (controlling cache state)? object-backed d4/d1 ~3.3x + width witnesses => real signal, but inline d4/d1 ~1.35x and the natural path rebases at depth 2 => the cost is object/decode WIDTH, already priced by lambda_depth",
+  "decision": {
+    "verdict": "REJECT the terminalization daemon (recorded falsification of 'depth itself is the cost'; depth predicts latency only through object/decode width, which the existing lambda_depth cost policy already prices)",
+    "summary": "The oracle measured what depth actually costs. Object-backed chains show a strong depth penalty (d4/d1 p99 ~3.3x, decode 116->408 us, referenced objects 3->12 \u2014 the penalty IS the object/decode width, exactly the sample fields it scales with), but the SEARCH-NATURAL chains show only ~1.35x (inline residuals add a walk step, not objects), fanout does not predict per-read latency (exactref/diamond flat), and cold-vs-hot barely moves the decode-dominated terms. The natural write path rebases chains at depth >= 2 (REBASE_DEPTH_THRESHOLD) and candidate cost already penalizes depth (lambda_depth), so deep object-backed chains are essentially never committed in real operation. A terminalization daemon is therefore REJECTED: it would key on depth to fix a ~1.35x artifact that the existing machinery prevents, while the real cost (object width) is already priced. The ReadCostSample instrumentation stays as the measurement surface for 12B/12C and for any future measured-cost representation policy.",
+    "analysis": {
+      "base-inline": {
+        "cold": {
+          "p99_ratio_d4_d1": 1.36,
+          "d1_p99_us": 30.5,
+          "d4_p99_us": 41.5,
+          "d1_objects": 3.0,
+          "d4_objects": 6.0,
+          "d1_decode_us": 19.1,
+          "d4_decode_us": 22.1
+        },
+        "warm": {
+          "p99_ratio_d4_d1": 1.42,
+          "d1_p99_us": 27.1,
+          "d4_p99_us": 38.5,
+          "d1_objects": 3.0,
+          "d4_objects": 6.0,
+          "d1_decode_us": 18.6,
+          "d4_decode_us": 21.4
+        },
+        "hot": {
+          "p99_ratio_d4_d1": 1.47,
+          "d1_p99_us": 26.4,
+          "d4_p99_us": 38.9,
+          "d1_objects": 3.0,
+          "d4_objects": 6.0,
+          "d1_decode_us": 18.5,
+          "d4_decode_us": 21.5
+        }
+      },
+      "base-object": {
+        "cold": {
+          "p99_ratio_d4_d1": 3.27,
+          "d1_p99_us": 132.3,
+          "d4_p99_us": 432.8,
+          "d1_objects": 5.0,
+          "d4_objects": 14.0,
+          "d1_decode_us": 116.0,
+          "d4_decode_us": 408.3
+        },
+        "warm": {
+          "p99_ratio_d4_d1": 3.38,
+          "d1_p99_us": 126.7,
+          "d4_p99_us": 428.3,
+          "d1_objects": 5.0,
+          "d4_objects": 14.0,
+          "d1_decode_us": 115.7,
+          "d4_decode_us": 407.9
+        },
+        "hot": {
+          "p99_ratio_d4_d1": 3.38,
+          "d1_p99_us": 127.3,
+          "d4_p99_us": 430.4,
+          "d1_objects": 5.0,
+          "d4_objects": 14.0,
+          "d1_decode_us": 115.8,
+          "d4_decode_us": 409.8
+        }
+      }
+    }
+  }
+}

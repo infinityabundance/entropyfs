@@ -1,5 +1,45 @@
 # EntropyFS changelog
 
+## v0.7.8 (2026-08-27)
+
+**12A-0 — the Hot-DAG read-cost oracle: depth does NOT predict read
+latency by itself; the terminalization daemon is REJECTED on measured
+evidence (the brief's explicit "record and reject" outcome).**
+
+- **Read-cost instrumentation** (`src/store/readcost.rs`): a bounded
+  [`ReadCostSample`] per materialization (family, reference depth, max
+  walked path depth, DAG nodes, fanout, referenced objects, bytes
+  fetched, `read_many` submissions, model-cache hit/miss delta, decode
+  CPU, I/O wait, total latency, logical bytes), carried inside
+  `PreparedRead` so the two-phase FUSE read completes one coherent
+  sample, closed into a 4096-ring; plus an exponentially decayed
+  per-chunk-id hotness tracker (`h ← h·0.9 + 1` per touch). Both
+  strictly diagnostic, never persisted, never an authority. The
+  model-cache hit/miss counters are lock-free store atomics (delta
+  samples; exact for sequential reads).
+- **The oracle** (`src/tests/dag_read_cost_probe.rs`, sealed
+  `evidence/performance/dag-read-cost-probe-1787790816-ef6508b/`): six
+  controlled DAG families in isolated stores — `raw` (d0),
+  `exactref` (d1, fanout 8), `base-inline` (d1–4, search-natural inline
+  residuals), `base-object` (d1–4, forced rANS residuals — enc + model
+  objects per level), `diamond` (fanout 3 + a d2 chain), `seqdict`
+  (d1 dict references) — each constructed with the REAL encoders and
+  committed with §32 validation + byte-exact read-back verification, the
+  committed family histograms asserted before measuring. Random 64 KiB
+  reads at cold/warm/hot cache states → p50/p95/p99 + the sample
+  aggregates.
+- **The verdict.** Depth predicts latency ONLY through object/decode
+  width: `base-object` d4/d1 p99 ~3.3× (referenced objects 3 → 12,
+  decode 116 → 408 µs — the penalty IS the width), while
+  `base-inline` d4/d1 ~1.35×, `exactref`/`diamond` flat in fanout, and
+  cold-vs-hot barely moves the decode-dominated terms. The natural
+  machinery already prices the costly shape (rebase flattens at depth 2;
+  `λ_depth` penalizes depth in candidate cost), so a terminalization
+  daemon keyed on depth would fix a rare ~1.35× artifact at real
+  complexity. **REJECTED** — recorded in the sealed results.json; the
+  instrumentation stays as the 12B/12C measurement surface. 429 lib
+  tests green.
+
 ## v0.7.7 (2026-08-27)
 
 **11F — the sharded DSFB observer: the last process-wide write-path mutex
@@ -997,3 +1037,13 @@ useful search CPU itself; the next research sequence is Phase 12: 12A
 Hot-DAG terminalization oracle, 12B durability generations / group
 commit, 12C DSFB structural semiotics, 12D grammar-addressed entropy
 (offline oracle first).
+
+**Phase 12 progress:** 12A-0 (the Hot-DAG read-cost oracle, v0.7.8)
+REJECTED the terminalization daemon on measured evidence: depth predicts
+read latency only through object/decode width (~3.3× at d4 for
+object-backed chains, ~1.35× for the search-natural inline chains),
+fanout is flat, and the existing machinery (rebase at depth 2 + `λ_depth`
+candidate cost) already prices the costly shape. The `ReadCostSample`
+instrumentation and the hotness tracker remain as the 12B/12C
+measurement surface. Next: 12B durability generations / group commit
+over the existing MutationLog.

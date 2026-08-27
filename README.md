@@ -51,23 +51,26 @@ For sealed performance and experimental evidence, see
 
 ### Current development focus
 
-- Latest completed phase: **11F — the sharded DSFB observer** (the final
-  Phase-11 step: removes the last process-wide write-path serialization
-  point; 16 per-key shard locks + lock-free aggregate stats; sealed
-  oracle `evidence/performance/dsfb-shard-probe-*/` shows zero
-  end-to-end regression and quantifies the DSFB-mutex contention the 11D
-  brief predicted — it was real in the observer rows themselves (−66%
-  plan-call wall under 16-way concurrency) but ~0.1% of `prepare`, so
-  end-to-end rows are unchanged; see `docs/performance/worker-pool-probe.md`
-  §8 and CHANGELOG v0.7.7). **Phase 11 is closed:**
-  11A hostile persistent input → 11B write-latency reconciliation →
-  11C synchronization/oversubscription removal → 11D worker oracle →
-  11E fair worker pool (mount default) → 11F observer shard.
+- Latest completed phase: **12A-0 — the Hot-DAG read-cost oracle**
+  (`docs/performance/dag-read-cost.md`, sealed
+  `evidence/performance/dag-read-cost-probe-1787790816-ef6508b/`):
+  per-materialization `ReadCostSample` instrumentation + a hotness
+  tracker, and a controlled-DAG oracle (raw / exactref / base-inline /
+  base-object / diamond / seqdict at depths 0–4, cold/warm/hot reads)
+  that **REJECTED the terminalization daemon** on measured evidence —
+  depth predicts read latency only through object/decode width (~3.3× at
+  d4 for object-backed chains, ~1.35× for the search-natural inline
+  chains; fanout flat; rebase-at-depth-2 + `λ_depth` already price the
+  costly shape). The instrumentation stays as the 12B/12C measurement
+  surface. **Phase 11 is closed** (11A hostile input → 11B
+  reconciliation → 11C synchronization removal → 11D oracle → 11E fair
+  pool, mount default → 11F observer shard); the 11E/11F results are in
+  `docs/performance/worker-pool-probe.md` and CHANGELOG v0.7.4–0.7.7.
 - Current decision: the pool is the mount default
   (`available_parallelism()` workers; `--no-worker-pool` restores the 11C
-  semaphore as the fallback). The next research phases are 12A Hot-DAG
-  terminalization oracle, 12B durability generations / group commit, 12C
-  DSFB structural semiotics, and 12D grammar-addressed entropy (offline
+  semaphore as the fallback). The next research steps are 12B durability
+  generations / group commit over the existing MutationLog, 12C DSFB
+  structural semiotics, and 12D grammar-addressed entropy (offline
   oracle first).
 - Persistent format: explicit, versioned, incompat-feature-gated.
 - Correctness: crash courts + hostile-media court + fsck, byte-exact

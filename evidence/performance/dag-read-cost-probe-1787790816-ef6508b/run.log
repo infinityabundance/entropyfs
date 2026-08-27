@@ -1,0 +1,120 @@
+warning: variable does not need to be mutable
+    --> src/store/mod.rs:6076:29
+     |
+6076 |                         let mut cur = Store::inode_for_tx(tx, *child)?;
+     |                             ----^^^
+     |                             |
+     |                             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `prepared`
+   --> src/tests/perf_reconciled.rs:311:13
+    |
+311 |         let prepared = store
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_prepared`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: type `Composed` is more private than the item `workers::WorkerTask::EncodeChunk::composed`
+    --> src/store/workers.rs:384:9
+     |
+ 384 |         composed: super::Composed,
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^ field `workers::WorkerTask::EncodeChunk::composed` is reachable at visibility `pub`
+     |
+note: but type `Composed` is only usable at visibility `pub(crate)`
+    --> src/store/mod.rs:3141:1
+     |
+3141 | pub(crate) struct Composed {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: struct `NoProvider` is never constructed
+   --> src/tests/io_backend_parity.rs:171:24
+    |
+171 |                 struct NoProvider;
+    |                        ^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: missing documentation for a module
+    --> src/store/workers.rs:1036:1
+     |
+1036 | pub mod tests {
+     | ^^^^^^^^^^^^^
+     |
+note: the lint level is defined here
+    --> src/lib.rs:19:9
+     |
+  19 | #![warn(missing_docs)]
+     |         ^^^^^^^^^^^^
+
+warning: `entropyfs` (lib test) generated 5 warnings (run `cargo fix --lib -p entropyfs --tests` to apply 2 suggestions)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (target/release/deps/entropyfs-3e0e5f5d94f20cf9)
+
+running 1 test
+
+==== Phase-12A read-cost oracle ====
+family        cache  depth   p50_us   p95_us   p99_us  mean_us nodes  objs bytes_fet    io_us  dec_us samp_us       n
+raw            cold      0      9.8     10.8     10.8     10.2     1     1     65536      6.1     2.4     8.9       8
+raw            warm      0      6.1      6.3      6.3      6.2     1     1     65536      2.1     2.5     4.9       8
+raw             hot      0      5.6      5.9      5.9      5.6     1     1     65536      1.8     2.3     4.4       8
+exactref       cold      0     20.2     20.2     20.2     20.2     1     2     28447      1.0    17.6    18.9       1
+exactref       cold      1     20.9     22.9     22.9     22.3     2     2     28447      1.3    18.8    20.9       8
+exactref       warm      0     19.9     19.9     19.9     19.9     1     2     28447      0.9    17.4    18.8       1
+exactref       warm      1     20.6     20.7     20.7     20.6     2     2     28447      0.9    17.9    19.4       8
+exactref        hot      0     20.0     20.0     20.0     20.0     1     2     28447      0.9    17.5    18.8       1
+exactref        hot      1     20.7     21.1     21.1     20.8     2     2     28447      0.9    18.1    19.6       8
+base-inline    cold      1     28.1     30.4     30.5     28.1     2     3     28459      2.5    19.1    25.1      32
+base-inline    cold      2     30.8     32.4     34.7     31.1     3     4     28460      1.8    19.7    28.0      24
+base-inline    cold      3     34.9     40.7     40.7     36.9     4     5     28458      2.1    21.7    33.3      16
+base-inline    cold      4     39.4     41.5     41.5     40.0     5     6     28450      1.8    22.1    36.4       8
+base-inline    warm      1     26.0     26.7     27.1     26.1     2     3     28459      1.4    18.6    23.3      32
+base-inline    warm      2     29.8     30.5     30.9     29.8     3     4     28460      1.2    19.4    26.9      24
+base-inline    warm      3     33.9     34.4     34.4     33.8     4     5     28458      1.3    20.3    30.7      16
+base-inline    warm      4     38.1     38.5     38.5     38.2     5     6     28450      1.3    21.4    34.8       8
+base-inline     hot      1     25.7     26.4     26.4     25.8     2     3     28459      1.2    18.5    23.0      32
+base-inline     hot      2     29.5     30.4     30.6     29.7     3     4     28460      1.2    19.3    26.8      24
+base-inline     hot      3     33.8     34.3     34.3     33.7     4     5     28458      1.2    20.3    30.5      16
+base-inline     hot      4     37.9     38.9     38.9     38.2     5     6     28450      1.3    21.5    34.9       8
+base-object    cold      1    126.3    129.3    132.3    126.6     2     5     28612      3.2   116.0   123.0      32
+base-object    cold      2    225.6    228.6    228.8    225.9     3     8     28764      2.9   212.9   222.3      24
+base-object    cold      3    328.2    332.9    332.9    329.6     4    11     28911      3.9   311.1   325.5      16
+base-object    cold      4    429.1    432.8    432.8    429.8     5    14     29053      4.2   408.3   425.6       8
+base-object    warm      1    124.2    126.3    126.7    124.4     2     5     28612      1.8   115.7   121.2      32
+base-object    warm      2    224.9    227.2    228.7    225.2     3     8     28764      2.0   213.1   221.9      24
+base-object    warm      3    326.3    329.1    329.1    326.3     4    11     28911      2.3   310.7   322.6      16
+base-object    warm      4    426.5    428.3    428.3    427.1     5    14     29053      2.7   407.9   423.3       8
+base-object     hot      1    124.6    127.1    127.3    124.7     2     5     28612      1.9   115.8   121.5      32
+base-object     hot      2    225.2    227.6    228.6    225.7     3     8     28764      2.0   213.6   222.4      24
+base-object     hot      3    327.4    331.7    331.7    328.3     4    11     28911      2.5   312.2   324.6      16
+base-object     hot      4    428.9    430.4    430.4    429.2     5    14     29053      2.9   409.8   425.5       8
+diamond        cold      0     22.5     26.2     26.2     24.7     1     2     28456      2.3    18.0    20.8       8
+diamond        cold      1     24.9     28.9     29.8     25.8     2     3     28456      1.5    18.5    22.3      24
+diamond        cold      2     28.0     29.4     29.4     28.8     3     4     28456      1.5    19.5    25.2       8
+diamond        warm      0     21.7     21.8     21.8     21.7     1     2     28456      1.0    17.5    18.9       8
+diamond        warm      1     24.3     24.5     24.6     24.3     2     3     28456      1.1    18.2    21.5      24
+diamond        warm      2     27.3     27.5     27.5     27.3     3     4     28456      1.1    19.2    24.5       8
+diamond         hot      0     21.5     21.6     21.6     21.6     1     2     28456      1.0    17.4    18.8       8
+diamond         hot      1     24.2     24.8     25.0     24.4     2     3     28456      1.0    18.3    21.6      24
+diamond         hot      2     27.2     27.4     27.4     27.4     3     4     28456      1.1    19.3    24.5       8
+seqdict        cold      0     11.6     13.2     13.2     10.9     1     1     65536      5.9     2.3     8.6      12
+seqdict        cold      1     13.9     18.6     18.6     14.8     2     3     67102      4.0     6.9    13.1      12
+seqdict        warm      0      5.6      6.2      6.2      5.7     1     1     65536      1.8     2.2     4.3      12
+seqdict        warm      1     11.4     12.2     12.2     11.8     2     3     67102      2.1     6.3    10.3      12
+seqdict         hot      0      5.5      5.6      5.6      5.6     1     1     65536      1.7     2.1     4.2      12
+seqdict         hot      1     11.4     12.2     12.2     11.8     2     3     67102      2.1     6.3    10.3      12
+
+-- gate rows (p99 depth-4 / depth-1 within family) --
+base-inline  cold   p99 ratio d4/d1 = 1.41 (44.5 us / 31.5 us)
+base-inline  warm   p99 ratio d4/d1 = 0.88 (37.9 us / 43.3 us)
+base-inline  hot    p99 ratio d4/d1 = 1.45 (37.8 us / 26.1 us)
+base-object  cold   p99 ratio d4/d1 = 3.32 (432.1 us / 130.2 us)
+base-object  warm   p99 ratio d4/d1 = 3.38 (428.1 us / 126.5 us)
+base-object  hot    p99 ratio d4/d1 = 3.40 (428.0 us / 125.9 us)
+probe summary written to /mnt/1tb_kingston/entropyfs/evidence/performance/dag-read-cost-probe-1787790816-ef6508b/summary.tsv
+test tests::dag_read_cost_probe::dag_read_cost_probe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 428 filtered out; finished in 0.72s
+

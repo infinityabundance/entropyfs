@@ -12,6 +12,7 @@ pub mod inode;
 pub mod io;
 pub mod object;
 pub mod physical;
+pub mod readcost;
 pub mod recovery;
 pub mod root;
 pub mod segment;
@@ -301,6 +302,16 @@ pub struct Store {
     /// crash courts run against both and must produce identical
     /// store-directory bytes at every injection point.
     io: std::sync::Arc<dyn crate::store::io::IoBackend>,
+    /// Phase-12A read-cost samples (diagnostic, bounded ring; never
+    /// persisted, never an authority — `store/readcost.rs`).
+    readcost: std::sync::Mutex<crate::store::readcost::ReadCostRing>,
+    /// Phase-12A read-frequency hotness evidence (diagnostic,
+    /// non-persistent, exponentially decayed — `store/readcost.rs`).
+    hotness: std::sync::Mutex<crate::store::readcost::HotnessTracker>,
+    /// Phase-12A decoded-model cache event counters (lock-free; sampled
+    /// as a delta into each materialization's [`ReadCostSample`]).
+    model_cache_hits: std::sync::atomic::AtomicU64,
+    model_cache_misses: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for Store {
@@ -328,6 +339,12 @@ pub(crate) struct PreparedRead {
     offset: u64,
     end: u64,
     avail: usize,
+    /// Phase-12A: the materialization's read-cost sample, filled by the
+    /// prepare half (descriptor/DAG/fetch fields), completed and closed
+    /// into the ring by the decode half. Travels with the prepared state
+    /// so the two-phase read (guard-held prepare, guard-released decode)
+    /// completes one coherent sample.
+    read_cost: crate::store::readcost::ReadCostSample,
 }
 
 impl PreparedRead {
@@ -398,6 +415,10 @@ impl Store {
             epoch: std::sync::Mutex::new(crate::store::epoch::Epoch::default()),
             epoch_pending: std::sync::atomic::AtomicU64::new(0),
             io,
+            readcost: std::sync::Mutex::new(crate::store::readcost::ReadCostRing::default()),
+            hotness: std::sync::Mutex::new(crate::store::readcost::HotnessTracker::default()),
+            model_cache_hits: std::sync::atomic::AtomicU64::new(0),
+            model_cache_misses: std::sync::atomic::AtomicU64::new(0),
         };
         store.open_segment(0)?;
         // Create the root directory inode (ino 1) and commit the initial
@@ -479,6 +500,10 @@ impl Store {
             epoch: std::sync::Mutex::new(crate::store::epoch::Epoch::default()),
             epoch_pending: std::sync::atomic::AtomicU64::new(0),
             io,
+            readcost: std::sync::Mutex::new(crate::store::readcost::ReadCostRing::default()),
+            hotness: std::sync::Mutex::new(crate::store::readcost::HotnessTracker::default()),
+            model_cache_hits: std::sync::atomic::AtomicU64::new(0),
+            model_cache_misses: std::sync::atomic::AtomicU64::new(0),
         };
         // Phase-10D: replay any un-checkpointed mutation log tail left by
         // a process crash (the last checkpoint root is authoritative; the
@@ -688,6 +713,48 @@ impl Store {
     /// Observer statistics (for `status`).
     pub fn dsfb_stats(&self) -> crate::dsfb::observer::ObserverStats {
         self.dsfb.stats()
+    }
+
+    /// Phase-12A: snapshot of the bounded read-cost sample ring
+    /// (diagnostic; the oracle's measurement surface).
+    pub fn read_cost_samples(&self) -> Vec<crate::store::readcost::ReadCostSample> {
+        self.readcost.lock().expect("readcost poisoned").snapshot()
+    }
+
+    /// Phase-12A: reset the read-cost ring (per-run isolation in the
+    /// probe; the samples are advisory, so clearing is always safe).
+    pub fn clear_read_cost(&self) {
+        self.readcost.lock().expect("readcost poisoned").clear();
+    }
+
+    /// Phase-12A: current hotness evidence of a chunk id (0 = never read
+    /// in the decay window).
+    pub fn hotness_of(&self, id: &crate::core::extent::ChunkId) -> f64 {
+        self.hotness.lock().expect("hotness poisoned").hotness(id)
+    }
+
+    /// Phase-12A: tracked-chunk count of the hotness map (diagnostic).
+    pub fn hotness_len(&self) -> usize {
+        self.hotness.lock().expect("hotness poisoned").len()
+    }
+
+    /// Phase-12A: reset the hotness tracker (per-run isolation in the
+    /// probe; advisory state, clearing is always safe).
+    pub fn clear_hotness(&self) {
+        self.hotness.lock().expect("hotness poisoned").clear();
+    }
+
+    /// Phase-12A: decoded-model cache hits since the store opened
+    /// (diagnostic; the sample delta uses the same counters).
+    pub fn model_cache_hits(&self) -> u64 {
+        self.model_cache_hits
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Phase-12A: decoded-model cache misses since the store opened.
+    pub fn model_cache_misses(&self) -> u64 {
+        self.model_cache_misses
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Total candidate representations evaluated by foreground search
@@ -1570,8 +1637,16 @@ impl Store {
         // overlay or committed) is captured so the decode half can run
         // without the epoch guard.
         nested_descriptors: &mut std::collections::HashMap<ChunkId, Vec<u8>>,
+        // Phase-12A: the DAG shape counters for the read-cost sample —
+        // `max_path_depth` (deepest recursion level reached, the real
+        // chain length) and `max_fanout` (max nested children of any one
+        // node). Both are max-merges, so they are safe to share across
+        // the batch's extents.
+        max_path_depth: &mut u8,
+        max_fanout: &mut u32,
     ) -> Result<(), StoreError> {
         let limits = self.config.limits;
+        *max_path_depth = (*max_path_depth).max(depth);
         for oid in crate::store::transaction::descriptor_objects(desc, &limits) {
             if seen_objects.insert(oid) {
                 deps.push(oid);
@@ -1604,6 +1679,10 @@ impl Store {
             }
             _ => {}
         }
+        // Phase-12A fanout witness: the nested-children count of THIS
+        // node (a node with N references forces N descriptor resolutions
+        // at the next level — the DAG's local width).
+        *max_fanout = (*max_fanout).max(nested.len() as u32);
         for id in nested {
             if !seen_nested.insert(id) {
                 continue;
@@ -1623,6 +1702,8 @@ impl Store {
                         seen_objects,
                         seen_nested,
                         nested_descriptors,
+                        max_path_depth,
+                        max_fanout,
                     )?;
                 }
             }
@@ -1674,6 +1755,21 @@ impl Store {
         avail: usize,
     ) -> Result<PreparedRead, StoreError> {
         let limits = self.config.limits;
+        // Phase-12A: the read-cost sample for this materialization. The
+        // wall clock starts at the prepare entry (the fetch is the I/O
+        // term); the descriptor/DAG fields are filled from the walk below;
+        // the decode half completes CPU/latency/logical-bytes and closes
+        // the sample into the ring.
+        let t0 = std::time::Instant::now();
+        let mut read_cost = crate::store::readcost::ReadCostSample::default();
+        let mut max_path_depth: u8 = 0;
+        let mut max_fanout: u32 = 0;
+        let cache_hits0 = self
+            .model_cache_hits
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let cache_misses0 = self
+            .model_cache_misses
+            .load(std::sync::atomic::Ordering::Relaxed);
         // 1. Decode every descriptor and enumerate its dependencies.
         let mut starts: Vec<u64> = Vec::with_capacity(extents.len());
         let mut descs: Vec<Representation> = Vec::with_capacity(extents.len());
@@ -1695,33 +1791,77 @@ impl Store {
                     &mut seen_objects,
                     &mut seen_nested,
                     &mut descriptors,
+                    &mut max_path_depth,
+                    &mut max_fanout,
                 )?;
                 starts.push(*start);
                 descs.push(desc);
             }
             Ok::<(), StoreError>(())
         })?;
-        // 2. ONE batched fetch.
-        let objects: std::collections::HashMap<ChunkId, Vec<u8>> = {
+        // 2. ONE batched fetch (its wall is the sample's I/O term).
+        let (objects, io_wait_ns, bytes_fetched) = {
+            let t_fetch = std::time::Instant::now();
             let results = self
                 .perf
                 .time_request("read_prefetch", || self.fetch_objects_many(&deps));
+            let io_wait_ns = t_fetch.elapsed().as_nanos() as u64;
             let mut map = std::collections::HashMap::with_capacity(deps.len());
+            let mut fetched: u64 = 0;
             for (id, r) in deps.iter().zip(results) {
                 match r {
                     Ok(Some(b)) => {
+                        fetched = fetched.saturating_add(b.len() as u64);
                         map.insert(*id, b);
                     }
                     Ok(None) => {
                         if let Some(b) = ep.and_then(|e| e.staged_payloads.get(id)) {
+                            fetched = fetched.saturating_add(b.len() as u64);
                             map.insert(*id, b.clone());
                         }
                     }
                     Err(e) => return Err(e),
                 }
             }
-            map
+            (map, io_wait_ns, fetched)
         };
+        // Phase-12A: fill the sample. The family/depth fields describe
+        // the batch's first descriptor (the oracle's families are
+        // homogeneous; the reference-closure metrics are batch-aggregate).
+        read_cost.family = descs.first().map(|d| d.family()).unwrap_or("NONE");
+        read_cost.reference_depth = descs
+            .first()
+            .map(crate::core::cost::reference_depth)
+            .unwrap_or(0);
+        read_cost.max_path_depth = max_path_depth;
+        read_cost.dag_nodes = (descs.len() + seen_nested.len()) as u32;
+        read_cost.fanout = max_fanout;
+        read_cost.referenced_objects = deps.len() as u32;
+        read_cost.bytes_fetched = bytes_fetched;
+        read_cost.read_many_submissions = 1;
+        read_cost.io_wait_ns = io_wait_ns;
+        read_cost.read_latency_ns = t0.elapsed().as_nanos() as u64;
+        read_cost.logical_bytes = avail as u64;
+        // Hotness evidence: one touch per distinct referenced object
+        // (decayed; diagnostic — module doc).
+        {
+            let mut h = self.hotness.lock().expect("hotness poisoned");
+            for id in &deps {
+                h.touch(*id);
+            }
+        }
+        // Cache counters: the delta across THIS materialization (exact
+        // for sequential reads; the probe reads sequentially).
+        read_cost.cache_hits = self
+            .model_cache_hits
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .saturating_sub(cache_hits0)
+            .min(u32::MAX as u64) as u32;
+        read_cost.cache_misses = self
+            .model_cache_misses
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .saturating_sub(cache_misses0)
+            .min(u32::MAX as u64) as u32;
         Ok(PreparedRead {
             starts,
             descs,
@@ -1730,6 +1870,7 @@ impl Store {
             offset,
             end,
             avail,
+            read_cost,
         })
     }
 
@@ -1738,6 +1879,12 @@ impl Store {
     /// reads inline; the prefetched map makes decode pure CPU). Touches NO
     /// epoch state — safe to run without the epoch guard. `pub(crate)` for
     /// the FUSE two-phase read.
+    ///
+    /// Phase-12A: the wrapper that completes the [`PreparedRead`]'s
+    /// read-cost sample on EVERY exit path (success or error) and closes
+    /// it into the bounded ring — the decode wall (thread CPU where the
+    /// kernel provides it) and the materialization's total latency are
+    /// only measurable here, after the actual decode.
     pub(crate) fn materialize_decode(&self, prepared: PreparedRead) -> Result<Vec<u8>, StoreError> {
         let PreparedRead {
             starts,
@@ -1747,7 +1894,37 @@ impl Store {
             offset,
             end,
             avail,
+            mut read_cost,
         } = prepared;
+        let t0 = std::time::Instant::now();
+        let cpu = crate::store::readcost::CpuClock::start();
+        let result = self.decode_prepared(starts, descs, objects, descriptors, offset, end, avail);
+        // Finalize the sample (diagnostic; pushed even on decode error so
+        // failed attempts are visible in the oracle's accounting).
+        read_cost.decode_cpu_ns = cpu.cpu_ns();
+        read_cost.read_latency_ns = read_cost
+            .read_latency_ns
+            .saturating_add(t0.elapsed().as_nanos() as u64);
+        read_cost.logical_bytes = avail as u64;
+        self.readcost
+            .lock()
+            .expect("readcost poisoned")
+            .push(read_cost);
+        result
+    }
+
+    /// The decode body (see [`Store::materialize_decode`] for the
+    /// Phase-12A sample wrapper).
+    fn decode_prepared(
+        &self,
+        starts: Vec<u64>,
+        descs: Vec<Representation>,
+        objects: std::collections::HashMap<ChunkId, Vec<u8>>,
+        descriptors: std::collections::HashMap<ChunkId, Vec<u8>>,
+        offset: u64,
+        end: u64,
+        avail: usize,
+    ) -> Result<Vec<u8>, StoreError> {
         let limits = self.config.limits;
         // The decode context has NO epoch reference: the prepared maps
         // carry every object and every nested descriptor the closure
@@ -4301,7 +4478,9 @@ impl DecoderContext for Store {
         out_len: u64,
     ) -> Result<Vec<u8>, MaterializeError> {
         // The model cache memoizes decoded models (pure memo of immutable
-        // content-addressed bytes; performance only).
+        // content-addressed bytes; performance only). Phase-12A: the
+        // hit/miss counters feed each materialization's read-cost sample
+        // (lock-free atomics, sampled as a delta by the prepare half).
         let model_id = ChunkId::of(model);
         if let Some(cached) = self
             .model_cache
@@ -4309,11 +4488,15 @@ impl DecoderContext for Store {
             .ok()
             .and_then(|mut c| c.get(&model_id))
         {
+            self.model_cache_hits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if cached.scale_bits == scale_bits && cached.codec == codec {
                 return crate::rans::residual::decode_stream(&cached, encoded, out_len)
                     .map_err(|e| MaterializeError::RansDecode(e.to_string()));
             }
         }
+        self.model_cache_misses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let parsed = crate::rans::metadata::decode_model(model, self.config.limits.max_model_bytes)
             .map_err(|e| MaterializeError::RansDecode(e.to_string()))?;
         if parsed.scale_bits != scale_bits || parsed.codec != codec {
