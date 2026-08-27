@@ -1,0 +1,8 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (target/release/deps/entropyfs-e1de5a4be9320971)
+
+running 1 test
+test tests::worker_pool_probe::pool_probe_gates ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 467 filtered out; finished in 15.42s
+

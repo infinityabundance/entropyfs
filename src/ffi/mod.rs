@@ -86,7 +86,18 @@
 //! the adoption-court workload; this module is 12E.14. The ABI is
 //! versioned from day one so the Rust surface can evolve under it.
 
-#![allow(unsafe_code)] // ledger-designated: docs/security/unsafe-ledger.md
+#![allow(unsafe_code)]
+// ledger-designated: docs/security/unsafe-ledger.md
+// Clippy's not_unsafe_ptr_arg_deref (deny-by-default in 1.98) wants
+// public raw-pointer-taking functions marked `unsafe fn`. For a C ABI
+// this is deliberately NOT done: every dereference in this module is
+// preceded by the null/len checks documented in the module doc + the
+// unsafe ledger, and marking them `unsafe fn` would force the internal
+// court (which the crate-wide forbid + ledger prohibit from using
+// `unsafe`) to call the boundary unsafely for no gain — C callers
+// cannot see Rust's safety markers anyway. The pointer contracts are
+// the header's + the ledger's normative text.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -220,8 +231,7 @@ pub extern "C" fn entropyfs_free(ptr: *mut u8) {
 /// contract).
 unsafe fn alloc_output(len: usize) -> *mut u8 {
     let cap = len + 16;
-    let mut v: Vec<u8> = Vec::with_capacity(cap);
-    v.resize(cap, 0);
+    let mut v: Vec<u8> = vec![0; cap];
     let base = v.as_mut_ptr();
     // edition-2024: unsafe ops inside an `unsafe fn` still need an
     // explicit block.

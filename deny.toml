@@ -1,0 +1,42 @@
+# EntropyFS cargo-deny policy (Phase 12E.19 CI matrix lane).
+#
+# PURPOSE: the dependency-licensing and advisory gate. The audit lane
+# (cargo audit) and this lane run the same advisory DB with the same
+# documented exceptions — a NEW exception requires changing BOTH files
+# deliberately, never silently.
+#
+# The two unmaintained advisories below are transitive-only (bitmaps via
+# an unused rANS tooling path, instant via time 0.3.x):
+#   RUSTSEC-2026-0247  bitmaps is unmaintained (transitive, no unsafe use here)
+#   RUSTSEC-2024-0384  instant is unmaintained (transitive via time 0.3)
+# They are recorded here exactly as the audit lane records them; when a
+# maintained replacement lands upstream, remove the ignore entries.
+
+[advisories]
+yanked = "deny"
+ignore = [
+    "RUSTSEC-2026-0247",
+    "RUSTSEC-2024-0384",
+]
+
+[licenses]
+# The permissive license set actually present in the dependency tree
+# (verified by the lane); anything else FAILS the lane so extending this
+# list is a deliberate act, not an accident.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "MPL-2.0",
+    "Unlicense",
+]
+
+[bans]
+# The tree pins most crates; allow duplicate majors to surface as
+# warnings (the audit of the lockfile remains the authority).
+multiple-versions = "warn"

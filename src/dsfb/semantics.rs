@@ -169,8 +169,10 @@ impl SemanticContext {
     /// class); this derives the extension class and the basename shape
     /// from `name` (bounded: at most the first 256 name bytes are read).
     pub fn from_name(name: &[u8], parent_class: u8) -> Self {
-        let mut ctx = SemanticContext::default();
-        ctx.parent_class = parent_class;
+        let mut ctx = SemanticContext {
+            parent_class,
+            ..SemanticContext::default()
+        };
         let name = &name[..name.len().min(256)];
         // Extension: the suffix after the last '.', if any, and the name
         // is not a dotfile.
@@ -224,7 +226,7 @@ impl SemanticContext {
         let mut printable = 0u32;
         let mut counted = 0u32;
         let mut distinct = [false; 256];
-        let mut step = (sample.len() / 2048).max(1);
+        let step = (sample.len() / 2048).max(1);
         let mut i = 0usize;
         while i < sample.len() {
             let b = sample[i];

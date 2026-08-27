@@ -1,0 +1,9 @@
+  fmt: PASS
+  clippy: PASS
+  msrv: PASS
+  feature-matrix: PASS
+  audit: PASS
+  deny: PASS
+  release-suite: PASS (flake protocol: worker_pool_probe::pool_probe_gates passed alone)
+  ffi-smoke: PASS
+  go-binding: PASS

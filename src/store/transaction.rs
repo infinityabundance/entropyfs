@@ -557,7 +557,7 @@ enum TreeKind {
 /// streams/bases-as-objects). The chunk-index and extent-tree walks use
 /// this to keep the records those objects are staged under.
 fn descriptor_object_ids(bytes: &[u8], limits: &crate::core::limits::Limits) -> Vec<ChunkId> {
-    let Ok(desc) = crate::format::descriptor::decode(bytes, &limits) else {
+    let Ok(desc) = crate::format::descriptor::decode(bytes, limits) else {
         return Vec::new();
     };
     descriptor_objects(&desc, limits)

@@ -110,7 +110,7 @@ fn corpus() -> Vec<(&'static str, Vec<u8>, Vec<u8>)> {
         out.push(("blob", v1, v2));
     }
     // Zeros (ZERO family).
-    for i in 0..4u64 {
+    for _i in 0..4u64 {
         let v1 = vec![0u8; CHUNK];
         let v2 = vec![0u8; CHUNK];
         out.push(("zero", v1, v2));
@@ -123,7 +123,7 @@ fn corpus() -> Vec<(&'static str, Vec<u8>, Vec<u8>)> {
         let v2 = noise(0x600 + i);
         out.push(("deceive-src", v1, v2)); // noise named *.rs (below)
     }
-    for i in 0..2u64 {
+    for _i in 0..2u64 {
         let v1 = vec![0u8; CHUNK];
         let v2 = vec![0u8; CHUNK];
         out.push(("deceive-bin", v1, v2)); // zeros named *.bin
@@ -187,6 +187,9 @@ fn semantic_for(name: &[u8], bytes: &[u8]) -> SemanticContext {
     ctx
 }
 
+/// Nearest-rank percentile over a sorted f64 sample (kept for the probe
+/// summary rows; the live lanes use the store's own percentile rows).
+#[allow(dead_code)]
 fn percentile(sorted: &[f64], q: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
@@ -197,10 +200,16 @@ fn percentile(sorted: &[f64], q: f64) -> f64 {
 struct ModeResult {
     mode: &'static str,
     search_cpu_ms: f64,
+    /// Probe accounting kept for the printed rows; the settled mode rows
+    /// read `win_rank` and `raw_fallback_pct` (the rest are the probe's
+    /// recorded context).
+    #[allow(dead_code)]
     candidates: u64,
+    #[allow(dead_code)]
     chunks: u64,
     candidates_per_chunk: f64,
     win_rank: f64,
+    #[allow(dead_code)]
     raw_wins: u64,
     raw_fallback_pct: f64,
     logical_bytes: u64,
@@ -236,8 +245,7 @@ fn run_mode(mode: SemanticMode, corpus: &[(&'static str, Vec<u8>, Vec<u8>)]) -> 
     }
     let mut names: Vec<(String, Vec<u8>)> = Vec::new();
     let mut inos: Vec<u64> = Vec::new();
-    let mut idx = 0usize;
-    for (class, v1, _v2) in corpus.iter() {
+    for (idx, (class, v1, _v2)) in corpus.iter().enumerate() {
         let name = match *class {
             "src" => format!("module{idx}.rs"),
             "cfg" => format!("svc{idx}.toml"),
@@ -248,11 +256,10 @@ fn run_mode(mode: SemanticMode, corpus: &[(&'static str, Vec<u8>, Vec<u8>)]) -> 
             _ => format!("evil{idx}.bin"),
         };
         names.push((format!("{class}/{name}"), v1.clone()));
-        idx += 1;
     }
     // Pass 1: write v1 (the prior learns each class's winner).
     let t0 = Instant::now();
-    for (i, (path, v1)) in names.iter().enumerate() {
+    for (path, v1) in names.iter() {
         let (d, n) = path.rsplit_once('/').unwrap();
         let ino = create_file(&store, dirs[d], n);
         let sem = semantic_for(n.as_bytes(), v1);
@@ -318,7 +325,7 @@ fn run_mode(mode: SemanticMode, corpus: &[(&'static str, Vec<u8>, Vec<u8>)]) -> 
         logical_bytes: logical,
         reachable_bytes: reachable,
         density: logical as f64 / reachable.max(1) as f64,
-        write_wall_ms: write_wall_ms,
+        write_wall_ms,
         byte_exact,
     }
 }

@@ -73,8 +73,8 @@
 //! where a mutation becomes user-visible, so it must never ack an
 //! operation the store has not made process-crash-durable (epoch append
 //! + page-cache flush; for `fsync`, the full barrier). `Drop` (unmount)
-//! checkpoints + barriers so a clean unmount never leaves acknowledged
-//! mutations only in the mutation log.
+//!   checkpoints + barriers so a clean unmount never leaves
+//!   acknowledged mutations only in the mutation log.
 //!
 //! # CORRECTNESS INVARIANTS
 //!
@@ -581,9 +581,9 @@ impl Drop for EntropyFs {
         if let Some(path) = &self.stats_file {
             let mut out = String::new();
             out.push_str(&self.stats.render());
-            out.push_str("\n");
+            out.push('\n');
             out.push_str(&self.store.perf().render());
-            out.push_str("\n");
+            out.push('\n');
             out.push_str(&self.store.perf().render_reconciled());
             let _ = std::fs::write(path, out);
         }

@@ -74,7 +74,7 @@ fn extent_family(store: &Store, ino: u64, offset: u64, len: u64) -> (String, Rep
     )
     .unwrap()
     .expect("extent covers offset");
-    let desc = crate::format::descriptor::decode(&bytes, &limits).unwrap();
+    let desc = crate::format::descriptor::decode(&bytes, limits).unwrap();
     assert_eq!(
         desc.len(),
         len,

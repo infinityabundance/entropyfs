@@ -72,11 +72,7 @@ fn canonical_snapshot(dir: &Path) -> BTreeMap<String, Vec<u8>> {
                 .to_string_lossy()
                 .replace('\\', "/");
             let bytes = std::fs::read(&path).expect("read store file");
-            if path.extension().and_then(|e| e.to_str()) == Some("seg") {
-                segments.insert(rel, bytes);
-            } else {
-                segments.insert(rel, bytes);
-            }
+            segments.insert(rel, bytes);
         }
     }
     let mut canon = Canonicalizer::new(segments.values());
@@ -168,6 +164,9 @@ impl Canonicalizer {
             }
             RecordTag::BtreeNode => {
                 use crate::store::index::{Node, ObjectProvider};
+                /// A provider that never provides (the negative control for the
+                /// missing-object path).
+                #[allow(dead_code)] // constructed only through the type-param machinery below
                 struct NoProvider;
                 impl ObjectProvider for NoProvider {
                     fn get(

@@ -75,14 +75,20 @@ pub fn open(dir: &std::path::Path, e: &StoreError) -> String {
 
 /// Classify a transport-build failure (mkfs/mount with an io backend).
 pub fn transport(kind: crate::store::io::IoBackendKind, e: &crate::store::StoreError) -> String {
-    match (kind, e) {
-        (crate::store::io::IoBackendKind::Uring, StoreError::Io(m)) => format!(
-            "io_uring transport unavailable: {m}; the kernel or container runtime \
-             blocks io_uring_create — use `--io-backend sync` (the reference \
-             path; the on-disk format is identical)"
-        ),
-        _ => e.to_string(),
+    // The `Uring` variant exists only with the `uring` feature (12E.2);
+    // the arm must be cfg-gated or the base (no-default-features) build
+    // fails to compile (caught by the 12E.19 feature-matrix lane).
+    #[cfg(feature = "uring")]
+    if kind == crate::store::io::IoBackendKind::Uring {
+        if let StoreError::Io(m) = e {
+            return format!(
+                "io_uring transport unavailable: {m}; the kernel or container runtime \
+                 blocks io_uring_create — use `--io-backend sync` (the reference \
+                 path; the on-disk format is identical)"
+            );
+        }
     }
+    e.to_string()
 }
 
 /// Classify a FUSE mount failure: /dev/fuse presence and the mount(2)

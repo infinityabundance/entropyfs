@@ -173,13 +173,13 @@ impl SyncIo {
 /// Open a segment/superblock file read-write, creating it when absent
 /// (the pre-10F `SegmentWriter::open` / `write_slot` file mode).
 fn open_rw(path: &Path) -> Result<File, StoreError> {
-    Ok(OpenOptions::new()
+    OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
         .open(path)
-        .map_err(|e| StoreError::Io(format!("open {}: {e}", path.display())))?)
+        .map_err(|e| StoreError::Io(format!("open {}: {e}", path.display())))
 }
 
 /// Write the full buffer at an absolute offset (pwrite; loops on short

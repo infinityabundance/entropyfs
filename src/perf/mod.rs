@@ -346,7 +346,7 @@ impl Drop for RequestGuard<'_> {
         let mut m = self.timings.requests.lock().expect("requests poisoned");
         let acc = m.remove(&id).expect("request envelope must exist");
         let mut phases: Vec<(&'static str, u64)> = acc.phases.into_iter().collect();
-        phases.sort_by(|a, b| b.1.cmp(&a.1));
+        phases.sort_by_key(|&(_, ns)| std::cmp::Reverse(ns));
         let total_ns = acc.t0.elapsed().as_nanos() as u64;
         let sum: u64 = phases.iter().map(|(_, ns)| *ns).sum();
         drop(m);

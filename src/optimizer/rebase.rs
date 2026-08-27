@@ -179,7 +179,7 @@ pub fn chain_depth(store: &Store, desc: &Representation) -> u8 {
             let Some(desc_bytes) = store.chunk_descriptor(&cur).ok().flatten() else {
                 continue;
             };
-            let Ok(next_desc) = crate::format::descriptor::decode(&desc_bytes, &limits) else {
+            let Ok(next_desc) = crate::format::descriptor::decode(&desc_bytes, limits) else {
                 continue;
             };
             let mut nexts: Vec<ChunkId> = Vec::new();

@@ -118,7 +118,7 @@ fn extents(store: &Store, ino: u64) -> Vec<(u64, crate::core::representation::Re
         .unwrap()
         .into_iter()
         .map(|(start, bytes)| {
-            let d = crate::format::descriptor::decode(&bytes, &limits).unwrap();
+            let d = crate::format::descriptor::decode(&bytes, limits).unwrap();
             (start, d)
         })
         .collect()

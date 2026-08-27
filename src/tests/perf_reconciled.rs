@@ -95,7 +95,6 @@ fn sweep_threads(
         for w in 0..threads {
             let store = Arc::clone(store);
             let data = &data;
-            let files = files;
             s.spawn(move || {
                 let mut i = w;
                 while i < files.len() {
@@ -308,7 +307,7 @@ fn epoch_read_window_excludes_adjacent_pending_extent() {
     // window's end is outside the window).
     {
         let ep = store.epoch();
-        let prepared = store
+        let _prepared = store
             .read_file_epoch_prepare(&ep, ino, 0, 65536)
             .unwrap()
             .unwrap();

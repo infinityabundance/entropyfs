@@ -1035,8 +1035,8 @@ fn bundle_model_bytes(b: &ModelBundle) -> u64 {
 
 /// The bundle's dedup key (encoded model bytes in type order).
 fn bundle_key(b: &ModelBundle) -> Vec<u8> {
-    b.iter()
-        .flat_map(|(_, m)| crate::rans::metadata::encode_model(m))
+    b.values()
+        .flat_map(crate::rans::metadata::encode_model)
         .collect()
 }
 
@@ -1049,7 +1049,7 @@ fn collect_model_member(
     limits: &crate::core::limits::Limits,
 ) -> Result<Option<ModelMember>, StoreError> {
     use crate::core::representation::Representation;
-    let desc = match crate::format::descriptor::decode(&desc_bytes, &limits) {
+    let desc = match crate::format::descriptor::decode(&desc_bytes, limits) {
         Ok(d) => d,
         Err(_) => return Ok(None),
     };
@@ -1399,7 +1399,7 @@ pub fn model_bundle_pass(
     }
     // 2-5. Per directory: aggregate models, candidates, greedy
     //      model-cost-aware selection, group gate, rewrite.
-    for (_dir, members) in &by_dir {
+    for members in by_dir.values() {
         if members.len() < 2 {
             continue;
         }

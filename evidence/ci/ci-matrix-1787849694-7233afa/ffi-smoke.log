@@ -1,0 +1,40 @@
+== phase-12E.14 C ABI smoke ==
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.04s
+-- exported symbols --
+entropyfs_abi_version
+entropyfs_blob_get
+entropyfs_blob_put
+entropyfs_blob_read_range
+entropyfs_compact
+entropyfs_contains
+entropyfs_engine_close
+entropyfs_engine_open
+entropyfs_free
+entropyfs_last_error
+entropyfs_metrics_json
+entropyfs_sync
+-- compile --
+-- run --
+== entropyfs C ABI smoke ==
+  ok: abi version matches header
+  ok: create
+  ok: put a
+  ok: put b
+  ok: put c
+  ok: duplicate put dedups to the same id
+  ok: get a byte-exact
+  ok: get b byte-exact
+  ok: range read byte-exact
+  ok: contains true for stored id
+  ok: contains false for unknown id
+  ok: sync
+  ok: compact reports physical bytes
+  ok: metrics JSON allocated
+  ok: metrics JSON carries the versioned schema
+  ok: missing blob -> EFS_NOT_FOUND
+  ok: last_error carries detail
+  ok: close
+  ok: reopen existing store
+  ok: blob survives close/reopen byte-exact
+  ok: close again
+== C ABI smoke PASS ==

@@ -349,7 +349,7 @@ const FOREGROUND_BASE_TRUST: f64 = 0.5;
 /// 9. DSFB-guided budgeted channels: the base/universe channels in plan
 ///    order, each gated by trust/family-set/plan-budget.
 /// 10. §32 validation + cheapest-valid pick (marginal bytes foreground,
-///    full persisted bytes background).
+///     full persisted bytes background).
 /// 11. DSFB observation (performance-only; never affects bytes).
 ///
 /// # Invariants
@@ -1021,7 +1021,7 @@ fn dedup_candidates(
     let Some(desc_bytes) = desc_bytes else {
         return Ok(Vec::new());
     };
-    let desc = match crate::format::descriptor::decode(&desc_bytes, &limits) {
+    let desc = match crate::format::descriptor::decode(&desc_bytes, limits) {
         Ok(d) => d,
         Err(_) => return Ok(Vec::new()), // unreadable index entry: miss
     };

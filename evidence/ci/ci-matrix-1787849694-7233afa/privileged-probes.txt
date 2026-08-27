@@ -1,0 +1,10 @@
+io_uring:
+storage transport (Phase 10F): SyncIo (reference path, default) | UringIo (io_uring)
+safety ledger: 1 confined file (platform/io_uring.rs; see docs/security/unsafe-ledger.md)
+kernel fuse io_uring: disabled (informational)
+io_uring transport: available
+io_uring ops: READ/WRITE (kernel 5.6+), FSYNC (5.1+), UNLINKAT (5.11+)
+fuse:
+  /dev/fuse present
+kernel:
+7.2.0-1-cachyos

@@ -231,7 +231,7 @@ fn gc_preserves_live_sequence_rans_objects() {
     )
     .unwrap()
     .unwrap();
-    let desc = crate::format::descriptor::decode(&desc_bytes, &limits).unwrap();
+    let desc = crate::format::descriptor::decode(&desc_bytes, limits).unwrap();
     assert!(
         matches!(
             desc,
@@ -277,7 +277,7 @@ fn gc_unreachable_bytes_counts_sequence_rans() {
     )
     .unwrap()
     .unwrap();
-    let desc = crate::format::descriptor::decode(&desc_bytes, &limits).unwrap();
+    let desc = crate::format::descriptor::decode(&desc_bytes, limits).unwrap();
     match &desc {
         crate::core::representation::Representation::SequenceRans { model, enc_obj, .. } => {
             let live = crate::store::gc::mark_live(&store).unwrap();

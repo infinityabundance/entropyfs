@@ -210,6 +210,20 @@ struct CommitState {
     features_in_use: u64,
 }
 
+/// One worker's decode-batch result (the parallel materialization path):
+/// `(start_offset, chunk_bytes)` or a decode error. Aliased for the
+/// clippy type-complexity gate; the read path pushes one per worker.
+type BatchRun = Result<Vec<(u64, Vec<u8>)>, StoreError>;
+
+/// The epoch-write result tuple (the read-prefill path): the pre-write
+/// size, the in-batch overlay, and the prepared reads. Aliased for the
+/// clippy type-complexity gate.
+type EpochWriteResult = (
+    u64,
+    std::collections::BTreeMap<u64, Vec<u8>>,
+    Vec<(u64, Option<PreparedRead>)>,
+);
+
 /// Per-inode mutation locks (sharded mutexes keyed by inode number).
 ///
 /// Lock order: `inode_lock → commit_lock`. Readers never take either.
@@ -1972,6 +1986,7 @@ impl Store {
     /// through the chunk index, depth-capped. The read path then fetches
     /// them in ONE backend call (one submission queue for `UringIo`) and
     /// decodes from the prefetched map.
+    #[allow(clippy::too_many_arguments)] // internal read-path API; the args are the read context
     fn collect_read_deps(
         &self,
         ep: Option<&crate::store::epoch::Epoch>,
@@ -2262,6 +2277,8 @@ impl Store {
 
     /// The decode body (see [`Store::materialize_decode`] for the
     /// Phase-12A sample wrapper).
+    /// Decode one prepared batch item into its window slice.
+    #[allow(clippy::too_many_arguments)] // internal decode path; the args are the decode context
     fn decode_prepared(
         &self,
         starts: Vec<u64>,
@@ -2317,7 +2334,6 @@ impl Store {
                     .enumerate()
                     .map(
                         |(i, desc)| crate::store::workers::WorkerTask::DecodeExtent {
-                            request_id,
                             ordinal: i,
                             store: std::sync::Arc::clone(&store_arc),
                             start: starts[i],
@@ -2325,9 +2341,6 @@ impl Store {
                             objects: std::sync::Arc::clone(&objects),
                             descriptors: std::sync::Arc::clone(&descriptors),
                             limits,
-                            offset,
-                            end,
-                            avail,
                         },
                     )
                     .collect();
@@ -2371,7 +2384,7 @@ impl Store {
                 return Ok(out);
             }
             let n = descs.len();
-            let mut runs: Vec<Result<Vec<(u64, Vec<u8>)>, StoreError>> = Vec::new();
+            let mut runs: Vec<BatchRun> = Vec::new();
             // Phase-11D oracle: the decode scope wall (Gate B) and the
             // workers' true thread-CPU time (Gate C).
             let t_s = std::time::Instant::now();
@@ -2389,7 +2402,6 @@ impl Store {
                     let starts = &starts;
                     let ctx = &ctx;
                     let useful = std::sync::Arc::clone(&useful);
-                    let perf = perf;
                     handles.push(s.spawn(move || {
                         let t0 = crate::store::workers::WorkerClock::start();
                         let mut mine = Vec::with_capacity(hi - lo);
@@ -3696,8 +3708,9 @@ impl Store {
     /// overrides the committed inode size with the ACTIVE EPOCH's size:
     /// the epoch's writes/truncates are uncommitted, and clipping chunks
     /// to the committed size would corrupt a file the epoch has already
-    /// grown. `None` for the transactional paths. Returns the updates plus
+    /// `None` for the transactional paths. Returns the updates plus
     /// the file size after this write.
+    #[allow(clippy::too_many_arguments)] // internal write path; the args are the write context
     fn prepare_write(
         &self,
         ino: u64,
@@ -3950,7 +3963,6 @@ impl Store {
                 .enumerate()
                 .map(
                     |(ordinal, c)| crate::store::workers::WorkerTask::EncodeChunk {
-                        request_id,
                         ordinal,
                         store: std::sync::Arc::clone(&store_arc),
                         ino,
@@ -5499,7 +5511,7 @@ impl Store {
             if rebuilt {
                 continue;
             }
-            if let Some(cur) = Store::inode_for_tx(&tx, *ino).ok() {
+            if let Ok(cur) = Store::inode_for_tx(&tx, *ino) {
                 match (&mut fin.data, &cur.data) {
                     (
                         InodeData::File { extent_root },
@@ -6130,6 +6142,7 @@ impl Store {
     /// The context is per-WRITE (the same for every chunk of the write)
     /// and strictly advisory — it can order the search, never change
     /// bytes.
+    #[allow(clippy::too_many_arguments)] // public store API; the args are the write context
     pub fn epoch_write_semantic(
         &self,
         ino: u64,
@@ -6170,11 +6183,7 @@ impl Store {
         // the read-leaf rows (`read_scan`/`read_deps`/`read_prefetch`/
         // `read_decode`) — the prefill IS a read, so wrapping it again
         // would double-count.
-        let (old_size, mut overlay, prepared): (
-            u64,
-            std::collections::BTreeMap<u64, Vec<u8>>,
-            Vec<(u64, Option<PreparedRead>)>,
-        ) = {
+        let (old_size, mut overlay, prepared): EpochWriteResult = {
             let ep = self.perf.time_request("epoch_lock_wait", || self.epoch());
             let inode = self
                 .get_inode_epoch(&ep, ino)?
@@ -6464,7 +6473,7 @@ impl Store {
                         // so its committed root must be preserved or the
                         // linked file's extents are orphaned (silent zero
                         // reads after reopen).
-                        let mut cur = Store::inode_for_tx(tx, *child)?;
+                        let cur = Store::inode_for_tx(tx, *child)?;
                         let mut staged = child_inode;
                         staged.data = cur.data;
                         Store::put_inode_in_tx(tx, *child, &staged)?;
@@ -6587,7 +6596,7 @@ impl Store {
                         // Preserve the current data root; apply the staged
                         // metadata (nlink/times/size) only — the same rule
                         // the Setattr and Unlink arms already enforce.
-                        let mut cur = Store::inode_for_tx(tx, *src_ino)?;
+                        let cur = Store::inode_for_tx(tx, *src_ino)?;
                         let mut staged = child;
                         staged.data = cur.data;
                         Store::put_inode_in_tx(tx, *src_ino, &staged)?;

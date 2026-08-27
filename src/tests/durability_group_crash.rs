@@ -44,6 +44,11 @@
 
 #![forbid(unsafe_code)]
 
+/// (ino, offset, bytes) of every fsync that returned Ok — the brief's
+/// "returned -> recoverable" oracle ledger, shared across the writer
+/// threads. Aliased for the clippy type-complexity gate.
+type DurableLedger = std::sync::Arc<std::sync::Mutex<Vec<(u64, u64, Vec<u8>)>>>;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -96,7 +101,7 @@ fn run_one(point: CrashPoint) {
     // "returned -> recoverable" oracle. Each write goes to a UNIQUE offset
     // (cycle * chunk), so recorded writes are never superseded by a later
     // write at the same position and the post-recovery read is exact.
-    let durable: Arc<Mutex<Vec<(u64, u64, Vec<u8>)>>> = Arc::new(Mutex::new(Vec::new()));
+    let durable: DurableLedger = Arc::new(Mutex::new(Vec::new()));
     let mut inos = Vec::new();
     for w in 0..8u64 {
         inos.push(create_file(&store, &format!("f{w}")));

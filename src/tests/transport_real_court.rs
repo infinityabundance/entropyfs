@@ -164,7 +164,7 @@ fn write_phase(store: &Store, ino: u64, mib: u64, fsync_every: u64) -> (f64, f64
                 .expect("write batch");
             batch.clear();
             flushes += 1;
-            if fsync_every > 0 && flushes % fsync_every == 0 {
+            if fsync_every > 0 && flushes.is_multiple_of(fsync_every) {
                 store
                     .durability_barrier(&CrashHooks::none())
                     .expect("barrier");
@@ -248,7 +248,7 @@ fn read_phase_random(store: &Store, ino: u64, mib: u64) -> (f64, f64, f64, f64, 
 
 /// Sort and return (p50, p95, p99) µs (nearest-rank, matching the store
 /// perf-table convention in `src/perf`).
-fn percentiles(samples: &mut Vec<u64>) -> (f64, f64, f64) {
+fn percentiles(samples: &mut [u64]) -> (f64, f64, f64) {
     if samples.is_empty() {
         return (0.0, 0.0, 0.0);
     }

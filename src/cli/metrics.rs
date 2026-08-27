@@ -116,7 +116,7 @@ pub fn run(args: &MetricsArgs) -> Result<(), String> {
     let store = Store::open(&args.store, &config).map_err(|e| e.to_string())?;
     let metrics: EngineMetrics = collect_engine_metrics(&store).map_err(|e: EngineError| {
         // The collector only errors on store-internal failures.
-        format!("{}", e.message)
+        e.message.to_string()
     })?;
     if args.json {
         println!("{}", metrics.to_json());

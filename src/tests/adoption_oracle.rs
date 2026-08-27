@@ -303,8 +303,8 @@ struct WlRows {
     raw_physical: u64,
 }
 
-/// Percentiles (nearest-rank) over a µs sample vector.
-fn pct(samples: &mut Vec<u64>, q: f64) -> f64 {
+/// Percentiles (nearest-rank) over a µs sample slice.
+fn pct(samples: &mut [u64], q: f64) -> f64 {
     if samples.is_empty() {
         return 0.0;
     }
@@ -346,9 +346,7 @@ fn run_workload(tmp_root: &std::path::Path, wl: &Workload) -> WlRows {
         let id = engine.put_blob(b).expect("put");
         // First-seen only: a duplicate put returns the same id and must
         // NOT re-count the bytes (dedup attribution is logical-vs-unique).
-        if !unique_map.contains_key(&id) {
-            unique_map.insert(id, b.len() as u64);
-        }
+        unique_map.entry(id).or_insert_with(|| b.len() as u64);
     }
     rows.put_wall_s = t0.elapsed().as_secs_f64();
     rows.put_cpu_s = thread_cpu_seconds() - cpu0;

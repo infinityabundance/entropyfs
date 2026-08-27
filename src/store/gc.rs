@@ -977,7 +977,7 @@ fn collect_impl(
     let new_seq = store.current_segment_seq() + 1;
     let mut writer = SegmentWriter::open(store.io(), new_seq)?;
     let mut new_locations: Vec<(ChunkId, Location)> = Vec::new();
-    let rebuilt = rebuild_chunk_index(store, &mut writer, new_seq, &mark, &mut new_locations)?;
+    let rebuilt = rebuild_chunk_index(store, &mut writer, new_seq, mark, &mut new_locations)?;
 
     // ---------------------------------------------------------------------
     // Stage 2: Estimate the reclaimable bytes (index view).

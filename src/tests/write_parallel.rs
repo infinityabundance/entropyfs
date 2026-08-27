@@ -106,7 +106,7 @@ fn extent_descriptor(store: &Store, ino: u64, offset: u64) -> Vec<u8> {
 fn extent_family(store: &Store, ino: u64, offset: u64) -> String {
     let limits = store.limits();
     let bytes = extent_descriptor(store, ino, offset);
-    let desc = crate::format::descriptor::decode(&bytes, &limits).unwrap();
+    let desc = crate::format::descriptor::decode(&bytes, limits).unwrap();
     desc.family().to_string()
 }
 

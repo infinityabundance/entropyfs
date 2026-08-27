@@ -424,7 +424,7 @@ fn chain_depth_reports_deepest_path_through_a_diamond() {
         lit_out: 1,
         len: 64,
     };
-    assert!(x.validate(&store.limits()).is_ok(), "fixture must validate");
+    assert!(x.validate(store.limits()).is_ok(), "fixture must validate");
     let x_cid = cid_of(&x);
     store
         .commit_file_extents(

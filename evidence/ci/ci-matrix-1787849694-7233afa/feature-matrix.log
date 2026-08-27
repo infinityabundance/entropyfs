@@ -1,0 +1,179 @@
+== default (fuse+ublk+uring) ==
+== no-fuse ==
+warning: function `trace_id` is never used
+    --> src/engine/mod.rs:1088:4
+     |
+1088 | fn trace_id(id: &BlobId) -> String {
+     |    ^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `open` is never used
+  --> src/cli/errors.rs:26:8
+   |
+26 | pub fn open(dir: &std::path::Path, e: &StoreError) -> String {
+   |        ^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `fuse_mount` is never used
+  --> src/cli/errors.rs:96:8
+   |
+96 | pub fn fuse_mount(mountpoint: &std::path::Path, e: &str) -> String {
+   |        ^^^^^^^^^^
+
+== no-ublk ==
+warning: function `trace_id` is never used
+    --> src/engine/mod.rs:1088:4
+     |
+1088 | fn trace_id(id: &BlobId) -> String {
+     |    ^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+== no-uring (SyncIo only) ==
+warning: unused variable: `uring_entries`
+   --> src/store/io/mod.rs:283:5
+    |
+283 |     uring_entries: u32,
+    |     ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_uring_entries`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `trace_id` is never used
+    --> src/engine/mod.rs:1088:4
+     |
+1088 | fn trace_id(id: &BlobId) -> String {
+     |    ^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: missing documentation for an associated constant
+   --> src/store/io/mod.rs:173:5
+    |
+173 |     pub const ALL: [IoBackendKind; 1] = [IoBackendKind::Sync];
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+note: the lint level is defined here
+   --> src/lib.rs:19:9
+    |
+ 19 | #![warn(missing_docs)]
+    |         ^^^^^^^^^^^^
+
+warning: unused variable: `kind`
+  --> src/cli/errors.rs:77:18
+   |
+77 | pub fn transport(kind: crate::store::io::IoBackendKind, e: &crate::store::StoreError) -> Str...
+   |                  ^^^^ help: if this is intentional, prefix it with an underscore: `_kind`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `commit_crash_points` is never used
+  --> src/tests/io_backend_parity.rs:33:4
+   |
+33 | fn commit_crash_points() -> Vec<CrashPoint> {
+   |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `gc_crash_points` is never used
+  --> src/tests/io_backend_parity.rs:45:4
+   |
+45 | fn gc_crash_points() -> Vec<CrashPoint> {
+   |    ^^^^^^^^^^^^^^^
+
+warning: function `encode_chunks` is never used
+   --> src/tests/io_backend_parity.rs:383:4
+    |
+383 | fn encode_chunks(content: &[u8], store: &Store) -> Vec<crate::store::ExtentUpdate> {
+    |    ^^^^^^^^^^^^^
+
+warning: function `crash_run` is never used
+   --> src/tests/io_backend_parity.rs:437:4
+    |
+437 | fn crash_run(
+    |    ^^^^^^^^^
+
+== base (no default features) ==
+warning: unused variable: `uring_entries`
+   --> src/store/io/mod.rs:283:5
+    |
+283 |     uring_entries: u32,
+    |     ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_uring_entries`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `trace_id` is never used
+    --> src/engine/mod.rs:1088:4
+     |
+1088 | fn trace_id(id: &BlobId) -> String {
+     |    ^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: missing documentation for an associated constant
+   --> src/store/io/mod.rs:173:5
+    |
+173 |     pub const ALL: [IoBackendKind; 1] = [IoBackendKind::Sync];
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+note: the lint level is defined here
+   --> src/lib.rs:19:9
+    |
+ 19 | #![warn(missing_docs)]
+    |         ^^^^^^^^^^^^
+
+warning: function `commit_crash_points` is never used
+  --> src/tests/io_backend_parity.rs:33:4
+   |
+33 | fn commit_crash_points() -> Vec<CrashPoint> {
+   |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `gc_crash_points` is never used
+  --> src/tests/io_backend_parity.rs:45:4
+   |
+45 | fn gc_crash_points() -> Vec<CrashPoint> {
+   |    ^^^^^^^^^^^^^^^
+
+warning: function `encode_chunks` is never used
+   --> src/tests/io_backend_parity.rs:383:4
+    |
+383 | fn encode_chunks(content: &[u8], store: &Store) -> Vec<crate::store::ExtentUpdate> {
+    |    ^^^^^^^^^^^^^
+
+warning: function `crash_run` is never used
+   --> src/tests/io_backend_parity.rs:437:4
+    |
+437 | fn crash_run(
+    |    ^^^^^^^^^
+
+warning: unused variable: `kind`
+  --> src/cli/errors.rs:77:18
+   |
+77 | pub fn transport(kind: crate::store::io::IoBackendKind, e: &crate::store::StoreError) -> Str...
+   |                  ^^^^ help: if this is intentional, prefix it with an underscore: `_kind`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `open` is never used
+  --> src/cli/errors.rs:26:8
+   |
+26 | pub fn open(dir: &std::path::Path, e: &StoreError) -> String {
+   |        ^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `fuse_mount` is never used
+  --> src/cli/errors.rs:96:8
+   |
+96 | pub fn fuse_mount(mountpoint: &std::path::Path, e: &str) -> String {
+   |        ^^^^^^^^^^
+
+== all-features (explicit) ==
+warning: function `trace_id` is never used
+    --> src/engine/mod.rs:1088:4
+     |
+1088 | fn trace_id(id: &BlobId) -> String {
+     |    ^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+feature matrix: ALL COMBINATIONS OK

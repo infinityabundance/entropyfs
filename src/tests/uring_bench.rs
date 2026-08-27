@@ -5,7 +5,7 @@ use io_uring::types::Fd;
 use std::io::Write;
 use std::time::Instant;
 
-fn ns_per(mut f: impl FnMut() -> ()) -> f64 {
+fn ns_per(mut f: impl FnMut()) -> f64 {
     let iters = 20000u32;
     // warmup
     for _ in 0..1000 {
@@ -15,8 +15,8 @@ fn ns_per(mut f: impl FnMut() -> ()) -> f64 {
     for _ in 0..iters {
         f();
     }
-    let d = t0.elapsed().as_nanos() as f64 / iters as f64;
-    d
+
+    t0.elapsed().as_nanos() as f64 / iters as f64
 }
 
 #[test]
@@ -89,8 +89,8 @@ fn bench_ring_vs_pread() {
         let _ = ring.submit_and_wait(&ops).unwrap();
     });
     let pread32_ns = ns_per(|| {
-        for i in 0..32 {
-            let _ = rustix::io::pread(&file, &mut bufs[i], 0).unwrap();
+        for buf in bufs.iter_mut() {
+            let _ = rustix::io::pread(&file, buf, 0).unwrap();
         }
     });
 

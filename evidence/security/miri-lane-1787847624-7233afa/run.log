@@ -1,0 +1,181 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running unittests src/lib.rs (target/miri/x86_64-unknown-linux-gnu/debug/deps/entropyfs-6383cd529f19b979)
+warning: variable does not need to be mutable
+   --> src/dsfb/semantics.rs:227:13
+    |
+227 |         let mut step = (sample.len() / 2048).max(1);
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `uring_entries`
+   --> src/store/io/mod.rs:283:5
+    |
+283 |     uring_entries: u32,
+    |     ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_uring_entries`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src/store/mod.rs:6467:29
+     |
+6467 |                         let mut cur = Store::inode_for_tx(tx, *child)?;
+     |                             ----^^^
+     |                             |
+     |                             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/store/mod.rs:6590:29
+     |
+6590 |                         let mut cur = Store::inode_for_tx(tx, *src_ino)?;
+     |                             ----^^^
+     |                             |
+     |                             help: remove this `mut`
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:113:9
+    |
+113 |     for i in 0..4u64 {
+    |         ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:126:9
+    |
+126 |     for i in 0..2u64 {
+    |         ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:255:10
+    |
+255 |     for (i, (path, v1)) in names.iter().enumerate() {
+    |          ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `start`
+   --> src/tests/grammar_oracle.rs:251:29
+    |
+251 |                         let start = pos.min(r.len());
+    |                             ^^^^^ help: if this is intentional, prefix it with an underscore: `_start`
+
+warning: unused variable: `prepared`
+   --> src/tests/perf_reconciled.rs:311:13
+    |
+311 |         let prepared = store
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_prepared`
+
+warning: type `store::Composed` is more private than the item `store::workers::WorkerTask::EncodeChunk::composed`
+    --> src/store/workers.rs:384:9
+     |
+ 384 |         composed: super::Composed,
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^ field `store::workers::WorkerTask::EncodeChunk::composed` is reachable at visibility `pub`
+     |
+note: but type `store::Composed` is only usable at visibility `pub(crate)`
+    --> src/store/mod.rs:3488:1
+     |
+3488 | pub(crate) struct Composed {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: function `trace_id` is never used
+    --> src/engine/mod.rs:1088:4
+     |
+1088 | fn trace_id(id: &BlobId) -> String {
+     |    ^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `percentile` is never used
+   --> src/tests/dsfb_semantics_probe.rs:190:4
+    |
+190 | fn percentile(sorted: &[f64], q: f64) -> f64 {
+    |    ^^^^^^^^^^
+
+warning: fields `candidates`, `chunks`, and `raw_wins` are never read
+   --> src/tests/dsfb_semantics_probe.rs:200:5
+    |
+197 | struct ModeResult {
+    |        ---------- fields in this struct
+...
+200 |     candidates: u64,
+    |     ^^^^^^^^^^
+201 |     chunks: u64,
+    |     ^^^^^^
+...
+204 |     raw_wins: u64,
+    |     ^^^^^^^^
+
+warning: constant `MAX_MEMBERS` is never used
+  --> src/tests/grammar_oracle.rs:79:7
+   |
+79 | const MAX_MEMBERS: usize = 512;
+   |       ^^^^^^^^^^^
+
+warning: function `contains` is never used
+   --> src/tests/grammar_oracle.rs:214:4
+    |
+214 | fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    |    ^^^^^^^^
+
+warning: function `commit_crash_points` is never used
+  --> src/tests/io_backend_parity.rs:33:4
+   |
+33 | fn commit_crash_points() -> Vec<CrashPoint> {
+   |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `gc_crash_points` is never used
+  --> src/tests/io_backend_parity.rs:45:4
+   |
+45 | fn gc_crash_points() -> Vec<CrashPoint> {
+   |    ^^^^^^^^^^^^^^^
+
+warning: struct `NoProvider` is never constructed
+   --> src/tests/io_backend_parity.rs:171:24
+    |
+171 |                 struct NoProvider;
+    |                        ^^^^^^^^^^
+
+warning: function `encode_chunks` is never used
+   --> src/tests/io_backend_parity.rs:384:4
+    |
+384 | fn encode_chunks(content: &[u8], store: &Store) -> Vec<crate::store::ExtentUpdate> {
+    |    ^^^^^^^^^^^^^
+
+warning: function `crash_run` is never used
+   --> src/tests/io_backend_parity.rs:438:4
+    |
+438 | fn crash_run(
+    |    ^^^^^^^^^
+
+warning: missing documentation for an associated constant
+   --> src/store/io/mod.rs:173:5
+    |
+173 |     pub const ALL: [IoBackendKind; 1] = [IoBackendKind::Sync];
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+note: the lint level is defined here
+   --> src/lib.rs:19:9
+    |
+ 19 | #![warn(missing_docs)]
+    |         ^^^^^^^^^^^^
+
+warning: missing documentation for a module
+    --> src/store/workers.rs:1036:1
+     |
+1036 | pub mod tests {
+     | ^^^^^^^^^^^^^
+
+
+running 9 tests
+test tests::hostile_media::descriptor_court::descriptor_cap_boundary ... ok
+test tests::hostile_media::descriptor_court::descriptor_exhibits_pass ... ok
+test tests::hostile_media::descriptor_court::exhibits_never_panic ... ok
+test tests::hostile_media::descriptor_court::seeds_are_canonical_and_valid ... ok
+test tests::hostile_media::descriptor_court::seeds_bounded_under_tight_limits ... ok
+test tests::hostile_media::descriptor_court::truncation_at_every_boundary_of_every_seed ... ok
+test tests::hostile_media::graph_court::graph_exhibits_pass ... ok
+test tests::hostile_media::graph_court::graph_seeds_bounded_under_tight_limits ... ok
+test tests::hostile_media::graph_court::graph_seeds_materialize_to_pinned_content ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 437 filtered out; finished in 2336.97s
+

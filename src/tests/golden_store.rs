@@ -161,7 +161,7 @@ fn court_era(era: &str) {
     };
     assert_eq!(creator, expected_creator, "{era}: creator_version mismatch");
     assert!(
-        m.get("creator_revision").is_some(),
+        m.contains_key("creator_revision"),
         "{era}: missing creator_revision"
     );
 

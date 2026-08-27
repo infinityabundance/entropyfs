@@ -1,0 +1,18 @@
+{
+  "oracle": "phase-12e19-ci-matrix",
+  "rev": "7233afa",
+  "kernel": "7.2.0-1-cachyos",
+  "machine": "AMD Ryzen 7 9800X3D 8-Core Processor",
+  "lanes": {
+    "fmt": "PASS",
+    "clippy": "PASS",
+    "msrv": "PASS",
+    "feature-matrix": "PASS",
+    "audit": "PASS",
+    "deny": "PASS",
+    "release-suite": "PASS (flake protocol: worker_pool_probe::pool_probe_gates passed alone)",
+    "ffi-smoke": "PASS",
+    "go-binding": "PASS"
+  },
+  "privileged_probes": "io_uring:\nstorage transport (Phase 10F): SyncIo (reference path, default) | UringIo (io_uring)\nsafety ledger: 1 confined file (platform/io_uring.rs; see docs/security/unsafe-ledger.md)\nkernel fuse io_uring: disabled (informational)\nio_uring transport: available\nio_uring ops: READ/WRITE (kernel 5.6+), FSYNC (5.1+), UNLINKAT (5.11+)\nfuse:\n  /dev/fuse present\nkernel:\n7.2.0-1-cachyos\n"
+}

@@ -555,7 +555,7 @@ struct Group {
 }
 
 impl Group {
-    fn new(_label: &'static str) -> (TempDir, Arc<Store>) {
+    fn make_store(_label: &'static str) -> (TempDir, Arc<Store>) {
         let dir = TempDir::new().unwrap();
         let store = create_store(&dir);
         (dir, store)
@@ -686,7 +686,7 @@ fn dag_read_cost_probe() {
     // raw (depth 0).
     // ------------------------------------------------------------------
     {
-        let (dir, store) = Group::new("raw");
+        let (dir, store) = Group::make_store("raw");
         let mut files = Vec::new();
         let mut depth_of = HashMap::new();
         for i in 0..per_depth_files as u64 {
@@ -722,7 +722,7 @@ fn dag_read_cost_probe() {
     // exactref (depth 1, shared target — fanout).
     // ------------------------------------------------------------------
     {
-        let (dir, store) = Group::new("exactref");
+        let (dir, store) = Group::make_store("exactref");
         let shared = structured(0x12a_2000);
         let f0 = create_file(&store, "exactref-src");
         store
@@ -772,7 +772,7 @@ fn dag_read_cost_probe() {
     // base-inline chains (depths 1..4, search-natural residuals).
     // ------------------------------------------------------------------
     {
-        let (dir, store) = Group::new("base-inline");
+        let (dir, store) = Group::make_store("base-inline");
         let mut files = Vec::new();
         let mut depth_of = HashMap::new();
         for d in 1..=4u64 {
@@ -803,7 +803,7 @@ fn dag_read_cost_probe() {
     // base-object chains (depths 1..4, forced rANS residuals).
     // ------------------------------------------------------------------
     {
-        let (dir, store) = Group::new("base-object");
+        let (dir, store) = Group::make_store("base-object");
         let mut files = Vec::new();
         let mut depth_of = HashMap::new();
         for d in 1..=4u64 {
@@ -832,7 +832,7 @@ fn dag_read_cost_probe() {
     // diamond (mixed: one base, fanout-3 consumers, depth-2 chain).
     // ------------------------------------------------------------------
     {
-        let (dir, store) = Group::new("diamond");
+        let (dir, store) = Group::make_store("diamond");
         let mut files = Vec::new();
         let mut depth_of = HashMap::new();
         for t in 0..per_depth_files as u64 {
@@ -859,7 +859,7 @@ fn dag_read_cost_probe() {
     // seqdict (the background optimizer's real shared-dict extents).
     // ------------------------------------------------------------------
     {
-        let (dir, store) = Group::new("seqdict");
+        let (dir, store) = Group::make_store("seqdict");
         let files = build_seqdict(&store);
         let mut depth_of = HashMap::new();
         for (f, bytes) in &files {

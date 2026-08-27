@@ -1,0 +1,49 @@
+    Fetching advisory database from `https://github.com/RustSec/advisory-db.git`
+      Loaded 1226 security advisories (from /home/one/.cargo/advisory-db)
+    Updating crates.io index
+    Scanning Cargo.lock for vulnerabilities (226 crate dependencies)
+Crate:     bitmaps
+Version:   3.2.1
+Warning:   unmaintained
+Title:     bitmaps is unmaintained
+Date:      2026-05-03
+ID:        RUSTSEC-2026-0247
+URL:       https://rustsec.org/advisories/RUSTSEC-2026-0247
+Dependency tree:
+bitmaps 3.2.1
+└── libublk 0.4.7
+    └── entropyfs 0.7.12
+
+Crate:     instant
+Version:   0.1.13
+Warning:   unmaintained
+Title:     `instant` is unmaintained
+Date:      2024-09-01
+ID:        RUSTSEC-2024-0384
+URL:       https://rustsec.org/advisories/RUSTSEC-2024-0384
+Dependency tree:
+instant 0.1.13
+└── fastrand 1.9.0
+    └── futures-lite 1.13.0
+        ├── smol 1.3.0
+        │   └── entropyfs 0.7.12
+        ├── async-process 1.8.1
+        │   └── smol 1.3.0
+        ├── async-net 1.8.0
+        │   └── smol 1.3.0
+        ├── async-io 1.13.0
+        │   ├── smol 1.3.0
+        │   ├── async-process 1.8.1
+        │   └── async-net 1.8.0
+        └── async-fs 1.6.0
+            └── smol 1.3.0
+
+Crate:     bitmaps
+Version:   3.2.1
+Warning:   unsound
+Title:     `Bitmap::try_from(&[u8])` can create invalid values
+Date:      2025-12-25
+ID:        RUSTSEC-2025-0167
+URL:       https://rustsec.org/advisories/RUSTSEC-2025-0167
+
+warning: 3 allowed warnings found

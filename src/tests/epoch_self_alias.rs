@@ -139,7 +139,8 @@ fn parallel_identical_writes_never_self_alias_chunk_index() {
         // Remount + full read + fsck must stay clean.
         drop(store);
         let store = Store::open(dir.path(), &cfg(kind)).unwrap();
-        for ino in [warm] {
+        {
+            let ino = warm;
             let got = store.read_file(ino, 0, text.len() as u64).unwrap();
             assert_eq!(got, text, "{kind:?} remount read mismatch");
         }

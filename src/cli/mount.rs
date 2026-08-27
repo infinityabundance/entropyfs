@@ -111,19 +111,21 @@ pub struct MountArgs {
 
 /// Run the mount daemon.
 pub fn run(args: &MountArgs) -> Result<(), String> {
-    let mut config = StoreConfig::default();
-    config.foreground = match args.foreground.as_str() {
-        "full" => crate::optimizer::foreground::ForegroundPolicy::full(),
-        "cheap" => crate::optimizer::foreground::ForegroundPolicy::cheap(),
-        "raw" => crate::optimizer::foreground::ForegroundPolicy::raw_only(),
-        other => {
-            return Err(format!(
-                "unknown --foreground mode {other:?} (expected full | cheap | raw)"
-            ));
-        }
+    let config = StoreConfig {
+        foreground: match args.foreground.as_str() {
+            "full" => crate::optimizer::foreground::ForegroundPolicy::full(),
+            "cheap" => crate::optimizer::foreground::ForegroundPolicy::cheap(),
+            "raw" => crate::optimizer::foreground::ForegroundPolicy::raw_only(),
+            other => {
+                return Err(format!(
+                    "unknown --foreground mode {other:?} (expected full | cheap | raw)"
+                ));
+            }
+        },
+        io_backend: crate::store::io::IoBackendKind::parse(&args.io_backend)?,
+        io_uring_entries: args.io_uring_entries,
+        ..StoreConfig::default()
     };
-    config.io_backend = crate::store::io::IoBackendKind::parse(&args.io_backend)?;
-    config.io_uring_entries = args.io_uring_entries;
     let store =
         Store::open(&args.store, &config).map_err(|e| crate::cli::errors::open(&args.store, &e))?;
     // Phase-11E default flip (sealed by the mounted-FUSE court): the pool

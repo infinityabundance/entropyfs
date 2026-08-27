@@ -76,6 +76,8 @@ use tempfile::TempDir;
 /// Bounded slot count per grammar (the induction never exceeds this).
 const MAX_SLOTS: usize = 8;
 /// Bounded member count for the induction (the corpus is capped).
+/// Bounded member count for the grammar corpus.
+#[allow(dead_code)] // documented corpus bound; exercised via the corpus builder
 const MAX_MEMBERS: usize = 512;
 
 /// The bounded induction's search cap: the LCS is computed over at most
@@ -211,6 +213,9 @@ fn contains_head(haystack: &[u8], needle: &[u8]) -> bool {
     head.windows(needle.len()).any(|w| w == needle)
 }
 
+/// The oracle's substring helper (kept for the exhibit drivers; the
+/// corpus itself uses the same primitive).
+#[allow(dead_code)]
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
@@ -248,7 +253,7 @@ fn induce(members: &[&[u8]]) -> TemplateGrammar {
                 region = region
                     .iter()
                     .map(|r| {
-                        let start = pos.min(r.len());
+                        let _start = pos.min(r.len());
                         let end = (pos + len).min(r.len());
                         &r[end..]
                     })
@@ -454,8 +459,6 @@ fn grammar_oracle() {
         let ratio = logical as f64 / bytes.max(1) as f64;
         let vs = if kind == "grammar" {
             format!("{:.2}x efs", efs_fg as f64 / bytes.max(1) as f64)
-        } else if kind == "efs" {
-            "—".to_string()
         } else {
             "—".to_string()
         };
