@@ -499,6 +499,12 @@ fn dsfb_shard_probe() {
         ));
     }
     if let Ok(path) = std::env::var("DSFB_PROBE_OUT") {
+        // Create the parent so the evidence tool never depends on a
+        // pre-existing directory (a missing dir must not fail the probe
+        // run itself — that would waste a full sweep).
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         std::fs::write(&path, &tsv).expect("write probe summary");
         println!("probe summary written to {path}");
     }

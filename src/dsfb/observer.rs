@@ -6,8 +6,8 @@
 //! Maintain the per-chunk evidence state that steers candidate search:
 //! per-channel trust (from EMA residuals), the drift–slew regime, and the
 //! resulting search plan. Fed once per write from `encode_guided`
-//! ([`StorageObserver::observe`]), consulted before the budgeted search
-//! ([`StorageObserver::plan`], [`StorageObserver::trust`]).
+//! ([`ShardedStorageObserver::observe`]), consulted before the budgeted
+//! search ([`ShardedStorageObserver::plan`], [`ShardedStorageObserver::trust`]).
 //!
 //! # Model: the per-chunk state machine
 //!
@@ -32,7 +32,7 @@
 //! Unknown → Stable / Drift / Slew. When the previous observation
 //! classified a slew (or on the first observation) the baseline re-points
 //! at the new chunk's content id. Regime maps to search strategy and
-//! budget in [`StorageObserver::plan`]: Slew → Broad/32,
+//! budget in [`ShardedStorageObserver::plan`]: Slew → Broad/32,
 //! Drift → Balanced/12, Stable/Unknown → Narrow/4.
 //!
 //! # Why the parameters are shaped this way
@@ -65,48 +65,129 @@
 //!   so a perfect structural win cannot trigger a regime break.
 //! - Forgetting, evicting, or deleting the observer never changes
 //!   persisted bytes (ADR-0004).
+//! - **Atomic-count exactness:** `tracked` is the exact live entry count —
+//!   every insert bumps it and every remove (forget/evict) decrements it
+//!   under the same shard lock that mutates the map, so `tracked == Σ
+//!   shard lens` at every instant. `len()` therefore reads one atomic
+//!   instead of summing 16 locks, and the store's cap gate
+//!   (`DSFB_MAX_CHUNKS`) is race-free without a global mutex.
 //!
-//! # Concurrency
+//! # Concurrency (Phase-11F)
 //!
-//! `StorageObserver` is not internally synchronized; the store owns a
-//! single mutex around it (`Store::dsfb`). Every accessor runs under that
-//! mutex, so operations are serialized and each is O(channels).
+//! The observer is **sharded** (11F): the per-key state lives in
+//! `DSFB_SHARDS` (16) independently locked `HashMap`s, and the aggregate
+//! statistics are lock-free atomics. Every accessor locks **exactly one
+//! shard** — the one `shard_of(key)` picks via a stable FNV-1a hash of the
+//! key bytes:
+//!
+//! ```text
+//! ChunkKey (ino, index, content_id)
+//!     -> FNV-1a 64 over the 48 key bytes   (fully specified, stable
+//!        across platforms and Rust versions — std's DefaultHasher is not)
+//!     -> shard = hash % DSFB_SHARDS
+//! ```
+//!
+//! The store previously serialized ALL observer access through one mutex
+//! (`Store::dsfb`), even though each `ChunkObserver` is per-key
+//! independent state. The 11D brief predicted that mutex would become
+//! visible as more independent requests advanced through search
+//! simultaneously under the 11E fair pool. The 11F oracle
+//! (`evidence/performance/dsfb-shard-*/`, probe
+//! `src/tests/dsfb_shard_probe.rs`) tested that prediction directly and
+//! found the observer calls measure ~1 µs each — 0.1–0.5% of `prepare`
+//! even at 4× the sealed sweep scale — so the mutex was never a material
+//! wall-time bottleneck at any measured scale. The shard was adopted
+//! anyway, for three reasons the oracle does not contradict:
+//!
+//! 1. **Architecture:** the observer's state is per-key, so its locking
+//!    should be per-key; the shard removes the LAST process-wide write
+//!    serialization point, so the write path is now synchronization-free
+//!    end to end except for the commit coordinator and the per-inode
+//!    locks (which are real shared state, not advisory evidence).
+//! 2. **Future-proofing:** Phase-12C (DSFB Structural Semiotics) deepens
+//!    the per-call work (semantic context features) and will widen the
+//!    per-call critical section; a single mutex would serialize that.
+//! 3. **Zero measured regression:** the 11F oracle verified byte
+//!    identity, density, wall, latency, and CPU are unchanged within
+//!    run-to-run noise.
+//!
+//! The 11F oracle's falsification of the "mutex becomes visible"
+//! prediction is recorded in the sealed evidence and CHANGELOG v0.7.7;
+//! this code implements the shard as the permanently correct shape, not
+//! as a response to a measured emergency.
 //!
 //! # Resource bounds
 //!
-//! One [`ChunkObserver`] per distinct key; the store caps the map at
-//! `DSFB_MAX_CHUNKS` (100 000) and calls [`StorageObserver::evict_one`]
-//! past the cap. Per-entry state is fixed-size arrays over the 9
-//! channels. Distinct content versions are the only growth vector, and
-//! the cap bounds it.
+//! One [`ChunkObserver`] per distinct key; the store caps the total at
+//! `DSFB_MAX_CHUNKS` (100 000) by reading the exact atomic count and
+//! calling [`ShardedStorageObserver::evict_one_from`] on the shard that
+//! just grew (the store's policy, unchanged in shape from the pre-11F
+//! gate). Per-entry state is fixed-size arrays over the 9 channels.
+//! Distinct content versions are the only growth vector, and the cap
+//! bounds it. Per-shard maps hold ~cap/16 entries, which also improves
+//! lookup locality over one 100k-entry map.
 //!
 //! # Performance
 //!
-//! [`StorageObserver::observe`] is O(channels) with stack-only scratch;
-//! [`StorageObserver::plan`] sorts 9 elements. Both run on the write
-//! path, so allocation is avoided. The exhaustive-search alternative is
-//! the `no-dsfb` ablation mode (H3).
+//! [`ShardedStorageObserver::observe`] is O(channels) with stack-only
+//! scratch; [`ShardedStorageObserver::plan`] sorts 9 elements. Both run on
+//! the write path, so allocation is avoided. The 11F oracle measured the
+//! whole call (lock + work) at ~1 µs in release; the shard converts the
+//! theoretical O(concurrency) serialization into O(concurrency/16)
+//! and, more importantly, makes unrelated keys never block each other.
+//! The exhaustive-search alternative is the `no-dsfb` ablation mode (H3).
 //!
 //! # Failure modes
 //!
 //! Infallible by construction. Out-of-range measurements are clamped; a
 //! NaN would propagate into the EMAs (the caller contract is bounded
 //! evidence — `Features::measurement` and `measurement_for_ratio` both
-//! clamp). Wrong predictions cost search CPU only.
+//! clamp). Wrong predictions cost search CPU only. A poisoned shard mutex
+//! is a panic (`.expect("dsfb shard poisoned")`) — the observer cannot
+//! run under a panicked writer, and panicking loudly beats silent
+//! corruption of advisory state.
 //!
 //! # History / evidence
 //!
 //! Phase 4 (channels P0–P5), Phase-9C (P8 SharedDict, v0.4.0), ADR-0004,
 //! H3 ablation methodology (`docs/theory/dsfb-selection.md` §5), upstream
-//! audit (`docs/research/upstream-audit.md` §2).
+//! audit (`docs/research/upstream-audit.md` §2), 11D oracle
+//! (`evidence/performance/worker-oracle-1787765041-052bc46/`) and 11E
+//! probe (the "DSFB mutex becomes visible" prediction), and the 11F
+//! shard oracle (`evidence/performance/dsfb-shard-*/`) that falsified the
+//! prediction at the sealed scale and verified zero regression (CHANGELOG
+//! v0.7.7).
 
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::dsfb::drift::{MeasurementTracker, Regime};
 use crate::dsfb::features::{Channel, ChunkKey};
 use crate::dsfb::selection::{SearchPlan, SearchStrategy};
+
+/// Number of observer shards.
+///
+/// WHY 16:
+///
+/// - It equals the maximum worker concurrency the 11E pool can run (16 on
+///   this 8-core/16-SMT machine, `available_parallelism()`), so two
+///   workers contending on the same key class are rare and unrelated keys
+///   essentially never collide;
+/// - it is a power of two, so `hash % DSFB_SHARDS` is a mask — one
+///   cycle, no division;
+/// - it bounds per-shard maps at `DSFB_MAX_CHUNKS / 16 ≈ 6250` entries,
+///   which keeps a shard's `HashMap` in better cache locality than one
+///   100k-entry map would have.
+///
+/// The count is deliberately NOT `available_parallelism()`-derived: the
+/// observer is per-store and the pool is process-global, so a store-local
+/// shard count derived from the machine's cores would change meaning
+/// across machines. 16 is a fixed architectural constant; the oracle's
+/// before/after runs share it.
+pub const DSFB_SHARDS: usize = 16;
 
 /// DSFB observer parameters for storage evidence.
 ///
@@ -203,8 +284,8 @@ struct ChunkObserver {
     /// raw `1/(σ0 + residual)`, normalized across channels, so the vector
     /// sums to ≈1). Seeded 0.125 (1/8); with 9 channels that placeholder
     /// does not sum to 1, which is harmless — the first normalization
-    /// overwrites every entry, and `StorageObserver::trust` falls back to
-    /// 0.125 only for unknown chunks / never-observed channels.
+    /// overwrites every entry, and `ShardedStorageObserver::trust` falls
+    /// back to 0.125 only for unknown chunks / never-observed channels.
     weights: [f64; Channel::ALL.len()],
     /// Last known measurement per channel — the series fed to `inner.step`
     /// on every write (0.0 = no evidence for unevaluated channels).
@@ -223,25 +304,58 @@ struct ChunkObserver {
     baseline: Option<crate::core::extent::ChunkId>,
 }
 
-/// The storage DSFB observer: a map of per-chunk observers plus global
-/// statistics. Bounded by the chunk count touched: the store evicts past
-/// `DSFB_MAX_CHUNKS` via [`StorageObserver::evict_one`]; state is
-/// performance-only (ADR-0004).
-pub struct StorageObserver {
+/// The storage DSFB observer (Phase-11F sharded): per-chunk observers
+/// behind 16 independent shard locks plus lock-free aggregate statistics.
+///
+/// # State layout
+///
+/// ```text
+/// ShardedStorageObserver
+///   params: StorageDsfbParams          (immutable, Copy — no lock needed)
+///   shards: [Mutex<HashMap<ChunkKey, ChunkObserver>>; 16]
+///   tracked: AtomicUsize               (exact live entry count)
+///   steps / drift_events / slew_events / narrowed_searches: AtomicU64
+/// ```
+///
+/// # Why the statistics are atomics
+///
+/// The pre-11F observer kept `stats: ObserverStats` as a plain struct
+/// under the single store mutex. With per-shard locks there is no single
+/// lock to protect a plain struct, and re-introducing a global mutex for
+/// the counters would recreate the exact serialization point 11F removes.
+/// Every counter is therefore a lock-free atomic; `stats()` assembles the
+/// aggregate `ObserverStats` snapshot from them.
+///
+/// # Invariant (exact count)
+///
+/// `tracked` is incremented exactly when a vacant key is inserted and
+/// decremented exactly when a present key is removed — both under the
+/// shard lock that guards the map — so it always equals the sum of the
+/// shard lengths. The store's cap gate reads it without any lock and the
+/// count is exact (module doc, "Atomic-count exactness").
+pub struct ShardedStorageObserver {
     params: StorageDsfbParams,
-    chunks: HashMap<ChunkKey, ChunkObserver>,
-    /// Aggregate stats for `status` output.
-    pub stats: ObserverStats,
-}
-
-impl std::fmt::Debug for StorageObserver {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StorageObserver")
-            .field("params", &self.params)
-            .field("tracked_chunks", &self.chunks.len())
-            .field("stats", &self.stats)
-            .finish()
-    }
+    shards: [Mutex<HashMap<ChunkKey, ChunkObserver>>; DSFB_SHARDS],
+    /// Exact live entry count (`Σ shard lengths`; module doc invariant).
+    tracked: AtomicUsize,
+    /// Total steps fed (cumulative write observations, all chunks).
+    steps: AtomicU64,
+    /// Drift events observed (cumulative across all chunks).
+    drift_events: AtomicU64,
+    /// Slew events observed (cumulative across all chunks).
+    slew_events: AtomicU64,
+    /// Candidates skipped due to low trust (search narrowing). Accounting
+    /// surface reported in `status`: the skips themselves are decided by
+    /// the search consumer — the foreground trust gate
+    /// (`FOREGROUND_BASE_TRUST`) and the plan-budget cutoffs in
+    /// `src/optimizer/search.rs`; no call site increments this counter
+    /// yet.
+    narrowed_searches: AtomicU64,
+    /// Round-robin cursor for [`ShardedStorageObserver::evict_one`] (the
+    /// shard-less eviction entry point used by tests and as the generic
+    /// fallback; the store's targeted policy uses
+    /// [`ShardedStorageObserver::evict_one_from`] instead).
+    evict_cursor: AtomicUsize,
 }
 
 /// Aggregate observer statistics (reported in `status`).
@@ -264,20 +378,70 @@ pub struct ObserverStats {
     pub narrowed_searches: u64,
 }
 
-impl Default for StorageObserver {
+impl Default for ShardedStorageObserver {
     fn default() -> Self {
         Self::new(StorageDsfbParams::default())
     }
 }
 
-impl StorageObserver {
+/// FNV-1a 64-bit offset basis and prime.
+///
+/// The shard hash is deliberately FNV-1a rather than
+/// `std::collections::hash_map::DefaultHasher`: FNV-1a is a fully
+/// specified algorithm, so the shard a key lands in is stable across
+/// platforms and Rust versions. Stability matters for reproducibility
+/// (the 11F oracle, tests) even though the assignment is performance-only
+/// state — a key landing in a different shard after a toolchain upgrade
+/// must never be able to change measured results for no reason.
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+impl ShardedStorageObserver {
     /// Create with parameters.
     pub fn new(params: StorageDsfbParams) -> Self {
         Self {
             params,
-            chunks: HashMap::new(),
-            stats: ObserverStats::default(),
+            shards: std::array::from_fn(|_| Mutex::new(HashMap::new())),
+            tracked: AtomicUsize::new(0),
+            steps: AtomicU64::new(0),
+            drift_events: AtomicU64::new(0),
+            slew_events: AtomicU64::new(0),
+            narrowed_searches: AtomicU64::new(0),
+            evict_cursor: AtomicUsize::new(0),
         }
+    }
+
+    /// The shard index for a key: stable FNV-1a over the 48 key bytes
+    /// (ino, index, content id), reduced modulo [`DSFB_SHARDS`].
+    ///
+    /// # Why the key bytes, not a derived hash of the struct
+    ///
+    /// `ChunkKey` derives `Hash` via `DefaultHasher`, whose output is not
+    /// guaranteed stable across Rust versions. The explicit byte layout
+    /// (LE u64s + the 32 content-id bytes) makes the mapping fully
+    /// specified and portable. The reduction is `% DSFB_SHARDS` (a mask in
+    /// practice, since 16 is a power of two).
+    ///
+    /// # Performance
+    ///
+    /// 48 FNV rounds ≈ a few ns; called once per accessor, never on a
+    /// hot loop of its own.
+    pub fn shard_of(&self, key: &ChunkKey) -> usize {
+        let mut h = FNV_OFFSET_BASIS;
+        for b in key
+            .ino
+            .to_le_bytes()
+            .iter()
+            .chain(key.index.to_le_bytes().iter())
+        {
+            h ^= *b as u64;
+            h = h.wrapping_mul(FNV_PRIME);
+        }
+        for &b in key.content_id.as_bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(FNV_PRIME);
+        }
+        (h % DSFB_SHARDS as u64) as usize
     }
 
     /// Feed one write-observation for a chunk. `measurements` maps each
@@ -303,23 +467,36 @@ impl StorageObserver {
     /// 6. Classify the regime from the robust tracker over
     ///    `outcome_quality` and tally drift/slew events.
     ///
+    /// # Concurrency
+    ///
+    /// Locks exactly the shard of `key` (and only for the duration of the
+    /// update); the global counters are lock-free atomics. Unrelated keys
+    /// never block each other.
+    ///
     /// Returns the new regime. Performance-only: regime and internal state
     /// feed search ordering/budget, never the committed representation
     /// (ADR-0004/0010).
     pub fn observe(
-        &mut self,
+        &self,
         key: ChunkKey,
         measurements: &[(Channel, f64)],
         winner: Channel,
         outcome_quality: f64,
     ) -> Regime {
-        self.stats.steps += 1;
+        self.steps.fetch_add(1, Ordering::Relaxed);
         let mut m = [0.0f64; Channel::ALL.len()];
         for &(c, v) in measurements {
             m[c as usize] = v.clamp(0.0, 1.0);
         }
         let winner_measurement = outcome_quality.clamp(0.0, 1.0);
-        let entry = self.chunks.entry(key).or_insert_with(|| ChunkObserver {
+        let shard = self.shard_of(&key);
+        let mut map = self.shards[shard].lock().expect("dsfb shard poisoned");
+        // The exact-count invariant: bump `tracked` exactly when a vacant
+        // key becomes present (both under this shard lock).
+        if !map.contains_key(&key) {
+            self.tracked.fetch_add(1, Ordering::Relaxed);
+        }
+        let entry = map.entry(key).or_insert_with(|| ChunkObserver {
             inner: dsfb::DsfbObserver::new(self.params.dsfb_params(), Channel::ALL.len()),
             tracker: MeasurementTracker::default(),
             ema: [1.0; Channel::ALL.len()],
@@ -362,12 +539,18 @@ impl StorageObserver {
         // Regime comes from the robust measurement tracker.
         let regime = entry.tracker.observe(winner_measurement);
         match regime {
-            Regime::Drift => self.stats.drift_events += 1,
-            Regime::Slew => self.stats.slew_events += 1,
+            Regime::Drift => {
+                self.drift_events.fetch_add(1, Ordering::Relaxed);
+            }
+            Regime::Slew => {
+                self.slew_events.fetch_add(1, Ordering::Relaxed);
+            }
             Regime::Stable | Regime::Unknown => {}
         }
         entry.regime = regime;
-        self.stats.tracked_chunks = self.chunks.len();
+        // `tracked` is maintained incrementally; nothing to refresh here
+        // (the pre-11F `stats.tracked_chunks = map.len()` refresh moved
+        // into the atomic increment/decrement points).
         regime
     }
 
@@ -375,8 +558,16 @@ impl StorageObserver {
     /// Unknown chunks and never-observed channels return the 0.125
     /// placeholder — equal, unearned weight — so a fresh chunk starts
     /// with no channel preferred.
+    ///
+    /// # Concurrency
+    ///
+    /// Locks exactly the shard of `key`; the returned `f64` is a copy, so
+    /// the lock is released before the caller uses the value.
     pub fn trust(&self, key: &ChunkKey, channel: Channel) -> f64 {
-        self.chunks
+        let shard = self.shard_of(key);
+        self.shards[shard]
+            .lock()
+            .expect("dsfb shard poisoned")
             .get(key)
             .map(|c| c.weights[channel as usize])
             .unwrap_or(0.125)
@@ -389,17 +580,24 @@ impl StorageObserver {
     /// the cheap Narrow plan until evidence arrives. The plan only orders
     /// and bounds the candidate evaluation; the winner is still exact cost
     /// (ADR-0010).
+    ///
+    /// # Concurrency
+    ///
+    /// Locks exactly the shard of `key` (the `ChunkObserver` reads plus
+    /// the 9-element sort all happen under it — the sort is stack-local,
+    /// so the critical section is ~1 µs).
     pub fn plan(&self, key: &ChunkKey) -> SearchPlan {
-        let regime = self
-            .chunks
-            .get(key)
-            .map(|c| c.regime)
-            .unwrap_or(Regime::Unknown);
-        let mut trust: Vec<(Channel, f64)> = Channel::ALL
-            .iter()
-            .map(|&c| (c, self.trust(key, c)))
-            .collect();
-        trust.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let shard = self.shard_of(key);
+        let (regime, trust) = {
+            let map = self.shards[shard].lock().expect("dsfb shard poisoned");
+            let regime = map.get(key).map(|c| c.regime).unwrap_or(Regime::Unknown);
+            let mut trust: Vec<(Channel, f64)> = Channel::ALL
+                .iter()
+                .map(|&c| (c, self.trust_locked(&map, key, c)))
+                .collect();
+            trust.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            (regime, trust)
+        };
         let strategy = match regime {
             Regime::Slew => SearchStrategy::Broad,
             Regime::Drift => SearchStrategy::Balanced,
@@ -412,32 +610,102 @@ impl StorageObserver {
         }
     }
 
-    /// Forget state for a chunk (unlink/truncate/gc).
-    pub fn forget(&mut self, key: &ChunkKey) {
-        self.chunks.remove(key);
-        self.stats.tracked_chunks = self.chunks.len();
+    /// Trust lookup against an ALREADY-LOCKED shard map.
+    ///
+    /// `plan` holds the shard lock for the whole plan build and calls this
+    /// per channel so the 9 trust reads reuse the same lock acquisition —
+    /// calling [`ShardedStorageObserver::trust`] inside `plan` would
+    /// re-lock the same shard (a self-deadlock, since std mutexes are not
+    /// reentrant). This is the one internal helper that assumes the lock;
+    /// every other accessor acquires it.
+    fn trust_locked(
+        &self,
+        map: &HashMap<ChunkKey, ChunkObserver>,
+        key: &ChunkKey,
+        channel: Channel,
+    ) -> f64 {
+        map.get(key)
+            .map(|c| c.weights[channel as usize])
+            .unwrap_or(0.125)
     }
 
-    /// Bounded eviction: drop one entry (simplified — the first map entry,
-    /// an arbitrary stand-in for LRU). The store owns the real policy
-    /// (`DSFB_MAX_CHUNKS` gate in `Store::dsfb_observe`); this is the
-    /// safety valve so observer state stays bounded. Any eviction is safe:
-    /// the state is performance-only.
-    pub fn evict_one(&mut self) {
-        if let Some(k) = self.chunks.keys().next().copied() {
-            self.chunks.remove(&k);
-            self.stats.tracked_chunks = self.chunks.len();
+    /// Forget state for a chunk (unlink/truncate/gc).
+    ///
+    /// # Concurrency / count invariant
+    ///
+    /// Locks exactly the shard of `key`; decrements `tracked` iff the key
+    /// was actually present.
+    pub fn forget(&self, key: &ChunkKey) {
+        let shard = self.shard_of(key);
+        let mut map = self.shards[shard].lock().expect("dsfb shard poisoned");
+        if map.remove(key).is_some() {
+            self.tracked.fetch_sub(1, Ordering::Relaxed);
         }
     }
 
-    /// Number of tracked chunks.
+    /// Targeted bounded eviction: drop one entry from shard `shard` (an
+    /// arbitrary map entry — a stand-in for LRU; eviction is
+    /// correctness-neutral, so approximate policy is safe). Decrements
+    /// `tracked` iff an entry was removed.
+    ///
+    /// # Why the store uses this instead of [`ShardedStorageObserver::evict_one`]
+    ///
+    /// The store's cap gate (`DSFB_MAX_CHUNKS` in `Store::dsfb_observe`)
+    /// evicts from the shard that JUST GREW — the shard of the observed
+    /// key — so the total stays bounded by `cap + 1` (observe adds at
+    /// most one entry; one eviction from a shard that is non-empty because
+    /// it just received the entry brings the count back to `cap`). A
+    /// rotating shard could evict from an empty shard and leave the count
+    /// over the cap until the next observe, which would make the bound
+    /// laggy rather than tight.
+    pub fn evict_one_from(&self, shard: usize) {
+        let mut map = self.shards[shard].lock().expect("dsfb shard poisoned");
+        if let Some(k) = map.keys().next().copied() {
+            map.remove(&k);
+            self.tracked.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Rotating bounded eviction: drop one entry from the next shard in a
+    /// round-robin cursor. Generic entry point (tests, backstop); the
+    /// store uses the targeted [`ShardedStorageObserver::evict_one_from`].
+    pub fn evict_one(&self) {
+        let shard = self.evict_cursor.fetch_add(1, Ordering::Relaxed) % DSFB_SHARDS;
+        self.evict_one_from(shard);
+    }
+
+    /// Number of tracked chunks (exact; one atomic load).
     pub fn len(&self) -> usize {
-        self.chunks.len()
+        self.tracked.load(Ordering::Relaxed)
     }
 
     /// Whether no chunks are tracked.
     pub fn is_empty(&self) -> bool {
-        self.chunks.is_empty()
+        self.len() == 0
+    }
+
+    /// The aggregate statistics snapshot (for `status`), assembled from
+    /// the lock-free atomics. No observer lock is taken — the snapshot is
+    /// point-in-time and each counter is individually exact.
+    pub fn stats(&self) -> ObserverStats {
+        ObserverStats {
+            tracked_chunks: self.tracked.load(Ordering::Relaxed),
+            drift_events: self.drift_events.load(Ordering::Relaxed),
+            slew_events: self.slew_events.load(Ordering::Relaxed),
+            steps: self.steps.load(Ordering::Relaxed),
+            narrowed_searches: self.narrowed_searches.load(Ordering::Relaxed),
+        }
+    }
+}
+
+impl std::fmt::Debug for ShardedStorageObserver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShardedStorageObserver")
+            .field("params", &self.params)
+            .field("shards", &DSFB_SHARDS)
+            .field("tracked_chunks", &self.len())
+            .field("stats", &self.stats())
+            .finish()
     }
 }
 
@@ -452,7 +720,7 @@ mod tests {
 
     #[test]
     fn stable_evidence_keeps_trust_high() {
-        let mut obs = StorageObserver::default();
+        let obs = ShardedStorageObserver::default();
         let k = key(1, 0);
         let mut regime = Regime::Unknown;
         for _ in 0..50 {
@@ -466,11 +734,13 @@ mod tests {
         let plan = obs.plan(&k);
         assert_eq!(plan.ordered_channels[0], Channel::PrevVersion);
         assert_eq!(plan.strategy, SearchStrategy::Narrow);
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs.stats().steps, 50);
     }
 
     #[test]
     fn slew_broadens_search() {
-        let mut obs = StorageObserver::default();
+        let obs = ShardedStorageObserver::default();
         let k = key(2, 0);
         // stable for a while, then a violent regime break
         for _ in 0..10 {
@@ -490,12 +760,12 @@ mod tests {
         }
         let final_plan = obs.plan(&k);
         assert_ne!(final_plan.strategy, SearchStrategy::Narrow);
-        assert!(obs.stats.slew_events > 0);
+        assert!(obs.stats().slew_events > 0);
     }
 
     #[test]
     fn drift_keeps_narrow() {
-        let mut obs = StorageObserver::default();
+        let obs = ShardedStorageObserver::default();
         let k = key(3, 0);
         // slow degradation: measurement drifts down gently
         let mut v = 1.0f64;
@@ -503,19 +773,138 @@ mod tests {
             obs.observe(k, &[(Channel::PrevVersion, v)], Channel::PrevVersion, v);
             v = (v - 0.01).max(0.8);
         }
-        assert!(obs.stats.drift_events > 0);
+        assert!(obs.stats().drift_events > 0);
     }
 
     #[test]
     fn eviction_bounds_state() {
-        let mut obs = StorageObserver::default();
-        for i in 0..100 {
+        // The PRODUCTION policy (Store::dsfb_observe): when the exact
+        // count exceeds the cap, evict from the shard of the key that just
+        // grew. The bound is tight: starting at the cap, every observe
+        // pushes the count to cap + 1 and the targeted eviction brings it
+        // back to cap — the total never exceeds cap + 1 and settles at cap.
+        let obs = ShardedStorageObserver::default();
+        let cap = 90usize;
+        for i in 0..cap {
+            obs.observe(key(i as u64, 0), &[], Channel::Raw, 0.5);
+        }
+        assert_eq!(obs.len(), cap);
+        for i in cap..500 {
+            let k = key(i as u64, 0);
+            obs.observe(k, &[], Channel::Raw, 0.5);
+            if obs.len() > cap {
+                obs.evict_one_from(obs.shard_of(&k));
+            }
+            assert!(
+                obs.len() <= cap,
+                "targeted eviction must keep the total at the cap (got {})",
+                obs.len()
+            );
+        }
+        assert_eq!(obs.len(), cap);
+    }
+
+    #[test]
+    fn evict_one_rotates_until_drained() {
+        // The generic rotating entry point's contract: it visits shards in
+        // round-robin and removes one entry per non-empty visit, so it
+        // DRAINS the observer but may no-op on empty shards (the store
+        // uses the targeted evict_one_from for the tight cap bound; this
+        // is the backstop entry). 16 keys over 16 shards: 16 x 16 = 256
+        // visits = 16 per shard >= the worst-case 16 keys in one shard, so
+        // draining is guaranteed (and deterministic — FNV shard spread).
+        let obs = ShardedStorageObserver::default();
+        for i in 0..16 {
+            obs.observe(key(i as u64, 0), &[], Channel::Raw, 0.5);
+        }
+        assert_eq!(obs.len(), 16);
+        let mut guard = 0;
+        while !obs.is_empty() {
+            obs.evict_one();
+            guard += 1;
+            assert!(guard <= 16 * 16, "rotating eviction failed to drain");
+        }
+        obs.evict_one();
+        assert!(obs.is_empty());
+        assert_eq!(obs.stats().tracked_chunks, 0);
+    }
+
+    #[test]
+    fn shard_of_is_stable_and_bounded() {
+        let obs = ShardedStorageObserver::default();
+        let k = key(7, 3);
+        // Same key, same shard — determinism is the whole point (the
+        // assignment is performance-only, but it must be reproducible).
+        for _ in 0..10 {
+            assert_eq!(obs.shard_of(&k), obs.shard_of(&k));
+        }
+        assert!(obs.shard_of(&k) < DSFB_SHARDS);
+        // Different keys must not pile onto one shard: 4096 keys, every
+        // shard gets a hit (the 11F "unrelated keys never block each
+        // other" property has a structural witness).
+        let mut seen = [false; DSFB_SHARDS];
+        for i in 0..4096u64 {
+            seen[obs.shard_of(&key(i, 0))] = true;
+        }
+        assert!(
+            seen.iter().all(|&s| s),
+            "shard hash must spread across all {DSFB_SHARDS} shards"
+        );
+    }
+
+    #[test]
+    fn forget_and_targeted_eviction_keep_count_exact() {
+        let obs = ShardedStorageObserver::default();
+        for i in 0..64 {
             obs.observe(key(i, 0), &[], Channel::Raw, 0.5);
         }
-        assert_eq!(obs.len(), 100);
-        for _ in 0..100 {
-            obs.evict_one();
-        }
-        assert!(obs.is_empty());
+        assert_eq!(obs.len(), 64);
+        // Forgetting a present key decrements; forgetting an absent key
+        // does not (the exact-count invariant).
+        obs.forget(&key(0, 0));
+        assert_eq!(obs.len(), 63);
+        obs.forget(&key(0, 0));
+        assert_eq!(obs.len(), 63);
+        // Targeted eviction from one shard removes exactly one entry.
+        let k = key(30, 0);
+        let shard = obs.shard_of(&k);
+        obs.evict_one_from(shard);
+        assert_eq!(obs.len(), 62);
+        // Observe re-inserts: count goes back up exactly once.
+        obs.observe(key(0, 0), &[], Channel::Raw, 0.5);
+        assert_eq!(obs.len(), 63);
+    }
+
+    #[test]
+    fn concurrent_observation_is_safe() {
+        // The 11F concurrency claim: unrelated keys must never block each
+        // other (they live in different shards), and the atomic count must
+        // stay exact under true parallelism. 16 threads x 256 keys each =
+        // 4096 inserts; every key observed exactly once, so the count must
+        // be exactly 4096 when the dust settles.
+        let obs = ShardedStorageObserver::default();
+        std::thread::scope(|s| {
+            for t in 0..16usize {
+                let obs = &obs;
+                s.spawn(move || {
+                    for i in 0..256usize {
+                        let ino = (t * 256 + i) as u64;
+                        obs.observe(key(ino, 0), &[], Channel::Raw, 0.5);
+                        // Interleave reads (plans/trust) with writes, like
+                        // the search path does.
+                        let _ = obs.plan(&key(ino, 0));
+                        let _ = obs.trust(&key(ino, 0), Channel::Raw);
+                    }
+                });
+            }
+        });
+        assert_eq!(obs.len(), 4096, "exact count under concurrency");
+        assert_eq!(obs.stats().steps, 4096);
+        // And the per-key state is intact: observing again on the same key
+        // increments the SAME entry (samples), not a new one.
+        let k = key(0, 0);
+        obs.observe(k, &[], Channel::Raw, 0.5);
+        assert_eq!(obs.len(), 4096);
+        assert_eq!(obs.stats().steps, 4097);
     }
 }

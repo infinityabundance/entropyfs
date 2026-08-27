@@ -22,7 +22,7 @@
 //!
 //! # Regime → strategy mapping
 //!
-//! `StorageObserver::plan` maps: Stable/Unknown → Narrow (4),
+//! `ShardedStorageObserver::plan` maps: Stable/Unknown → Narrow (4),
 //! Drift → Balanced (12), Slew → Broad (32). Drift keeps the basis — the
 //! winning channel ranks first by trust — with a mid budget so slow
 //! residual evolution is re-checked without paying full search cost; slew

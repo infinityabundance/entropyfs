@@ -69,21 +69,27 @@
 //!   φ/ω/α integration (which accumulates permanent velocity).
 //! - A filesystem image decodes identically with all DSFB state deleted.
 //!
-//! # Concurrency
+//! # Concurrency (Phase-11F)
 //!
-//! The store serializes all observer access through one mutex
-//! (`Store::dsfb`); each critical section is O(channels). The 11D brief
-//! predicted this mutex's visibility and the 11E gate measurements
-//! confirmed it; the 11F observer shard is the identified follow-up
-//! (CHANGELOG v0.7.4).
+//! The observer is sharded (`observer.rs`, 11F): per-key state lives in
+//! 16 independently locked shards chosen by a stable FNV-1a hash of the
+//! key, and the aggregate statistics are lock-free atomics. Every
+//! accessor locks exactly one shard; unrelated keys never block each
+//! other, and the store holds the observer directly with no outer mutex.
+//! The 11D brief predicted the old single store-level mutex would become
+//! visible under the 11E fair pool; the 11F oracle (CHANGELOG v0.7.7)
+//! falsified that at the sealed scale (~1 µs per call, 0.1–0.5% of
+//! `prepare`), so the shard was adopted as the permanently correct shape
+//! rather than as a response to a measured emergency.
 //!
 //! # Resource bounds
 //!
 //! One `ChunkObserver` per distinct (ino, index, content-id) key, capped
-//! by `DSFB_MAX_CHUNKS` (100 000) eviction in `Store::dsfb_observe`.
-//! Per-entry state is a handful of fixed-size 9-channel arrays. A writer
-//! can grow the map only by touching many distinct chunks; the cap bounds
-//! it, and eviction never affects correctness.
+//! by `DSFB_MAX_CHUNKS` (100 000) via the exact atomic count + targeted
+//! per-shard eviction in `Store::dsfb_observe`. Per-entry state is a
+//! handful of fixed-size 9-channel arrays. A writer can grow the map only
+//! by touching many distinct chunks; the cap bounds it, and eviction
+//! never affects correctness.
 //!
 //! # Performance
 //!
@@ -107,9 +113,11 @@
 //! ADR-0004 (zero-authority observer), ADR-0010 (exact cost wins), Phase 4
 //! wiring (ablation campaign `campaign-1787658658-67d977a/`), H3 ablation
 //! methodology (§5 of `docs/theory/dsfb-selection.md`), the upstream
-//! source audit (`docs/research/upstream-audit.md` §2), and the 11D/11E
-//! worker-pool gates that surfaced the observer mutex's cost (CHANGELOG
-//! v0.7.4).
+//! source audit (`docs/research/upstream-audit.md` §2), the 11D/11E
+//! worker-pool gates that surfaced the observer mutex's predicted cost
+//! (CHANGELOG v0.7.4), and the 11F shard oracle that falsified the
+//! prediction at the sealed scale while verifying zero regression
+//! (CHANGELOG v0.7.7).
 
 #![forbid(unsafe_code)]
 

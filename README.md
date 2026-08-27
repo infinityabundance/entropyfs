@@ -51,19 +51,24 @@ For sealed performance and experimental evidence, see
 
 ### Current development focus
 
-- Latest completed phase: **11E/11E1 — the persistent fair worker pool**
-  (probe-sealed, KEPT; then the mounted-FUSE court sealed it as the
-  MOUNT DEFAULT: at 16 FUSE threads, parallel write +14%, p95 −39%, p99
-  −48%, CPU +2.8%, crash/fsck/readback clean; see
-  `docs/performance/worker-pool-probe.md` and
-  `evidence/performance/worker-pool-mount-court-1787786369-b756a7c/`).
-  The court also exposed and fixed a real write-path data-loss bug (the
-  checkpoint committed stale pending data roots; replay applied
-  log-staged inodes wholesale) amplified by a getxattr checkpoint storm.
+- Latest completed phase: **11F — the sharded DSFB observer** (the final
+  Phase-11 step: removes the last process-wide write-path serialization
+  point; 16 per-key shard locks + lock-free aggregate stats; sealed
+  oracle `evidence/performance/dsfb-shard-probe-*/` shows zero
+  end-to-end regression and quantifies the DSFB-mutex contention the 11D
+  brief predicted — it was real in the observer rows themselves (−66%
+  plan-call wall under 16-way concurrency) but ~0.1% of `prepare`, so
+  end-to-end rows are unchanged; see `docs/performance/worker-pool-probe.md`
+  §8 and CHANGELOG v0.7.7). **Phase 11 is closed:**
+  11A hostile persistent input → 11B write-latency reconciliation →
+  11C synchronization/oversubscription removal → 11D worker oracle →
+  11E fair worker pool (mount default) → 11F observer shard.
 - Current decision: the pool is the mount default
   (`available_parallelism()` workers; `--no-worker-pool` restores the 11C
-  semaphore as the fallback); the DSFB observer shard (11F) is the
-  identified follow-up.
+  semaphore as the fallback). The next research phases are 12A Hot-DAG
+  terminalization oracle, 12B durability generations / group commit, 12C
+  DSFB structural semiotics, and 12D grammar-addressed entropy (offline
+  oracle first).
 - Persistent format: explicit, versioned, incompat-feature-gated.
 - Correctness: crash courts + hostile-media court + fsck, byte-exact
   read-back under every scheduler.

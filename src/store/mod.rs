@@ -261,8 +261,10 @@ pub struct Store {
     model_cache: std::sync::Mutex<crate::cache::model::ModelCache>,
     /// DSFB storage observer (performance-only; zero decoding authority).
     /// Bounded by `DSFB_MAX_CHUNKS`; dropping it affects only search
-    /// ordering, never bytes (ADR-0004).
-    dsfb: std::sync::Mutex<crate::dsfb::observer::StorageObserver>,
+    /// ordering, never bytes (ADR-0004). Phase-11F: sharded internally
+    /// (16 per-key shard locks, lock-free aggregate stats), so no outer
+    /// mutex is needed — the store holds the observer directly.
+    dsfb: crate::dsfb::observer::ShardedStorageObserver,
     /// Total candidate representations evaluated by foreground search
     /// (diagnostic only). The 11F oracle's "candidate count" row:
     /// accumulated at the two `encode_guided` call sites on the write
@@ -387,7 +389,7 @@ impl Store {
             stats: std::sync::Mutex::new(StoreStats::default()),
             _lock: lock,
             model_cache: std::sync::Mutex::new(crate::cache::model::ModelCache::new(64)),
-            dsfb: std::sync::Mutex::new(crate::dsfb::observer::StorageObserver::default()),
+            dsfb: crate::dsfb::observer::ShardedStorageObserver::default(),
             candidates_evaluated: std::sync::atomic::AtomicU64::new(0),
             inode_locks: std::sync::Arc::new(InodeLockTable::default()),
             perf: std::sync::Arc::new(crate::perf::Timings::default()),
@@ -468,7 +470,7 @@ impl Store {
             stats: std::sync::Mutex::new(StoreStats::default()),
             _lock: lock,
             model_cache: std::sync::Mutex::new(crate::cache::model::ModelCache::new(64)),
-            dsfb: std::sync::Mutex::new(crate::dsfb::observer::StorageObserver::default()),
+            dsfb: crate::dsfb::observer::ShardedStorageObserver::default(),
             candidates_evaluated: std::sync::atomic::AtomicU64::new(0),
             inode_locks: std::sync::Arc::new(InodeLockTable::default()),
             perf: std::sync::Arc::new(crate::perf::Timings::default()),
@@ -638,9 +640,7 @@ impl Store {
         &self,
         key: &crate::dsfb::features::ChunkKey,
     ) -> crate::dsfb::selection::SearchPlan {
-        self.perf.time("dsfb_plan", || {
-            self.dsfb.lock().expect("dsfb poisoned").plan(key)
-        })
+        self.perf.time("dsfb_plan", || self.dsfb.plan(key))
     }
 
     /// DSFB trust for one channel of a chunk. Timed under the global
@@ -650,14 +650,22 @@ impl Store {
         key: &crate::dsfb::features::ChunkKey,
         channel: crate::dsfb::features::Channel,
     ) -> f64 {
-        self.perf.time("dsfb_trust", || {
-            self.dsfb.lock().expect("dsfb poisoned").trust(key, channel)
-        })
+        self.perf
+            .time("dsfb_trust", || self.dsfb.trust(key, channel))
     }
 
     /// Feed the DSFB observer (performance-only state). Bounded eviction
     /// keeps the observer from growing without limit. Timed under the
     /// global `dsfb_observe` row (same rationale as [`Store::dsfb_plan`]).
+    ///
+    /// # The cap gate (11F targeted eviction)
+    ///
+    /// The observer exposes an exact lock-free live count (`len`); when it
+    /// exceeds `DSFB_MAX_CHUNKS` the gate evicts one entry from the shard
+    /// that just grew — the shard of the observed key — so the total stays
+    /// bounded by `cap + 1` (observe adds at most one entry, and the
+    /// evicted shard is non-empty because it just received the entry).
+    /// Eviction is approximate and correctness-neutral (ADR-0004).
     pub fn dsfb_observe(
         &self,
         key: crate::dsfb::features::ChunkKey,
@@ -666,10 +674,12 @@ impl Store {
         outcome_quality: f64,
     ) -> crate::dsfb::drift::Regime {
         self.perf.time("dsfb_observe", || {
-            let mut dsfb = self.dsfb.lock().expect("dsfb poisoned");
-            let regime = dsfb.observe(key, measurements, winner, outcome_quality);
-            if dsfb.len() > DSFB_MAX_CHUNKS {
-                dsfb.evict_one();
+            let regime = self
+                .dsfb
+                .observe(key, measurements, winner, outcome_quality);
+            if self.dsfb.len() > DSFB_MAX_CHUNKS {
+                let shard = self.dsfb.shard_of(&key);
+                self.dsfb.evict_one_from(shard);
             }
             regime
         })
@@ -677,7 +687,7 @@ impl Store {
 
     /// Observer statistics (for `status`).
     pub fn dsfb_stats(&self) -> crate::dsfb::observer::ObserverStats {
-        self.dsfb.lock().expect("dsfb poisoned").stats
+        self.dsfb.stats()
     }
 
     /// Total candidate representations evaluated by foreground search

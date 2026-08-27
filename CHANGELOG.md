@@ -1,5 +1,84 @@
 # EntropyFS changelog
 
+## v0.7.7 (2026-08-27)
+
+**11F — the sharded DSFB observer: the last process-wide write-path mutex
+is gone, and the oracle quantifies what the 11D brief predicted (and what
+it did not).**
+
+Phase 11 closes with this step. The pre-11F observer was per-`ChunkKey`
+state behind ONE store-level mutex: `observe`/`plan`/`trust` on unrelated
+files serialized because DSFB wanted to update advisory evidence. 11F
+replaces it with `ShardedStorageObserver` (`src/dsfb/observer.rs`):
+
+- **16 shards, one lock per shard** (`DSFB_SHARDS`), chosen by a stable
+  FNV-1a hash of the 48 key bytes (fully specified, portable — not
+  `DefaultHasher`, whose output is not guaranteed stable across Rust
+  versions). `observe`/`plan`/`trust`/`forget` lock exactly one shard;
+  unrelated keys never block each other.
+- **Lock-free aggregate statistics**: `tracked` (exact live count — every
+  insert/remove updates it under the same shard lock that mutates the
+  map), `steps`, `drift_events`, `slew_events`, `narrowed_searches`. The
+  store holds the observer directly — no outer mutex.
+- **Cap gate without a global mutex**: `Store::dsfb_observe` reads the
+  exact atomic count and, past `DSFB_MAX_CHUNKS`, evicts from the shard
+  that just grew (targeted, deterministic given the key; total stays ≤
+  cap + 1). Eviction is approximate and correctness-neutral (ADR-0004).
+- **Probe instrumentation** (diagnostics, never behaviors): `dsfb_plan` /
+  `dsfb_trust` / `dsfb_observe` global perf rows around the observer
+  calls (`perf::time`: global-only, so the request-envelope
+  reconciliation partition is untouched), and a `candidates_evaluated`
+  atomic summed at the two `encode_guided` call sites.
+
+**The 11F oracle** (`src/tests/dsfb_shard_probe.rs`, sealed
+`evidence/performance/dsfb-shard-probe-mutex-1787789207-f103248/` and
+`dsfb-shard-probe-sharded-*`): the SAME probe binary-shape at the 11F-0
+commit (single-mutex observer) and at this release (sharded), pool-16,
+writers 1/8/16 x 64 files plus a 4× scale probe (16 writers x 256 files =
+16k chunks, 1 GiB), per-write-distinct content, byte-exact read-back +
+checkpoint + logical-identity + reachable-bytes + family histogram.
+
+| 16-writer row | mutex | sharded |
+| --- | ---: | ---: |
+| wall | 769–781 ms | 775–779 ms |
+| p50 / p99 | 45.6–47.7 / 74.5–78.1 ms | 46.6–47.0 / 75.5–79.8 ms |
+| useful CPU | 10.42–10.47 s | 10.47–10.48 s |
+| dsfb plan call wall | 3.3–20.1 ms | 2.1–2.2 ms |
+| stress (4×) dsfb plan | 34–38 ms | 10.5–11.5 ms |
+| stress (4×) wall | 3156–3162 ms | 3144–3151 ms |
+
+Byte identity exact, logical committed bytes == logical input exactly,
+reachable bytes identical, candidates identical (4096 / 16384),
+representation families identical (RAW only — the LCG corpus), on every
+run of both sides.
+
+**The verdict is a recorded falsification with an adoption.** The 11D
+brief predicted the observer mutex would become visible as independent
+requests advanced through search simultaneously under the 11E pool. The
+oracle shows the prediction was true IN THE OBSERVER ROWS but not
+end-to-end: the plan call (the largest critical section, a 9-element
+sort under the lock) lost ~66% of its wall under 16-way concurrency
+(34–38 ms → 10.5–11.5 ms at the 4× scale), but all observer calls
+together are ~1 µs each — 0.1% of `prepare` even at 4× scale — so wall,
+p50/p99, and useful CPU are unchanged within run-to-run noise (±1%).
+
+The shard is adopted anyway, on grounds the oracle does not contradict:
+(1) architecture — the observer's state is per-key, so its locking
+should be per-key; the write path is now synchronization-free end to end
+except the commit coordinator and per-inode locks (real shared state,
+not advisory evidence); (2) future-proofing — Phase-12C (DSFB structural
+semiotics) deepens the per-call work, which would make a single mutex
+matter; (3) zero measured regression in any row. 428 lib tests green
+(11F-0 probe + 8 observer tests incl. an exact-count-under-concurrency
+test and a shard-spread test; the `court_repro` 24-thread stress test
+still shows its known load flake — passes alone, noted in the test
+ledger).
+
+Also: the DSFB call timing rows and candidate counter land as permanent
+write-path diagnostics (the 12C oracle will read them), and the
+mounted-court 11E1 data-loss regression pins (`src/tests/write_race.rs`)
+remain green.
+
 ## v0.7.6 (2026-08-27)
 
 **11E1 — the mounted-FUSE court sealed the worker pool as the MOUNT
@@ -907,3 +986,14 @@ claims; ADRs explain architectural decisions.**
 | 11 (11C) | **The three 11B levers** (`docs/performance/reconciliation.md` §3.4): (1) the prefill is two-phase — guard-held PREPARE (extent collection + dependency enumeration + batched object fetch, nested descriptors captured) + pure-CPU DECODE with the epoch guard released (`epoch_write` AND the FUSE read handler); the checkpoint-threshold check reads a lock-free pending-op mirror — direct-store `epoch_lock_wait + epoch_wait` 80.8% → ~0.3% at 16 threads, walls flat at the CPU-bound floor. (2) a process-wide worker SEMAPHORE caps search/decode threads at `available_parallelism()` (the non-blocking inline fallback was measured and rejected: search wall-sum grew ~5× at 16 threads). (3) the fsync convoy is contract-inherent (write→fsync durability linearizability) and shrank indirectly — mounted `commit_lock_wait` 34.7% → 16.4% at 16 threads. Two read-window defects the instrumentation exposed are fixed with a regression test (inclusive pending-range bound; unconditional predecessor scan-start extension) | ✅ implemented + evidence-sealed (`recon-court-1787762195-49f1a55/`; 417 lib tests green) |
 | 11 (11D) | **Worker-pool decision oracle** (`docs/performance/worker-oracle.md`) — diagnostic, not a release: decomposes the 11C semaphore's opaque `prepare` bucket at 1/2/4/8/16 writers into `worker_queue_wait` (Gate A), `worker_scope_wall` (Gate B), and `worker_useful_cpu` (per-worker thread-CPU, Gate C), with workload-validity probes (dedup-hit / decisive-exit fractions, asserted zero). First run caught its own methodology bug (one store across the sweep → a mid-run checkpoint fed the EXACT_REF dedup cache and the 16 T row measured the cache, not search); fixed with fresh stores + per-write-distinct content. Sealed: search CPU constant 9.8–10.0 s at every thread count (semaphore wastes no CPU); queue wait 4.6% → 91.7% of `prepare` (Gate A fires — batch head-of-line blocking); 16 T wall 1.14 s ≈ the SMT-adjusted CPU floor (throughput exhausted); p50 5.3 → 52.4 ms / p99 9.5 → 177.6 ms (tail latency is the only real pool headroom). Decision: a fair pool is justified only as a latency-fairness probe (bar: beat p50/p99 at 8/16 T without more search CPU), rejected if it merely reproduces the 1.14 s floor | ✅ diagnostic, sealed (`worker-oracle-1787765041-052bc46/`; 419 lib tests green) |
 | 11 (11E) | **Persistent fair worker pool** (`docs/performance/worker-pool-probe.md`, sealed `evidence/performance/worker-pool-probe-1787769464-8fdea62/`) — the 11D decision's experiment, probe-sealed and KEPT: persistent workers with TYPED tasks only (`EncodeChunk`/`DecodeExtent`, `(request_id, ordinal)`), per-request queues served round-robin one task per pick (per-worker cursors — the probe found the shared cursor silently pins each request to one worker when workers == active requests), results reassembled strictly by ordinal ("execution order may vary; persisted semantic order may not", byte-exact read-back verified), bounded queue with backpressure at submission (the probe found the naive wait deadlocks on an oversized request meeting an idle pool), per-store opt-in (the FUSE daemon keeps the semaphore unless `--worker-pool N`). Sealed at 16 writers, pool-16 vs semaphore: wall 0.79–0.80 vs 1.08–1.28 s (−29%, the batch-transition slack the 11D floor analysis missed), p50 47–48 vs 49–60 ms, p99 78–85 vs 152–241 ms (−68%), useful CPU +2.6–3.7% (straddles the +3% gate, below the +5% reject bar — the DSFB-mutex visibility the 11D brief predicted; 11F sharding is the follow-up), p99/p50 1.63 vs 3.88, max request slowdown 18× vs 47×. 8 writers: wall −34%, p99 −69%, CPU +3.7–6.6%. pool-8: same wall, −20% CPU, −59% p99 (the lower-power alternative); pool-4: control, too few workers. The semaphore remains the mount default pending the mounted-FUSE court | ✅ probe-sealed, KEPT (`worker-pool-probe-1787769464-8fdea62/`; 421 lib tests green) |
+| 11 (11E1) | **Mounted-FUSE court + the data-loss bug it found** (`tools/court-worker-pool-mount.sh`, sealed `evidence/performance/worker-pool-mount-court-1787786369-*`; CHANGELOG v0.7.6) — semaphore/pool-8/pool-16 × FUSE threads 1/4/8/16 against a 13-workload battery with byte-exact readback + fsck per cell. pool-16 passes ALL five gates (parallel write +14%, latency p95 −39%, p99 −48%, wall −26%, CPU +2.8%, serial neutral, cleanliness clean) → **the FUSE mount now runs the pool by default** (`available_parallelism()` workers; `--no-worker-pool` restores the 11C semaphore). The court exposed a REAL write-path data-loss bug (parallel untar lost ~10–45% of small files' extents; silent zero reads; fsck-clean because internally consistent): the checkpoint committed stale pending data roots, replay applied log-staged inodes wholesale, and getxattr probed xattrs flushed the epoch on every call — three fixes, regression-pinned in `src/tests/write_race.rs` | ✅ implemented + evidence-sealed (`worker-pool-mount-court-1787786369-b756a7c/`; 423 lib tests green) |
+| 11 (11F) | **Sharded DSFB observer** (`src/dsfb/observer.rs` `ShardedStorageObserver`, probe `src/tests/dsfb_shard_probe.rs`, sealed `evidence/performance/dsfb-shard-probe-mutex-1787789207-f103248/` + `dsfb-shard-probe-sharded-*`; CHANGELOG v0.7.7) — the last process-wide write-path mutex, removed: 16 per-key shard locks (stable FNV-1a over the key bytes) + lock-free aggregate stats + exact atomic live count; the cap gate evicts from the shard that just grew (total ≤ cap + 1). The oracle (same probe binary-shape at both commits, pool-16, 1/8/16 writers + a 4× scale run) RECORDED A FALSIFICATION WITH AN ADOPTION: the 11D-predicted mutex visibility was real in the observer rows themselves (the plan call — a 9-element sort under the lock — lost ~66% of its wall under 16-way concurrency: 34–38 → 10.5–11.5 ms at 4× scale) but all observer calls together are ~1 µs each, 0.1% of `prepare`, so wall/p50/p99/useful CPU are unchanged within ±1% noise; byte identity, logical bytes, candidates, and families identical on every run of both sides. Adopted for architecture (per-key state ⇒ per-key locking; the write path is now synchronization-free except the commit coordinator and per-inode locks), future-proofing (12C deepens per-call work), and zero measured regression. The DSFB timing rows + candidate counter land as permanent write-path diagnostics for 12C | ✅ implemented + evidence-sealed (`dsfb-shard-probe-*`; 428 lib tests green) |
+
+**Phase 11 is CLOSED** — 11A hostile persistent input → 11B write-latency
+reconciliation → 11C synchronization/oversubscription removal → 11D
+worker oracle → 11E fair worker pool (probe + mounted court, the mount
+default) → 11F observer shard. The remaining foreground bottleneck is
+useful search CPU itself; the next research sequence is Phase 12: 12A
+Hot-DAG terminalization oracle, 12B durability generations / group
+commit, 12C DSFB structural semiotics, 12D grammar-addressed entropy
+(offline oracle first).

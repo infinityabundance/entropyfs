@@ -180,3 +180,45 @@ checkpoint never commits a stale pending data root, and replay applies
 setattr/unlink attributes without orphaning committed trees; the
 read-only xattr probes no longer flush the epoch. The readback+fsck
 cleanliness clause of the court now passes at every cell.
+
+## 8. 11F — the DSFB observer shard (the identified follow-up, DONE)
+
+The 11E write-up predicted "the DSFB observer mutex becomes more visible
+as more independent requests advance through search simultaneously,
+exactly as the 11D brief predicted — 11F sharding is the identified
+follow-up." 11F (`src/dsfb/observer.rs` `ShardedStorageObserver`, sealed
+`evidence/performance/dsfb-shard-probe-mutex-1787789207-f103248/` and
+`dsfb-shard-probe-sharded-*`; CHANGELOG v0.7.7) tested that prediction
+with a direct measurement, and the oracle's verdict is a recorded
+falsification with an adoption:
+
+| 16-writer row | single-mutex observer | sharded observer |
+| --- | ---: | ---: |
+| wall | 769–781 ms | 775–779 ms |
+| p50 / p99 | 45.6–47.7 / 74.5–78.1 ms | 46.6–47.0 / 75.5–79.8 ms |
+| useful CPU | 10.42–10.47 s | 10.47–10.48 s |
+| dsfb plan call wall | 3.3–20.1 ms | 2.1–2.2 ms |
+| 4×-scale dsfb plan wall | 34–38 ms | 10.5–11.5 ms |
+| 4×-scale wall | 3156–3162 ms | 3144–3151 ms |
+
+- The prediction WAS true in the observer rows: the plan call (the
+  largest critical section — a 9-element sort under the lock) lost ~66%
+  of its wall under 16-way concurrency (34–38 → 10.5–11.5 ms at the 4×
+  scale). The mutex contention was real.
+- It was NOT true end-to-end: all observer calls together are ~1 µs each
+  — 0.1% of `prepare` even at 4× scale — so wall, p50/p99, and useful
+  CPU are unchanged within ±1% run-to-run noise. The +2.6–3.7% useful
+  CPU the 11E probe measured for the pool is therefore NOT DSFB mutex
+  wait (a mutex wait is wall, not CPU); it is the pool's higher effective
+  parallelism.
+- Every hard invariant held on both sides: byte-exact read-back,
+  logical committed bytes == logical input, identical reachable bytes,
+  identical candidate counts, identical representation families.
+
+Adoption rationale (grounds the oracle does not contradict): the
+observer's state is per-key, so its locking should be per-key; the write
+path is now synchronization-free end to end except the commit
+coordinator and the per-inode locks (real shared state, not advisory
+evidence); Phase-12C (DSFB structural semiotics) deepens the per-call
+work, which would make a single mutex matter; and zero measured
+regression in any row.

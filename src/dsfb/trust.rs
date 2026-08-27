@@ -24,8 +24,8 @@
 //!   observation); `residual_ema ∈ [0, 1]`, lower = better.
 //! - Budgets are candidate counts (4 / 12 / 32), the same values as
 //!   `SearchStrategy` in `selection.rs`. Note the Unknown case differs
-//!   between the two vocabularies: `StorageObserver::plan` treats Unknown
-//!   as Narrow, while `SearchBreadth::for_regime` treats Unknown as
+//!   between the two vocabularies: `ShardedStorageObserver::plan` treats
+//!   Unknown as Narrow, while `SearchBreadth::for_regime` treats Unknown as
 //!   Balanced — the plan path is the one the search actually consumes.
 //!
 //! # Boundary
@@ -81,8 +81,8 @@ pub enum SearchBreadth {
 impl SearchBreadth {
     /// Breadth for a regime: Stable → Narrow, Drift → Balanced, Slew →
     /// Broad, Unknown → Balanced (no evidence yet ⇒ no reason to narrow
-    /// the search). Note `StorageObserver::plan` maps Unknown to Narrow
-    /// instead — see the module doc.
+    /// the search). Note `ShardedStorageObserver::plan` maps Unknown to
+    /// Narrow instead — see the module doc.
     pub const fn for_regime(regime: crate::dsfb::drift::Regime) -> SearchBreadth {
         match regime {
             crate::dsfb::drift::Regime::Stable => SearchBreadth::Narrow,

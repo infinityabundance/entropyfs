@@ -10,7 +10,7 @@
 //! # Boundary
 //!
 //! This detector sees only [`Features`] — no φ/ω/α, no observer state. It
-//! is not currently wired into `StorageObserver::observe`: the runtime
+//! is not currently wired into `ShardedStorageObserver::observe`: the runtime
 //! regime path uses `MeasurementTracker` (`drift.rs`); this is the
 //! per-write evidence-domain counterpart kept as the second opinion.
 //!
