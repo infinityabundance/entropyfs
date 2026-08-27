@@ -6,6 +6,7 @@
 
 pub mod benchmark;
 pub mod capabilities;
+pub mod evidence;
 pub mod explain;
 pub mod fsck;
 pub mod gc;

@@ -71,6 +71,8 @@ enum Command {
     Benchmark(cli::benchmark::BenchmarkArgs),
     /// Compiled-in capabilities and environment.
     Capabilities,
+    /// Capture the sealed-evidence reproducibility manifest (Phase 12E.5).
+    EvidenceManifest(cli::evidence::EvidenceManifestArgs),
     /// Experimental ublk block-device frontend (Phase 7).
     #[cfg(feature = "ublk")]
     Ublk {
@@ -121,6 +123,7 @@ fn main() {
         Command::Optimize(a) => cli::optimize::run(a),
         Command::Benchmark(a) => cli::benchmark::run(a),
         Command::Capabilities => cli::capabilities::run(),
+        Command::EvidenceManifest(a) => cli::evidence::run(a),
         #[cfg(feature = "ublk")]
         Command::Ublk { action } => match action {
             UblkAction::Run(a) => cli::ublk::run(a),
