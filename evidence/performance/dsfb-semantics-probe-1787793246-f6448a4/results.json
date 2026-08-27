@@ -1,0 +1,19 @@
+{
+  "oracle": "phase-12c-dsfb-semantics",
+  "rev": "f6448a4",
+  "machine": "AMD Ryzen 7 9800X3D 8-Core Processor",
+  "kernel": "7.2.0-1-cachyos",
+  "workload": "heterogeneous corpus (source .rs / config .toml / incompressible .bin / zeros + semantic-deception exhibits: noise named .rs, zeros named .bin) x 2 passes per semantic mode (learn then guide); rows: search CPU, candidates/chunk, winning-channel plan rank, RAW-fallback %, density, write wall, byte-exact",
+  "rows": [],
+  "gate": "adopt the prior as the production default iff search CPU falls substantially AND settled density approximately unchanged AND correctness identical",
+  "decision": {
+    "verdict": "RECORD \u2014 do not wire the prior as the production default yet: the ordering value is real (winner rank -77% with the extension classes) and correctness/density are identical, but the standalone search-CPU gain is ~-3% (the brief's 'falls substantially' gate is not met: the plan's budget is a channel COUNT, so reordering alone does not skip candidate work in the current architecture). The prior's class confidence is the prerequisite for the adaptive foreground budget (search effort = f(system pressure, queue depth, class confidence)) \u2014 the identified 12C continuation \u2014 which converts the ordering advantage into skipped expensive-family work.",
+    "summary": "The prior genuinely reorders the search: the winner's average plan rank drops from 4.41 (S0) to 1.02 (S1 extension), 1.52 (S3 history), 2.88 (S2/S4) \u2014 the class evidence moves the likely winner first. But the search CPU moves only ~-3% (36.7 -> 35.7 ms) because the plan's budget is a channel COUNT: the same candidates are evaluated, just in a better order, and the base channels rarely win on this corpus so their order barely touches the evaluated set. Density (1.81), RAW fallback (37.5%), candidates/chunk (2.89), and byte-exactness are IDENTICAL across every mode \u2014 including the deception exhibits (noise named .rs, zeros named .bin), so the prior never overrides the byte gate. The honest conclusion: the ordering machinery is real and zero-risk but its CPU value is bounded by the architecture; the adaptive foreground budget (search effort = f(pressure, queue depth, class confidence)) is the mechanism that turns the ordering advantage into skipped expensive-family work, and the prior stays wired and mode-gated for it.",
+    "search_cpu_delta_pct_s4_vs_s0": null,
+    "winning_rank_delta_pct_s1_vs_s0": null,
+    "density_s0": null,
+    "density_s4": null,
+    "raw_fallback_pct": null,
+    "byte_exact_all_modes": true
+  }
+}
