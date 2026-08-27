@@ -1,0 +1,48 @@
+{
+  "oracle": "phase-12d-grammar",
+  "rev": "9ee533c",
+  "machine": "AMD Ryzen 7 9800X3D 8-Core Processor",
+  "kernel": "7.2.0-1-cachyos",
+  "workload": "offline template-grammar oracle (bounded induction: common prefix/suffix + internal-literal splitting, slot state raw, descriptor per member; Repeat-compressed periodic segments) on a non-periodic shared-skeleton generated-config corpus + a diverse negative control; incumbents: EntropyFS foreground, EntropyFS settled (+optimize_pass +shared_dict_pass), zstd -19 whole pack",
+  "rows": [
+    {
+      "mode": "12d0",
+      "corpus": "generated-config",
+      "logical": "12015600",
+      "grammar_total": "66059",
+      "grammar_ratio": "181.89",
+      "efs_fg": "5899905",
+      "efs_settled": "465068",
+      "zstd_whole": "29731",
+      "verdict": "stop"
+    },
+    {
+      "mode": "12d0",
+      "corpus": "diverse",
+      "logical": "13107200",
+      "grammar_total": "13109200",
+      "grammar_ratio": "1.00",
+      "efs_fg": "5350054",
+      "efs_settled": "5347872",
+      "zstd_whole": "5377719",
+      "verdict": "loses-as-expected"
+    }
+  ],
+  "decision": {
+    "verdict": "STOP per the brief's gate: the fully-accounted RAW-skeleton grammar beats EntropyFS settled by 7.0x on the grammar-friendly corpus and loses as expected on the diverse control, but does NOT beat every incumbent \u2014 zstd-whole (29.7 KB) is 2.2x smaller than the grammar (66.1 KB) because the grammar stores its irregular shared skeleton LITERALLY while zstd entropy-codes it. The identified refinement is the brief's own 'persisted entropy': the grammar object is itself data and must be entropy-coded; the raw-skeleton accounting is the conservative bound. The format-bit investigation (12D-1) is not justified on this evidence.",
+    "config_corpus": {
+      "logical_bytes": 12015600,
+      "grammar_total": 66059,
+      "grammar_ratio": 181.89,
+      "efs_fg": 5899905,
+      "efs_settled": 465068,
+      "zstd_whole": 29731
+    },
+    "diverse_control": {
+      "grammar_total": 13109200,
+      "grammar_ratio": 1.0,
+      "efs_fg": 5350054
+    },
+    "verdict_flag": "stop"
+  }
+}
