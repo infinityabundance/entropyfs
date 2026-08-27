@@ -1,5 +1,108 @@
 # EntropyFS changelog
 
+## v0.7.12 (2026-08-27)
+
+**Phase 12E.1–12E.10 — the adoption-engineering line: the embeddable
+Engine facade, the format-v1 compatibility seal, golden stores, sealed
+evidence manifests, versioned JSON surfaces, structured tracing, the
+hard distribution-court release gate (Almalinux 10.2 / Ubuntu Server
+26.04 / openSUSE Leap 16, Docker Hub images, OOM-limited), MSRV
+verification, and the one-command trial path.**
+
+- **12E.1+12E.3 — the stable embeddable engine facade + the format-v1
+  compatibility seal** (`src/engine/`, `Store` RO support): a deliberately
+  small public API (`Engine` / `EngineOpenOptions` / `BlobId` /
+  `Durability` / `EngineMetrics` + a metric registry with name/unit/
+  snapshot-vs-cumulative/scope/reset/authority per row) above the store,
+  exposing content identity, exact bytes, range reads, durability,
+  maintenance, metrics and typed errors. BlobId = BLAKE3 content id;
+  IDs are stable across compaction / representation migration /
+  encoder-policy changes and are physical-record-type-independent
+  (documented in `docs/api/engine.md`). The blob namespace lives in a
+  dedicated `.engine` directory with a write-then-rename put protocol
+  (crash-safe: a torn put leaves the previous blob intact). Concurrency:
+  many concurrent readers + writers; `close` drains and then takes the
+  mount lock. **Format-v1 seal**: unknown `COMPAT` is ignored, unknown
+  `RO_COMPAT` refuses writable open and permits read-only (the
+  documented fallback — the old implementation refused ALL nonzero
+  ro_compat; now resolved in favor of the documented contract), unknown
+  `INCOMPAT` refuses open. Typed `CompatibilityError` carries format
+  major/minor, the unknown bit, the mask, the required access mode and
+  remediation; `StoreConfig.read_only` + `Store::open` RO enforcement.
+  Fixed en route: rename-replay clobbered `extent_root` (silent zero
+  reads after recovery) — regression-pinned in `write_race.rs`.
+- **12E.2 — optional frontend/transport features** (`fuse` / `ublk` /
+  `uring`; base = no defaults): the base library embeds the engine, the
+  store, fsck, GC — with NO FUSE, NO ublk, and the reference SyncIo
+  transport. `tools/check-feature-matrix.sh` compiles 6 combinations
+  (default / base / base+uring / base+fuse / base+ublk / all) with
+  check + test-no-run. No feature combination changes on-disk semantics.
+- **12E.4 — historical golden-store compatibility court**: real
+  historical binaries preserved under `testdata/golden/{v0.3.0,v0.5.2,
+  v0.6.3}/` (never regenerated), plus `tools/make-golden-fixtures.sh`,
+  per-fixture test drivers and `src/tests/golden_store.rs` — current
+  EntropyFS must open / fsck / enumerate / materialize each fixture with
+  byte-exact logical output, and the fixture hashes are pinned (a future
+  decoder that cannot read a supported golden store fails CI).
+- **12E.5 — sealed-evidence manifest versioning**: `EvidenceManifest`
+  (schema 1: version, git revision, format major/minor, compat /
+  ro_compat / incompat bits, universe versions, encoder-policy version,
+  io backend, worker scheduler, kernel, arch, distro, compiler, host,
+  digest, timestamp) written by `entropyfs evidence-manifest` — the
+  machine-readable authority beside the human-readable
+  `court-<ts>-<rev>/` archive names.
+- **12E.6 — operator-grade JSON surfaces**: `entropyfs status --json`,
+  `entropyfs fsck --json`, `entropyfs scrub --json`, and the new
+  `entropyfs metrics [--json]` — external DTOs (not raw struct
+  serialization), versioned schemas, typed fsck findings
+  (`code`/`severity`/`object`/`observed`/`limit`). Metrics were
+  refactored to `collect_engine_metrics(store)` with the full
+  accounting surface (logical/reachable/backing/allocated bytes,
+  live/dead/index-hidden/unindexed/torn/padding/format/unexplained
+  bytes, model bytes, CAS/exact-ref savings, GC runs/scanned/copied/
+  reclaimed, compaction write amplification, optimizer
+  scanned/rewritten/bytes-saved, reference-depth histogram, epoch
+  pending/checkpoint count, worker queue depth, latency accounting).
+- **12E.7 — structured tracing**: `perf::trace` span! macro (optional
+  `tracing` feature, default-on; no-op without a subscriber) on engine
+  put/get/range/sync/compact, store open/create, durability barrier,
+  epoch checkpoint, GC; truncated content ids; never payload bytes.
+- **12E.8 — the portable distribution court — the hard release gate**:
+  `tools/distro-court.sh` + `distro-court-inner.sh` run the 17-stage
+  court (pristine minimal image → documented prereqs → rustup →
+  `cargo build --release --locked` → tests → install → mkfs → Engine
+  API smoke → SyncIo smoke → UringIo capability probe → FUSE mount
+  where the runtime permits → POSIX smoke → unmount → `fsck --json` →
+  reopen + hash verify → compact/GC → reopen + fsck) inside **OOM-
+  limited Docker VMs** (`--memory 4g --memory-swap 6g`, the hard
+  requirement) on **Docker Hub images** — `almalinux:10.2`,
+  `ubuntu:26.04`, `opensuse/leap:16.0` — with immutable image digests
+  recorded in the sealed evidence, capability waivers carrying the exact
+  failed probe/command/error/requirement, and a separate
+  `tools/docker/` vendor-artifact lane for registries requiring
+  credentials (SLES). **All three lanes sealed PASS with zero waivers**
+  (immutable digests + full logs under `evidence/portability/
+  distro-court-*/`). Docs: `docs/portability/distro-court.md`,
+  `docs/portability/support-matrix.md`.
+- **12E.9 — MSRV + distro Rust policy**: `tools/check-msrv.sh`; declared
+  MSRV 1.87 verified (check all-targets under default AND base feature
+  sets + release builds); the distro's packaged Rust is NOT the
+  project's MSRV (rustup toolchain is the documented install path);
+  `docs/portability/msrv.md`.
+- **12E.10 — one-command trial path**: `cargo install entropyfs --locked`
+  → `entropyfs mkfs` → `entropyfs mount`; `src/cli/errors.rs` classifies
+  every configuration failure (missing /dev/fuse, missing capability,
+  unknown INCOMPAT bit, unsupported RO_COMPAT for RW, io_uring
+  unavailable, ublk unavailable) with typed errors — no opaque EIO, no
+  panics; `tools/trial-path.sh` PASSES all six classified probes.
+
+Release evidence: the sealed distribution court (three distros, zero
+waivers) is in `evidence/portability/distro-court-*/`; the feature
+matrix and MSRV checks are reproducible via `tools/`. Remaining 12E
+sub-phases (11–24: real-device transport court, small-object packing
+oracle, object-store adoption court, C ABI, Go binding, policy gates,
+docs, CI matrix) continue in v0.7.13+.
+
 ## v0.7.11 (2026-08-27)
 
 **12D-0 — the grammar-addressed entropy OFFLINE oracle: the fully-accounted

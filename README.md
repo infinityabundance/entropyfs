@@ -64,7 +64,7 @@ For sealed performance and experimental evidence, see
   closed** (11A hostile input → 11B reconciliation → 11C synchronization
   removal → 11D oracle → 11E fair pool, mount default → 11F observer
   shard); see `docs/performance/worker-pool-probe.md` and CHANGELOG
-  v0.7.4–0.7.11.
+  v0.7.4–0.7.12.
 - Current decision: the pool is the mount default
   (`available_parallelism()` workers; `--no-worker-pool` restores the 11C
   semaphore as the fallback). Phase 12's four research oracles are all
