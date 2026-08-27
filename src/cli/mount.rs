@@ -124,7 +124,8 @@ pub fn run(args: &MountArgs) -> Result<(), String> {
     };
     config.io_backend = crate::store::io::IoBackendKind::parse(&args.io_backend)?;
     config.io_uring_entries = args.io_uring_entries;
-    let store = Store::open(&args.store, &config).map_err(|e| e.to_string())?;
+    let store =
+        Store::open(&args.store, &config).map_err(|e| crate::cli::errors::open(&args.store, &e))?;
     // Phase-11E default flip (sealed by the mounted-FUSE court): the pool
     // is ON by default with available_parallelism() workers; the semaphore
     // remains reachable via --no-worker-pool (the fallback) and via
@@ -149,7 +150,8 @@ pub fn run(args: &MountArgs) -> Result<(), String> {
         stats_file: args.stats_file.clone(),
         worker_pool_threads: pool_threads,
     };
-    let session = do_mount(&params, store).map_err(|e| e.to_string())?;
+    let session = do_mount(&params, store)
+        .map_err(|e| crate::cli::errors::fuse_mount(&args.mountpoint, &e.to_string()))?;
     println!(
         "entropyfs mounted: {} -> {} (pid {})",
         params.store_dir.display(),

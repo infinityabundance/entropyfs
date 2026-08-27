@@ -58,8 +58,13 @@ pub struct StatusArgs {
 
 /// Run status.
 pub fn run(args: &StatusArgs) -> Result<(), String> {
-    // Try-lock: if the store is mounted, report it.
-    if crate::fsck::ensure_unmounted(&args.store).is_err() {
+    // Try-lock: a missing store is an error ("run entropyfs mkfs"); a
+    // held lock means the store is mounted — report it (reading a live
+    // store could observe a torn mid-checkpoint state).
+    if let Err(m) = crate::fsck::ensure_unmounted(&args.store) {
+        if m.starts_with("no entropyfs store") {
+            return Err(m);
+        }
         if args.json {
             let j = crate::cli::json::StatusJson {
                 schema_version: 1,

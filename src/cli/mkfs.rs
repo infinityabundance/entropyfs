@@ -51,7 +51,8 @@ pub fn run(args: &MkfsArgs) -> Result<(), String> {
         io_uring_entries: args.io_uring_entries,
         ..Default::default()
     };
-    Store::create(&args.store, &config, uuid).map_err(|e| e.to_string())?;
+    Store::create(&args.store, &config, uuid)
+        .map_err(|e| crate::cli::errors::transport(config.io_backend, &e))?;
     println!(
         "created entropyfs store at {} (uuid {})",
         args.store.display(),

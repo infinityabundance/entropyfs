@@ -275,7 +275,16 @@ pub fn fsck(dir: &Path, options: &FsckOptions) -> Result<FsckReport, String> {
 
 /// Ensure fsck does not run against a mounted store: try-lock the store's
 /// exclusive lock; fail with a clear message when the store is in use.
+/// A store directory that does not exist is reported distinctly (the
+/// trial path must say "run entropyfs mkfs", never "mounted").
 pub fn ensure_unmounted(dir: &Path) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Err(format!(
+            "no entropyfs store at {} (run `entropyfs mkfs {}` first)",
+            dir.display(),
+            dir.display()
+        ));
+    }
     use std::fs::OpenOptions;
     let path = dir.join("lock");
     let file = OpenOptions::new()
