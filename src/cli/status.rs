@@ -51,12 +51,58 @@ pub struct StatusArgs {
     /// Store directory.
     #[arg(value_name = "STORE")]
     pub store: PathBuf,
+    /// Emit the versioned JSON DTO (Phase 12E.6; schema_version 1).
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Run status.
 pub fn run(args: &StatusArgs) -> Result<(), String> {
     // Try-lock: if the store is mounted, report it.
     if crate::fsck::ensure_unmounted(&args.store).is_err() {
+        if args.json {
+            let j = crate::cli::json::StatusJson {
+                schema_version: 1,
+                state: "mounted".into(),
+                store: args.store.display().to_string(),
+                uuid: String::new(),
+                generation: 0,
+                format: crate::engine::FormatInfo {
+                    format_major: 0,
+                    format_minor: 0,
+                    compat: 0,
+                    ro_compat: 0,
+                    incompat: 0,
+                    io_backend: String::new(),
+                },
+                physical_capacity_bytes: 0,
+                physical_used_bytes: 0,
+                physical_free_bytes: 0,
+                logical_bytes: 0,
+                inode_count: 0,
+                snapshot_count: 0,
+                fsck: crate::cli::json::StatusFsck {
+                    status: "unknown".into(),
+                    errors: 0,
+                    warnings: 0,
+                    leaked_bytes: 0,
+                    leaked_objects: 0,
+                },
+                physical: None,
+                dsfb: crate::cli::json::StatusDsfb {
+                    tracked_chunks: 0,
+                    steps: 0,
+                    drift_events: 0,
+                    slew_events: 0,
+                    narrowed_searches: 0,
+                },
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&j).unwrap_or_else(|_| "{}".into())
+            );
+            return Ok(());
+        }
         println!("state: mounted (lock held)");
         return Ok(());
     }
@@ -70,11 +116,65 @@ pub fn run(args: &StatusArgs) -> Result<(), String> {
     // Full fsck accounting for the health summary.
     let report =
         crate::fsck::fsck(&args.store, &FsckOptions::default()).map_err(|e| e.to_string())?;
+    // Phase-9H: physical reconciliation (independent of the derived index).
+    let phys = crate::store::physical::physical_report(&store).ok();
+    let dsfb = store.dsfb_stats();
+    let uuid_hex = crate::cli::mkfs::hex_encode(&store.current_root().uuid);
+    let bits = store.feature_bits();
+    if args.json {
+        let j = crate::cli::json::StatusJson {
+            schema_version: 1,
+            state: "ok".into(),
+            store: args.store.display().to_string(),
+            uuid: uuid_hex,
+            generation: store.generation(),
+            format: crate::engine::FormatInfo {
+                format_major: store.current_root().format_major,
+                format_minor: store.current_root().format_minor,
+                compat: bits.compat,
+                ro_compat: bits.ro_compat,
+                incompat: bits.incompat,
+                io_backend: store.config().io_backend.name().to_string(),
+            },
+            physical_capacity_bytes: capacity,
+            physical_used_bytes: used,
+            physical_free_bytes: capacity.saturating_sub(used),
+            logical_bytes: logical,
+            inode_count: inodes.len(),
+            snapshot_count: snapshots.len(),
+            fsck: crate::cli::json::StatusFsck {
+                status: if report.is_clean() { "clean" } else { "issues" }.into(),
+                errors: report.error_count(),
+                warnings: report.warning_count(),
+                leaked_bytes: report.leaked_bytes,
+                leaked_objects: report.leaked_objects,
+            },
+            physical: phys.map(|p| crate::engine::PhysicalMetrics {
+                live_bytes: p.live_bytes,
+                dead_indexed_bytes: p.dead_indexed_bytes,
+                index_hidden_bytes: p.index_hidden_bytes,
+                unindexed_bytes: p.unindexed_bytes,
+                torn_bytes: p.torn_bytes,
+                zero_padding_bytes: p.zero_padding_bytes,
+                format_overhead_bytes: p.format_overhead_bytes,
+                unexplained_bytes: p.unexplained(),
+            }),
+            dsfb: crate::cli::json::StatusDsfb {
+                tracked_chunks: dsfb.tracked_chunks,
+                steps: dsfb.steps,
+                drift_events: dsfb.drift_events,
+                slew_events: dsfb.slew_events,
+                narrowed_searches: dsfb.narrowed_searches,
+            },
+        };
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&j).unwrap_or_else(|_| "{}".into())
+        );
+        return Ok(());
+    }
     println!("store:          {}", args.store.display());
-    println!(
-        "uuid:           {}",
-        crate::cli::mkfs::hex_encode(&store.current_root().uuid)
-    );
+    println!("uuid:           {uuid_hex}");
     println!("generation:     {}", store.generation());
     println!(
         "physical:       {} bytes capacity, {} used ({} free)",
@@ -98,8 +198,7 @@ pub fn run(args: &StatusArgs) -> Result<(), String> {
         "gc reclaimable: {} bytes ({} objects)",
         report.leaked_bytes, report.leaked_objects
     );
-    // Phase-9H: physical reconciliation (independent of the derived index).
-    if let Ok(phys) = crate::store::physical::physical_report(&store) {
+    if let Some(phys) = phys {
         println!(
             "physical:       {} B files = {} B live + {} B dead-indexed + {} B index-hidden + {} B unindexed + {} B overhead ({} unexplained)",
             phys.file_bytes,
@@ -113,7 +212,6 @@ pub fn run(args: &StatusArgs) -> Result<(), String> {
             phys.unexplained()
         );
     }
-    let dsfb = store.dsfb_stats();
     println!(
         "dsfb:           {} chunks tracked, {} steps, {} drift, {} slew, {} narrowed",
         dsfb.tracked_chunks,

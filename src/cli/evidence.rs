@@ -22,7 +22,6 @@
 
 use std::path::PathBuf;
 
-use crate::evidence::environment::Environment;
 use crate::evidence::manifest::EvidenceManifest;
 
 /// Options for evidence-manifest.

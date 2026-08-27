@@ -11,6 +11,8 @@ pub mod explain;
 pub mod fsck;
 pub mod gc;
 pub mod inspect;
+pub mod json;
+pub mod metrics;
 pub mod mkfs;
 #[cfg(feature = "fuse")]
 pub mod mount;

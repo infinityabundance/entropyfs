@@ -51,6 +51,9 @@ pub struct FsckArgs {
     /// Repair safe issues (torn segment tails).
     #[arg(long)]
     pub repair: bool,
+    /// Emit the versioned JSON DTO (Phase 12E.6; schema_version 1).
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Options for scrub.
@@ -62,6 +65,9 @@ pub struct ScrubArgs {
     /// Repair safe issues.
     #[arg(long)]
     pub repair: bool,
+    /// Emit the versioned JSON DTO (Phase 12E.6; schema_version 1).
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Run fsck.
@@ -72,6 +78,17 @@ pub fn run_fsck(args: &FsckArgs) -> Result<(), String> {
         ..Default::default()
     };
     let report = fsck(&args.store, &options).map_err(|e| e.to_string())?;
+    if args.json {
+        let j = crate::cli::json::FsckJson::from_report(&report);
+        // In JSON mode the DTO is the ONLY output (its `status` field
+        // carries the machine result); the exit code still reflects it.
+        println!("{}", j.to_json());
+        return if report.is_clean() {
+            Ok(())
+        } else {
+            Err("fsck found issues".into())
+        };
+    }
     print!("{}", report.render());
     if report.is_clean() {
         println!("fsck: OK");
@@ -95,6 +112,17 @@ pub fn run_scrub(args: &ScrubArgs) -> Result<(), String> {
         ..Default::default()
     };
     let report = fsck(&args.store, &options).map_err(|e| e.to_string())?;
+    if args.json {
+        let j = crate::cli::json::FsckJson::from_report(&report);
+        // JSON mode: the DTO is the ONLY output (its `status` field
+        // carries the machine result); the exit code still reflects it.
+        println!("{}", j.to_json());
+        return if report.is_clean() {
+            Ok(())
+        } else {
+            Err("scrub found issues".into())
+        };
+    }
     print!("{}", report.render());
     if report.is_clean() {
         println!("scrub: OK");

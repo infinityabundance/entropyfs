@@ -1000,106 +1000,7 @@ impl Engine {
     pub fn metrics(&self) -> Result<EngineMetrics, EngineError> {
         let store = self.acquire_store()?;
         let _op = OpGuard::new(self);
-        let root = store.current_root();
-        let bits = store.feature_bits();
-        let stats = store.stats();
-        let capacity = store.physical_capacity();
-        let used = store.physical_used();
-        let phys = crate::store::physical::physical_report(&store).ok();
-        let dsfb = store.dsfb_stats();
-        // Destructure the optional physical report once (it is not `Copy`;
-        // every field is 0 when the reconciliation is unavailable).
-        let (live_b, dead_b, hidden_b, unindexed_b, torn_b, pad_b, fmt_b, unexp_b) = match &phys {
-            Some(r) => (
-                r.live_bytes,
-                r.dead_indexed_bytes,
-                r.index_hidden_bytes,
-                r.unindexed_bytes,
-                r.torn_bytes,
-                r.zero_padding_bytes,
-                r.format_overhead_bytes,
-                r.unexplained(),
-            ),
-            None => (0, 0, 0, 0, 0, 0, 0, 0),
-        };
-        let phases: Vec<PhaseMetrics> = store
-            .perf()
-            .snapshot()
-            .into_iter()
-            .map(|row| PhaseMetrics {
-                phase: row.phase.to_string(),
-                count: row.count,
-                total_ms: row.total_ms,
-                p50_us: row.p50_us,
-                p95_us: row.p95_us,
-                p99_us: row.p99_us,
-            })
-            .collect();
-        // O(n) namespace scan for the blob count (documented). The
-        // lookup's epoch guard is dropped before the scan acquires its
-        // own (the epoch mutex is not reentrant).
-        let blob_count = self
-            .engine_dir_ino(&store)
-            .map(|dir_ino| {
-                let ep = store.epoch();
-                store
-                    .read_dir_epoch(&ep, dir_ino)
-                    .map(|entries| {
-                        entries
-                            .iter()
-                            .filter(|(_, e)| e.d_type == directory::dt::DT_REG)
-                            .count() as u64
-                    })
-                    .unwrap_or(0)
-            })
-            .unwrap_or(0);
-        Ok(EngineMetrics {
-            schema_version: 1,
-            format: FormatInfo {
-                format_major: root.format_major,
-                format_minor: root.format_minor,
-                compat: bits.compat,
-                ro_compat: bits.ro_compat,
-                incompat: bits.incompat,
-                io_backend: store.config().io_backend.name().to_string(),
-            },
-            accounting: AccountingMetrics {
-                logical_bytes: store.logical_bytes().unwrap_or(0),
-                reachable_bytes: stats.reachable_bytes,
-                physical_used_bytes: used,
-                physical_capacity_bytes: capacity,
-                physical_free_bytes: capacity.saturating_sub(used),
-                object_count: store.object_index().len() as u64,
-                data_record_count: stats.data_record_count,
-                blob_count,
-            },
-            physical: PhysicalMetrics {
-                live_bytes: live_b,
-                dead_indexed_bytes: dead_b,
-                index_hidden_bytes: hidden_b,
-                unindexed_bytes: unindexed_b,
-                torn_bytes: torn_b,
-                zero_padding_bytes: pad_b,
-                format_overhead_bytes: fmt_b,
-                unexplained_bytes: unexp_b,
-            },
-            gc: GcMetrics {
-                unreachable_bytes: stats.unreachable_bytes,
-            },
-            dsfb: DsfbMetrics {
-                tracked_chunks: dsfb.tracked_chunks,
-                steps: dsfb.steps,
-                drift_events: dsfb.drift_events,
-                slew_events: dsfb.slew_events,
-                narrowed_searches: dsfb.narrowed_searches,
-                candidates_evaluated: store.candidates_evaluated(),
-            },
-            cache: CacheMetrics {
-                model_cache_hits: store.model_cache_hits(),
-                model_cache_misses: store.model_cache_misses(),
-            },
-            write_path_phases: phases,
-        })
+        collect_engine_metrics(&store)
     }
 
     /// Close the engine: waits for in-flight operations to drain, then
@@ -1163,6 +1064,119 @@ fn contains_suffix(name: &[u8], suffix: &[u8]) -> bool {
         return false;
     }
     &name[name.len() - suffix.len()..] == suffix
+}
+
+/// Collect the versioned metrics DTO from any store (used by
+/// [`Engine::metrics`] and by the `entropyfs metrics --json` CLI, which
+/// serves stores without an engine namespace too). The blob count is the
+/// engine namespace's file count (0 when the namespace is absent); every
+/// other section is store accounting. See the [`METRIC_REGISTRY`] for
+/// precise definitions.
+pub fn collect_engine_metrics(store: &Store) -> Result<EngineMetrics, EngineError> {
+    let root = store.current_root();
+    let bits = store.feature_bits();
+    let stats = store.stats();
+    let capacity = store.physical_capacity();
+    let used = store.physical_used();
+    let phys = crate::store::physical::physical_report(store).ok();
+    let dsfb = store.dsfb_stats();
+    // Destructure the optional physical report once (it is not `Copy`;
+    // every field is 0 when the reconciliation is unavailable).
+    let (live_b, dead_b, hidden_b, unindexed_b, torn_b, pad_b, fmt_b, unexp_b) = match &phys {
+        Some(r) => (
+            r.live_bytes,
+            r.dead_indexed_bytes,
+            r.index_hidden_bytes,
+            r.unindexed_bytes,
+            r.torn_bytes,
+            r.zero_padding_bytes,
+            r.format_overhead_bytes,
+            r.unexplained(),
+        ),
+        None => (0, 0, 0, 0, 0, 0, 0, 0),
+    };
+    let phases: Vec<PhaseMetrics> = store
+        .perf()
+        .snapshot()
+        .into_iter()
+        .map(|row| PhaseMetrics {
+            phase: row.phase.to_string(),
+            count: row.count,
+            total_ms: row.total_ms,
+            p50_us: row.p50_us,
+            p95_us: row.p95_us,
+            p99_us: row.p99_us,
+        })
+        .collect();
+    // O(n) namespace scan for the blob count (documented): resolve the
+    // engine namespace through the store's own directory lookup (the
+    // engine helper is method-only; the scan uses the epoch guard once).
+    let blob_count = {
+        let ep = store.epoch();
+        match store
+            .dir_lookup_epoch(&ep, 1, ENGINE_DIR_NAME)
+            .ok()
+            .flatten()
+        {
+            Some(e) if e.d_type == directory::dt::DT_DIR => store
+                .read_dir_epoch(&ep, e.ino)
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .filter(|(_, e)| e.d_type == directory::dt::DT_REG)
+                        .count() as u64
+                })
+                .unwrap_or(0),
+            _ => 0,
+        }
+    };
+    Ok(EngineMetrics {
+        schema_version: 1,
+        format: FormatInfo {
+            format_major: root.format_major,
+            format_minor: root.format_minor,
+            compat: bits.compat,
+            ro_compat: bits.ro_compat,
+            incompat: bits.incompat,
+            io_backend: store.config().io_backend.name().to_string(),
+        },
+        accounting: AccountingMetrics {
+            logical_bytes: store.logical_bytes().unwrap_or(0),
+            reachable_bytes: stats.reachable_bytes,
+            physical_used_bytes: used,
+            physical_capacity_bytes: capacity,
+            physical_free_bytes: capacity.saturating_sub(used),
+            object_count: store.object_index().len() as u64,
+            data_record_count: stats.data_record_count,
+            blob_count,
+        },
+        physical: PhysicalMetrics {
+            live_bytes: live_b,
+            dead_indexed_bytes: dead_b,
+            index_hidden_bytes: hidden_b,
+            unindexed_bytes: unindexed_b,
+            torn_bytes: torn_b,
+            zero_padding_bytes: pad_b,
+            format_overhead_bytes: fmt_b,
+            unexplained_bytes: unexp_b,
+        },
+        gc: GcMetrics {
+            unreachable_bytes: stats.unreachable_bytes,
+        },
+        dsfb: DsfbMetrics {
+            tracked_chunks: dsfb.tracked_chunks,
+            steps: dsfb.steps,
+            drift_events: dsfb.drift_events,
+            slew_events: dsfb.slew_events,
+            narrowed_searches: dsfb.narrowed_searches,
+            candidates_evaluated: store.candidates_evaluated(),
+        },
+        cache: CacheMetrics {
+            model_cache_hits: store.model_cache_hits(),
+            model_cache_misses: store.model_cache_misses(),
+        },
+        write_path_phases: phases,
+    })
 }
 
 #[cfg(test)]

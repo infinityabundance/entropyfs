@@ -48,6 +48,8 @@ enum Command {
     Unmount(cli::unmount::UnmountArgs),
     /// Store status and accounting.
     Status(cli::status::StatusArgs),
+    /// Operational metrics DTO (Phase 12E.6).
+    Metrics(cli::metrics::MetricsArgs),
     /// Per-extent representation detail for a file.
     Inspect(cli::inspect::InspectArgs),
     /// Full representation breakdown of a file.
@@ -109,6 +111,7 @@ fn main() {
         #[cfg(feature = "fuse")]
         Command::Unmount(a) => cli::unmount::run(a),
         Command::Status(a) => cli::status::run(a),
+        Command::Metrics(a) => cli::metrics::run(a),
         Command::Inspect(a) => cli::inspect::run(a),
         Command::Explain(a) => cli::explain::run(a),
         Command::Snapshot { action } => match action {
