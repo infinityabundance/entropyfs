@@ -1366,6 +1366,11 @@ impl Store {
         // Phase 12E.3: the barrier is a write (fdatasync + superblock
         // fsync); a read-only open refuses it with a typed error.
         self.ensure_writable()?;
+        crate::perf::trace::span!(
+            "store.durability_barrier",
+            op = "durability_barrier",
+            gen = self.generation()
+        );
         // Phase-11B: the fsync path gets its own envelope (pass-through
         // inside an outer request). The checkpoint's cp_* rows and the
         // barrier rows below partition it.
@@ -5289,6 +5294,13 @@ impl Store {
         // Phase 12E.3: a checkpoint merges + publishes a new root (a
         // write); a read-only open refuses it.
         self.ensure_writable()?;
+        crate::perf::trace::span!(
+            "store.epoch_checkpoint",
+            op = "epoch_checkpoint",
+            pending = self
+                .epoch_pending
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
         // Fast path: nothing pending (also avoids taking the commit lock
         // for the common empty-epoch case).
         if self.epoch().is_empty() {

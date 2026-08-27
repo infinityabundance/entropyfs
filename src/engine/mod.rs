@@ -766,6 +766,13 @@ impl Engine {
         let store = self.acquire_store()?;
         let _op = OpGuard::new(self);
         let id = BlobId::from(ChunkId::of(bytes));
+        crate::perf::trace::span!(
+            "engine.put_blob",
+            op = "put_blob",
+            len = bytes.len() as u64,
+            id = trace_id(&id),
+            durable = matches!(durability, Durability::Durable)
+        );
         let hooks = CrashHooks::none();
         let dir_ino = self.engine_dir_ino(&store)?;
         let final_name = Self::blob_name(&id);
@@ -880,6 +887,13 @@ impl Engine {
     ) -> Result<Vec<u8>, EngineError> {
         let store = self.acquire_store()?;
         let _op = OpGuard::new(self);
+        crate::perf::trace::span!(
+            "engine.read_blob_range",
+            op = "read_range",
+            id = trace_id(&id),
+            offset = offset,
+            len = len as u64
+        );
         let dir_ino = self.engine_dir_ino(&store)?;
         let name = Self::blob_name(&id);
         let ep = store.epoch();
@@ -929,6 +943,7 @@ impl Engine {
     pub fn sync(&self) -> Result<(), EngineError> {
         let store = self.acquire_store()?;
         let _op = OpGuard::new(self);
+        crate::perf::trace::span!("engine.sync", op = "sync");
         store
             .durability_barrier(&CrashHooks::none())
             .map_err(EngineError::from)
@@ -945,6 +960,7 @@ impl Engine {
     pub fn compact(&self) -> Result<CompactionReport, EngineError> {
         let store = self.acquire_store()?;
         let _op = OpGuard::new(self);
+        crate::perf::trace::span!("engine.compact", op = "compact");
         let hooks = CrashHooks::none();
         // 1. Sweep stale tmp files (engine garbage GC cannot see as
         //    unreachable — tmp inodes are reachable from the namespace
@@ -1064,6 +1080,13 @@ fn contains_suffix(name: &[u8], suffix: &[u8]) -> bool {
         return false;
     }
     &name[name.len() - suffix.len()..] == suffix
+}
+
+/// Truncated content id for trace attributes: the first 8 hex characters
+/// of the blob id. Never the full id unless a caller documents a
+/// stronger need (trace attribute discipline, Phase 12E.7).
+fn trace_id(id: &BlobId) -> String {
+    id.to_string()[..8].to_string()
 }
 
 /// Collect the versioned metrics DTO from any store (used by

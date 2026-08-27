@@ -33,7 +33,7 @@ path = "src/main.rs"
 # silently change on-disk semantics: features gate CODE (frontends and
 # transports), never the persistent format.
 [features]
-default = ["fuse", "ublk", "uring"]
+default = ["fuse", "ublk", "uring", "tracing"]
 
 # The FUSE/VFS frontend (`src/fuse`, `entropyfs mount/unmount`).
 fuse = ["dep:fuser", "dep:ctrlc"]
@@ -46,6 +46,13 @@ ublk = ["dep:libublk", "dep:smol", "dep:ctrlc"]
 # The io_uring storage transport (`UringIo`; `SyncIo` remains the
 # crash-consistency oracle and the default regardless).
 uring = ["dep:io-uring"]
+
+# Phase 12E.7: structured tracing spans on the externally important
+# operations (engine put/get/range/sync/compact, store open/create,
+# durability barrier, epoch checkpoint, GC). Default-ON (the daemon
+# build); without a subscriber the spans are no-ops. Embedders building
+# the base library with --no-default-features drop them entirely.
+tracing = ["dep:tracing"]
 
 [dependencies]
 # --- Entropy / representation backends (external dependencies, not EntropyFS subsystems) ---
@@ -68,6 +75,12 @@ rustix = { version = "1", features = ["fs", "param", "std", "time"] } # safe sys
 # the tree. Safe API surface; the only unsafe in the crate is confined to
 # store/io/uring.rs (SQE submission). Phase 12E.2: optional (feature `uring`).
 io-uring = { version = "=0.7.14", optional = true }
+
+# Phase 12E.7: structured tracing (optional; default-on via the
+# `tracing` feature). Spans on externally important operations only —
+# never user payload bytes, never per-chunk hot loops; no-op without a
+# subscriber.
+tracing = { version = "0.1.44", optional = true, default-features = false, features = ["std"] }
 
 # --- CLI / diagnostics ---
 clap = { version = "4", features = ["derive"] }

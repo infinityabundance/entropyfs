@@ -215,6 +215,11 @@ pub fn optimize_pass(
     max_extents: Option<u64>,
     mut cursor: Option<&mut PassCursor>,
 ) -> Result<BackgroundStats, StoreError> {
+    crate::perf::trace::span!(
+        "optimizer.optimize_pass",
+        op = "optimize_pass",
+        max_extents = max_extents.unwrap_or(u64::MAX)
+    );
     // ---------------------------------------------------------------------
     // Stage 1: Flush the active epoch into the committed store.
     //
@@ -580,6 +585,11 @@ pub fn shared_dict_pass(
     options: OptimizeOptions,
     max_extents: Option<u64>,
 ) -> Result<BackgroundStats, StoreError> {
+    crate::perf::trace::span!(
+        "optimizer.shared_dict_pass",
+        op = "shared_dict_pass",
+        max_extents = max_extents.unwrap_or(u64::MAX)
+    );
     shared_dict_pass_pool(store, options, max_extents, MAX_ANCHOR_POOL)
 }
 

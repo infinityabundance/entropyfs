@@ -3,6 +3,8 @@
 //!
 //! Three collectors:
 //!
+//! Three collectors:
+//!
 //! - [`Timings`]: named write-path phase timers (read-modify-write,
 //!   hashing, candidate search by family, §32 validation, commit-lock
 //!   wait, B-tree mutation, transaction pruning, segment append/flush,
@@ -150,6 +152,9 @@
 //!   91.7% of `prepare`; identity holds (residual ≤ 0.9%).
 
 #![forbid(unsafe_code)]
+
+// Phase 12E.7: structured tracing spans (feature `tracing`).
+pub mod trace;
 
 use std::collections::HashMap;
 use std::sync::Mutex;

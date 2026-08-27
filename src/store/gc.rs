@@ -869,6 +869,7 @@ pub fn collect(
     store: &Store,
     hooks: &crate::store::transaction::CrashHooks,
 ) -> Result<u64, StoreError> {
+    crate::perf::trace::span!("gc.collect", op = "gc_collect");
     // ---------------------------------------------------------------------
     // Stage 1: Flush the active epoch.
     //
@@ -932,6 +933,7 @@ pub fn compact_full(
     store: &Store,
     hooks: &crate::store::transaction::CrashHooks,
 ) -> Result<u64, StoreError> {
+    crate::perf::trace::span!("gc.compact_full", op = "gc_compact_full");
     let mark = mark_live_full(store)?;
     let victims: Vec<u64> = segment::list_segments(store.dir())?;
     if victims.is_empty() {
