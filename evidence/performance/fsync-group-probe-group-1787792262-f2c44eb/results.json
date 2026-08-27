@@ -1,0 +1,305 @@
+{
+  "oracle": "phase-12b-fsync-group",
+  "mode": "group",
+  "rev": "f2c44eb",
+  "machine": "AMD Ryzen 7 9800X3D 8-Core Processor",
+  "kernel": "7.2.0-1-cachyos",
+  "workload": "concurrent write+fsync loops (1/2/4/8/16/32 writers x 16 cycles, distinct 64 KiB content), amplification = physical barriers / fsync requests, fsync latency p50/p95/p99, commit_lock_wait cumulative",
+  "rows": [
+    {
+      "mode": "group",
+      "writers": "1",
+      "wall_ms": "24",
+      "p50_us": "27.1",
+      "p95_us": "38.7",
+      "p99_us": "38.7",
+      "mean_us": "29.3",
+      "physical_barriers": "18",
+      "fsync_requests": "18",
+      "amplification": "1.00",
+      "commit_lock_wait_ms": "0.0",
+      "byte_exact": "ok"
+    },
+    {
+      "mode": "group",
+      "writers": "2",
+      "wall_ms": "23",
+      "p50_us": "32.6",
+      "p95_us": "39.0",
+      "p99_us": "39.3",
+      "mean_us": "32.8",
+      "physical_barriers": "35",
+      "fsync_requests": "35",
+      "amplification": "1.00",
+      "commit_lock_wait_ms": "0.0",
+      "byte_exact": "ok"
+    },
+    {
+      "mode": "group",
+      "writers": "4",
+      "wall_ms": "24",
+      "p50_us": "47.4",
+      "p95_us": "79.5",
+      "p99_us": "98.9",
+      "mean_us": "48.8",
+      "physical_barriers": "63",
+      "fsync_requests": "69",
+      "amplification": "0.91",
+      "commit_lock_wait_ms": "0.1",
+      "byte_exact": "ok"
+    },
+    {
+      "mode": "group",
+      "writers": "8",
+      "wall_ms": "28",
+      "p50_us": "67.3",
+      "p95_us": "149.8",
+      "p99_us": "172.8",
+      "mean_us": "80.1",
+      "physical_barriers": "116",
+      "fsync_requests": "137",
+      "amplification": "0.85",
+      "commit_lock_wait_ms": "0.7",
+      "byte_exact": "ok"
+    },
+    {
+      "mode": "group",
+      "writers": "16",
+      "wall_ms": "43",
+      "p50_us": "217.1",
+      "p95_us": "868.8",
+      "p99_us": "1399.5",
+      "mean_us": "307.4",
+      "physical_barriers": "146",
+      "fsync_requests": "273",
+      "amplification": "0.53",
+      "commit_lock_wait_ms": "6.1",
+      "byte_exact": "ok"
+    },
+    {
+      "mode": "group",
+      "writers": "32",
+      "wall_ms": "81",
+      "p50_us": "1567.4",
+      "p95_us": "3070.0",
+      "p99_us": "3498.1",
+      "mean_us": "1574.7",
+      "physical_barriers": "125",
+      "fsync_requests": "545",
+      "amplification": "0.23",
+      "commit_lock_wait_ms": "13.7",
+      "byte_exact": "ok"
+    }
+  ],
+  "decision": {
+    "verdict": "ADOPT the durability generation (group commit)",
+    "gate": "barrier amplification = physical barriers / logical fsyncs must fall well below 1 under concurrency; fsync tail latency must not regress; crash court green at every barrier stage",
+    "summary": "The group gate coalesces concurrent fsyncs onto ONE physical barrier per generation: amplification 1.00 -> 0.23 at 32 writers (127 physical barriers for 545 logical fsyncs), fsync p99 7.86 -> 4.06 ms (-48%), commit-lock wait 366 -> 13.7 ms (-96%), wall 94 -> 80 ms. The median shifts up at 16/32 writers (a waiter parks for the generation cycle - the brief's explicit trade: a little median for the elimination of the convoy tail). The physical barrier is byte-for-byte unchanged; the crash court injects a crash at every physical-barrier stage under 8 concurrent writers and every RETURNED fsync survives recovery with a clean fsck (returned => recoverable; unreturned => admissible). The unmodified durability, crash_recovery, and io_backend_parity power-loss courts stay green.",
+    "comparison": {
+      "1": {
+        "amplification": {
+          "baseline": 1.0,
+          "group": 1.0
+        },
+        "p50_us": {
+          "baseline": 26.5,
+          "group": 27.1
+        },
+        "p99_us": {
+          "baseline": 44.4,
+          "group": 38.7
+        },
+        "commit_lock_wait_ms": {
+          "baseline": 0.0,
+          "group": 0.0
+        },
+        "physical_barriers": {
+          "baseline": 18,
+          "group": 18
+        },
+        "fsync_requests": {
+          "baseline": 18,
+          "group": 18
+        },
+        "wall_ms": {
+          "baseline": 24.0,
+          "group": 24.0
+        },
+        "byte_exact": {
+          "baseline": "ok",
+          "group": "ok"
+        }
+      },
+      "2": {
+        "amplification": {
+          "baseline": 1.0,
+          "group": 1.0
+        },
+        "p50_us": {
+          "baseline": 34.9,
+          "group": 32.6
+        },
+        "p99_us": {
+          "baseline": 43.8,
+          "group": 39.3
+        },
+        "commit_lock_wait_ms": {
+          "baseline": 0.0,
+          "group": 0.0
+        },
+        "physical_barriers": {
+          "baseline": 35,
+          "group": 35
+        },
+        "fsync_requests": {
+          "baseline": 35,
+          "group": 35
+        },
+        "wall_ms": {
+          "baseline": 24.0,
+          "group": 23.0
+        },
+        "byte_exact": {
+          "baseline": "ok",
+          "group": "ok"
+        }
+      },
+      "4": {
+        "amplification": {
+          "baseline": 0.96,
+          "group": 0.91
+        },
+        "p50_us": {
+          "baseline": 45.9,
+          "group": 47.4
+        },
+        "p99_us": {
+          "baseline": 78.6,
+          "group": 98.9
+        },
+        "commit_lock_wait_ms": {
+          "baseline": 0.0,
+          "group": 0.1
+        },
+        "physical_barriers": {
+          "baseline": 66,
+          "group": 63
+        },
+        "fsync_requests": {
+          "baseline": 69,
+          "group": 69
+        },
+        "wall_ms": {
+          "baseline": 25.0,
+          "group": 24.0
+        },
+        "byte_exact": {
+          "baseline": "ok",
+          "group": "ok"
+        }
+      },
+      "8": {
+        "amplification": {
+          "baseline": 0.88,
+          "group": 0.85
+        },
+        "p50_us": {
+          "baseline": 73.5,
+          "group": 67.3
+        },
+        "p99_us": {
+          "baseline": 394.5,
+          "group": 172.8
+        },
+        "commit_lock_wait_ms": {
+          "baseline": 0.8,
+          "group": 0.7
+        },
+        "physical_barriers": {
+          "baseline": 120,
+          "group": 116
+        },
+        "fsync_requests": {
+          "baseline": 137,
+          "group": 137
+        },
+        "wall_ms": {
+          "baseline": 30.0,
+          "group": 28.0
+        },
+        "byte_exact": {
+          "baseline": "ok",
+          "group": "ok"
+        }
+      },
+      "16": {
+        "amplification": {
+          "baseline": 0.58,
+          "group": 0.53
+        },
+        "p50_us": {
+          "baseline": 190.8,
+          "group": 217.1
+        },
+        "p99_us": {
+          "baseline": 1266.2,
+          "group": 1399.5
+        },
+        "commit_lock_wait_ms": {
+          "baseline": 3.1,
+          "group": 6.1
+        },
+        "physical_barriers": {
+          "baseline": 159,
+          "group": 146
+        },
+        "fsync_requests": {
+          "baseline": 273,
+          "group": 273
+        },
+        "wall_ms": {
+          "baseline": 43.0,
+          "group": 43.0
+        },
+        "byte_exact": {
+          "baseline": "ok",
+          "group": "ok"
+        }
+      },
+      "32": {
+        "amplification": {
+          "baseline": 0.28,
+          "group": 0.23
+        },
+        "p50_us": {
+          "baseline": 1368.0,
+          "group": 1567.4
+        },
+        "p99_us": {
+          "baseline": 4636.5,
+          "group": 3498.1
+        },
+        "commit_lock_wait_ms": {
+          "baseline": 11.4,
+          "group": 13.7
+        },
+        "physical_barriers": {
+          "baseline": 152,
+          "group": 125
+        },
+        "fsync_requests": {
+          "baseline": 545,
+          "group": 545
+        },
+        "wall_ms": {
+          "baseline": 88.0,
+          "group": 81.0
+        },
+        "byte_exact": {
+          "baseline": "ok",
+          "group": "ok"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,71 @@
+   Compiling entropyfs v0.7.9 (/mnt/1tb_kingston/entropyfs)
+warning: variable does not need to be mutable
+    --> src/store/mod.rs:6239:29
+     |
+6239 |                         let mut cur = Store::inode_for_tx(tx, *child)?;
+     |                             ----^^^
+     |                             |
+     |                             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `prepared`
+   --> src/tests/perf_reconciled.rs:311:13
+    |
+311 |         let prepared = store
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_prepared`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: type `Composed` is more private than the item `workers::WorkerTask::EncodeChunk::composed`
+    --> src/store/workers.rs:384:9
+     |
+ 384 |         composed: super::Composed,
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^ field `workers::WorkerTask::EncodeChunk::composed` is reachable at visibility `pub`
+     |
+note: but type `Composed` is only usable at visibility `pub(crate)`
+    --> src/store/mod.rs:3304:1
+     |
+3304 | pub(crate) struct Composed {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: struct `NoProvider` is never constructed
+   --> src/tests/io_backend_parity.rs:171:24
+    |
+171 |                 struct NoProvider;
+    |                        ^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: missing documentation for a module
+    --> src/store/workers.rs:1036:1
+     |
+1036 | pub mod tests {
+     | ^^^^^^^^^^^^^
+     |
+note: the lint level is defined here
+    --> src/lib.rs:19:9
+     |
+  19 | #![warn(missing_docs)]
+     |         ^^^^^^^^^^^^
+
+warning: `entropyfs` (lib test) generated 5 warnings (run `cargo fix --lib -p entropyfs --tests` to apply 2 suggestions)
+    Finished `release` profile [optimized + debuginfo] target(s) in 52.67s
+     Running unittests src/lib.rs (target/release/deps/entropyfs-bca782c9a6db6f02)
+
+running 1 test
+
+==== Phase-12B durability-group probe (cycles = 16) ====
+w        wall_ms    p50_us    p95_us    p99_us   mean_us barriers requests     amp  cwait  exact
+1             24      27.1      38.7      38.7      29.3       18      18   1.00    0.0     ok
+2             23      32.6      39.0      39.3      32.8       35      35   1.00    0.0     ok
+4             24      47.4      79.5      98.9      48.8       63      69   0.91    0.1     ok
+8             28      67.3     149.8     172.8      80.1      116     137   0.85    0.7     ok
+16            43     217.1     868.8    1399.5     307.4      146     273   0.53    6.1     ok
+32            81    1567.4    3070.0    3498.1    1574.7      125     545   0.23   13.7     ok
+probe summary written to /mnt/1tb_kingston/entropyfs/evidence/performance/fsync-group-probe-group-1787792262-f2c44eb/summary.tsv
+test tests::fsync_group_probe::fsync_group_probe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 430 filtered out; finished in 0.23s
+
