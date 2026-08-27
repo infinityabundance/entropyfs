@@ -8,7 +8,12 @@
 /// The ledger's designated unsafe files, relative to the crate root
 /// (`src/`). Adding a file here WITHOUT a ledger entry is a policy
 /// violation; the ledger doc describes the required preconditions.
-const LEDGER_UNSAFE_FILES: &[&str] = &["platform/io_uring.rs"];
+///
+/// Phase 12E.14: `ffi/mod.rs` is the SECOND designated file — the C ABI
+/// boundary (raw pointers across `extern "C"`). Its exact preconditions
+/// live in the ledger doc; the C smoke test (`tools/ffi-smoke.sh`) and
+/// the Rust FFI court (`src/tests/ffi_cabi.rs`) exercise them.
+const LEDGER_UNSAFE_FILES: &[&str] = &["platform/io_uring.rs", "ffi/mod.rs"];
 
 #[test]
 fn unsafe_files_match_ledger() {

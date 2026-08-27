@@ -27,6 +27,44 @@ raw Linux io_uring ABI. Any future `unsafe` must be:
 | File | Unsafe calls | Kernel ABI | Tests |
 |------|--------------|------------|-------|
 | `src/platform/io_uring.rs` | `SubmissionQueue::push` (the io-uring crate's sole unsafe primitive) | `io_uring_setup` / `io_uring_enter` (kernel ≥ 5.1; READ/WRITE ops 5.6, UNLINKAT 5.11) | `nop_completes`, `batch_out_of_order_ok`, `write_read_roundtrip`; full-store crash-court parity matrix (`src/tests/io_backend_parity.rs`) |
+| `src/ffi/mod.rs` (Phase 12E.14) | raw pointer dereference + `Box::from_raw` / `Vec::from_raw_parts` across the `extern "C"` boundary | none (userspace-only) | C smoke test (`tools/ffi-smoke.sh` + `tools/ffi-smoke/smoke.c`); Rust FFI court (`src/tests/ffi_cabi.rs`) |
+
+### `src/ffi/mod.rs` — exact preconditions
+
+**What is unsafe:** dereferencing caller-supplied pointers and
+reconstructing Rust owned types (`Box<Engine>`, `Vec<u8>`) at the C ABI
+boundary. This is the crate's ONLY interface that accepts raw pointers
+from outside the crate.
+
+**Preconditions (all enforced by the calling pattern):**
+
+1. *Handle validity.* A handle is only ever produced by
+   `entropyfs_engine_open` (non-null, exactly once); `Box::from_raw` in
+   `entropyfs_engine_close` is the ownership transfer. The caller must
+   close each handle exactly once; using a closed handle is UB (the
+   documented contract in `include/entropyfs.h`).
+2. *Input pointer validity.* `data` must be valid for `len` bytes (or
+   null with `len == 0`); `id` for 32 bytes; out-params non-null; the
+   path is a valid NUL-terminated string. Every dereference is preceded
+   by the null/len checks in the `*_impl` functions.
+3. *Output allocation integrity.* Callee-allocated outputs are a single
+   allocation `[len u64]data…` (len+16 bytes; the header is PART of the
+   allocation — never `ptr.sub` on a bare `Vec` pointer). `entropyfs_free`
+   reconstructs the exact `Vec` from the header and is the ONE release
+   mechanism; double-free/wrong-free are the caller's obligation.
+4. *Panic containment.* Every entry point wraps its body in
+   `catch_unwind`; no panic unwinds across FFI. A caught panic surfaces
+   as `Internal` and is logged — it is still a defect (the brief: "A
+   panic caught at the FFI boundary is still a defect worth surfacing; it
+   must not become normal control flow").
+5. *No persistent-data parsing.* The FFI only moves bytes and ids; it
+   never parses descriptors or records (parsers remain
+   `forbid(unsafe_code)`).
+
+**Why the exception cannot be avoided:** a C ABI is inherently raw
+pointers; there is no safe wrapper for `extern "C"` parameter passing.
+The surface is the narrow opaque-handle facade only — no Rust layout is
+exported.
 
 ### `src/platform/io_uring.rs` — exact preconditions
 

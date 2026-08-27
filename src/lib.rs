@@ -37,6 +37,10 @@ pub mod dsfb;
 // peers above the same store).
 pub mod engine;
 
+// Phase 12E.14: the stable C ABI — the opaque-handle facade over the
+// engine (ledger-designated unsafe file; see docs/security/unsafe-ledger.md).
+pub mod ffi;
+
 // Permanent on-disk format: explicit little-endian byte codecs.
 pub mod format;
 

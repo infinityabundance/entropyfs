@@ -21,6 +21,7 @@ pub mod enospc;
 pub mod epoch;
 pub mod epoch_self_alias;
 pub mod epoch_seq_monotonic;
+pub mod ffi_cabi;
 pub mod fsck;
 pub mod fsync_group_probe;
 #[cfg(feature = "fuse")]

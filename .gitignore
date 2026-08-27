@@ -14,6 +14,8 @@ Cargo.lock.orig
 /fuzz/target
 /fuzz/artifacts
 /fuzz/corpus
+# C ABI smoke test build artifact (12E.14)
+/tools/ffi-smoke/smoke
 # Evidence staging
 /evidence/.staging
 # Compiled binaries sealed by the distro court (regenerable from the

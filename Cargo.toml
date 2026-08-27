@@ -20,6 +20,10 @@ repository = "https://github.com/infinityabundance/entropyfs"
 [lib]
 name = "entropyfs"
 path = "src/lib.rs"
+# Phase 12E.14: the C ABI (src/ffi) needs a linkable artifact — rlib for
+# Rust consumers, cdylib for the C smoke test and the Go binding (12E.15).
+# The exported symbols are the narrow opaque-handle facade only.
+crate-type = ["rlib", "cdylib"]
 
 [[bin]]
 name = "entropyfs"
