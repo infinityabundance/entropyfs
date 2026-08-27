@@ -6,8 +6,7 @@
 |------|-------|-------------|--------------------------|-----------------|
 | AlmaLinux 10.2 minimal | `almalinux:10.2` | **PASS** (0 waivers) | **PASS** (go1.24.6 pinned; race gate green) | `evidence/portability/distro-court-almalinux-10.2-minimal-*` |
 | Ubuntu Server 26.04 LTS minimal | `ubuntu:26.04` | **PASS** (0 waivers) | **PASS** (go1.24.6 pinned; race gate green) | `evidence/portability/distro-court-ubuntu-26.04-minimal-*` |
-| openSUSE Leap 16.0 minimal (SUSE-family) | `opensuse/leap:16.0` | **PASS** (0 waivers) | **PASS** (go1.24.6 pinned; race gate green) | `evidence/portability/distro-court-leap-16.0-minimal-*` |
-| SLES 16 | `registry.suse.com/...` (subscription) | authenticated lane; waived without credentials | (inherits the Go stage) | documented in `docs/portability/distro-court.md` |
+| openSUSE Leap 16.0 minimal | `opensuse/leap:16.0` | **PASS** (0 waivers) | **PASS** (go1.24.6 pinned; race gate green) | `evidence/portability/distro-court-leap-16.0-minimal-*` |
 
 The native development/rolling environment is a separate lane and is
 never substituted for the enterprise matrix.

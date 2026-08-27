@@ -1,8 +1,7 @@
 # EntropyFS distribution-court base image — openSUSE Leap 16.0 minimal
 # (built from the provided Leap-16.0-Minimal-VM.x86_64-Cloud.qcow2 by
-# tools/docker/build-distro-images.sh; the legally distributable
-# equivalent base of the SUSE enterprise family — SLES 16 itself is
-# available through the documented authenticated lane).
+# tools/docker/build-distro-images.sh; the SUSE-family lane from the
+# vendor's legally distributable base image).
 #
 # Phase 12E.8: documented build/runtime prerequisites + a pinned rustup
 # toolchain only; the repo is bind-mounted by the driver.

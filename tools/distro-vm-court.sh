@@ -5,10 +5,8 @@
 # vendor minimal images:
 #
 #   leap-16.0-minimal     /run/media/one/toshiba4TB/images/Leap-16.0-Minimal-VM.x86_64-Cloud.qcow2
-#                         (openSUSE Leap 16.0 — the legally distributable
-#                         equivalent base of the SUSE enterprise family;
-#                         SLES 16 itself requires subscription credentials
-#                         and stays available via the authenticated lane)
+#                         (openSUSE Leap 16.0 — the SUSE-family lane,
+#                         the vendor's legally distributable base)
 #   ubuntu-26.04-minimal  /run/media/one/toshiba4TB/images/ubuntu-26.04-live-server-amd64.iso
 #                         (autoinstall)
 #   almalinux-10.2-minimal /run/media/one/toshiba4TB/images/AlmaLinux-10.2-x86_64-boot.iso

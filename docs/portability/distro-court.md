@@ -16,11 +16,10 @@ the full stage list below.
 | `ubuntu-26.04-minimal` | `ubuntu:26.04` | Debian/Ubuntu enterprise |
 | `leap-16.0-minimal` | `opensuse/leap:16.0` | SUSE enterprise family |
 
-SLES 16 itself requires vendor registry credentials (subscription). The
-authenticated lane is documented below; `opensuse/leap:16.0` is the
-legally distributable equivalent base and is the exercised SUSE-family
-lane. The native development/rolling environment remains a separate test
-lane — it is never substituted for the enterprise matrix.
+`opensuse/leap:16.0` is the SUSE-family lane — the vendor's legally
+distributable base image from the public registry. The native
+development/rolling environment remains a separate test lane — it is
+never substituted for the enterprise matrix.
 
 Images extracted from the provided vendor OS artifacts
 (`tools/docker/build-distro-images.sh`: Leap installer ISO LiveOS
@@ -101,16 +100,6 @@ privileged containers.
   shell-native and `findutils` is a documented prereq.
 - Imported minimal rootfs images may lack `/tmp` (a tmpfs mountpoint in
   the live environment); extraction excludes only its contents.
-
-## SLES 16 authenticated lane
-
-SLES 16 container images are distributed through `registry.suse.com`
-under subscription. To exercise the lane: set `SLES_REGISTRY_USER` /
-`SLES_REGISTRY_TOKEN` (never committed) or run a pre-authenticated
-`docker login`, and set `SLES_IMAGE` to the subscribed image reference.
-Without credentials the lane records an explicit waiver (exact failed
-pull + requirement) and is marked SKIPPED — never passed, never silently
-omitted.
 
 ## Docker/VM infrastructure note
 

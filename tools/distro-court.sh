@@ -7,10 +7,8 @@
 #
 #   almalinux-10.2-minimal   almalinux:10.2
 #   ubuntu-26.04-minimal     ubuntu:26.04
-#   leap-16.0-minimal        opensuse/leap:16.0  (the legally distributable
-#                            SUSE-family base; SLES 16 itself requires
-#                            vendor credentials and stays available via
-#                            the documented authenticated lane)
+#   leap-16.0-minimal        opensuse/leap:16.0  (the SUSE-family lane,
+#                            the vendor's legally distributable base)
 #
 # The images extracted from the provided vendor OS artifacts by
 # tools/docker/build-distro-images.sh remain available as the offline /

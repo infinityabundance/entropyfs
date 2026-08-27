@@ -179,7 +179,7 @@ verification, and the one-command trial path.**
   recorded in the sealed evidence, capability waivers carrying the exact
   failed probe/command/error/requirement, and a separate
   `tools/docker/` vendor-artifact lane for registries requiring
-  credentials (SLES). **All three lanes sealed PASS with zero waivers**
+  credentials. **All three lanes sealed PASS with zero waivers**
   (immutable digests + full logs under `evidence/portability/
   distro-court-*/`). Docs: `docs/portability/distro-court.md`,
   `docs/portability/support-matrix.md`.
