@@ -1,0 +1,8 @@
+{
+  "oracle": "phase-12e11-transport-real",
+  "work_mib": 256,
+  "gate": "Uring wins robustly across the target workloads on real storage -> consider flipping the default; Sync wins small-QD / Uring wins high-QD -> investigate deterministic auto; Uring still loses -> retain the Sync default (the crash-consistency oracle).",
+  "note": "single-stream in-process court = the small-queue-depth regime",
+  "recommendation": "RETAIN SYNC DEFAULT",
+  "rationale": "uring wins only 1/11 headline comparisons on the real NVMe lane; the 12E.11 gate requires a robust real-storage win before any default change"
+}

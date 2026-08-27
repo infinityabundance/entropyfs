@@ -1,0 +1,9 @@
+== /mnt/2tb_crucial
+/dev/nvme0n1p1 ext4 rw,relatime
+  dev=66308 fs=0
+== /dev/shm
+tmpfs tmpfs rw,nosuid,nodev,inode64,huge=advise,usrquota
+  dev=26 fs=0
+== /mnt/256gb_btrfs
+/dev/sda2 btrfs rw,relatime,space_cache=v2,subvolid=5,subvol=/
+  dev=64 fs=0

@@ -1,0 +1,134 @@
+warning: variable does not need to be mutable
+   --> src/dsfb/semantics.rs:227:13
+    |
+227 |         let mut step = (sample.len() / 2048).max(1);
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src/store/mod.rs:6467:29
+     |
+6467 |                         let mut cur = Store::inode_for_tx(tx, *child)?;
+     |                             ----^^^
+     |                             |
+     |                             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/store/mod.rs:6590:29
+     |
+6590 |                         let mut cur = Store::inode_for_tx(tx, *src_ino)?;
+     |                             ----^^^
+     |                             |
+     |                             help: remove this `mut`
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:113:9
+    |
+113 |     for i in 0..4u64 {
+    |         ^ help: if this is intentional, prefix it with an underscore: `_i`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:126:9
+    |
+126 |     for i in 0..2u64 {
+    |         ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:255:10
+    |
+255 |     for (i, (path, v1)) in names.iter().enumerate() {
+    |          ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `start`
+   --> src/tests/grammar_oracle.rs:251:29
+    |
+251 |                         let start = pos.min(r.len());
+    |                             ^^^^^ help: if this is intentional, prefix it with an underscore: `_start`
+
+warning: unused variable: `prepared`
+   --> src/tests/perf_reconciled.rs:311:13
+    |
+311 |         let prepared = store
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_prepared`
+
+warning: type `Composed` is more private than the item `workers::WorkerTask::EncodeChunk::composed`
+    --> src/store/workers.rs:384:9
+     |
+ 384 |         composed: super::Composed,
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^ field `workers::WorkerTask::EncodeChunk::composed` is reachable at visibility `pub`
+     |
+note: but type `Composed` is only usable at visibility `pub(crate)`
+    --> src/store/mod.rs:3488:1
+     |
+3488 | pub(crate) struct Composed {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: function `percentile` is never used
+   --> src/tests/dsfb_semantics_probe.rs:190:4
+    |
+190 | fn percentile(sorted: &[f64], q: f64) -> f64 {
+    |    ^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `candidates`, `chunks`, and `raw_wins` are never read
+   --> src/tests/dsfb_semantics_probe.rs:200:5
+    |
+197 | struct ModeResult {
+    |        ---------- fields in this struct
+...
+200 |     candidates: u64,
+    |     ^^^^^^^^^^
+201 |     chunks: u64,
+    |     ^^^^^^
+...
+204 |     raw_wins: u64,
+    |     ^^^^^^^^
+
+warning: constant `MAX_MEMBERS` is never used
+  --> src/tests/grammar_oracle.rs:79:7
+   |
+79 | const MAX_MEMBERS: usize = 512;
+   |       ^^^^^^^^^^^
+
+warning: function `contains` is never used
+   --> src/tests/grammar_oracle.rs:214:4
+    |
+214 | fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    |    ^^^^^^^^
+
+warning: struct `NoProvider` is never constructed
+   --> src/tests/io_backend_parity.rs:171:24
+    |
+171 |                 struct NoProvider;
+    |                        ^^^^^^^^^^
+
+warning: missing documentation for a module
+    --> src/store/workers.rs:1036:1
+     |
+1036 | pub mod tests {
+     | ^^^^^^^^^^^^^
+     |
+note: the lint level is defined here
+    --> src/lib.rs:19:9
+     |
+  19 | #![warn(missing_docs)]
+     |         ^^^^^^^^^^^^
+
+warning: `entropyfs` (lib test) generated 15 warnings (run `cargo fix --lib -p entropyfs --tests` to apply 8 suggestions)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (target/release/deps/entropyfs-1656b57820206eef)
+
+running 1 test
+TRANSPORT_RESULT {"backend":"sync","device":"/dev/shm","mixed_cpu_s":0.53,"mixed_mbps":58.846531049588705,"phases":[["search",6561,367.396661,33.403,211.666,987.455],["prepare",256,349.445673,531.913,3214.464,3726.0],["validation",6561,141.093012,7.735,18.986,731.026],["prune",418,135.549677,330.418,397.944,420.656],["read_decode",7038,113.768463,4.398,45.896,615.099],["btree_mutation",416,87.891955,45.565,563.673,595.362],["search_p0_bases",256,51.75484,222.666,230.731,271.727],["search_zero_fill",6561,35.73751,0.02,26.639,26.9],["hash",5376,28.620779,5.28,5.51,5.77],["search_dedup",6561,28.447146,3.045,8.556,19.857],["read_scan",7038,21.744483,3.135,3.677,4.388],["search_configurational",253,20.761939,77.134,111.659,130.374],["read_deps",7038,12.742999,0.11,4.789,8.306],["append_flush",418,10.215308,20.819,51.948,63.689],["worker_scope_wall",247,7.582534,29.475,43.051,65.061],["worker_useful_cpu",247,2.901202,7.905,29.114,34.926],["dsfb_observe",6561,2.344948,0.311,0.521,0.662],["dsfb_plan",6561,1.995086,0.3,0.42,0.581],["dsfb_trust",11937,0.915724,0.08,0.09,0.11],["superblock",418,0.473342,1.072,1.493,2.334],["read_prefetch",7038,0.236245,0.02,0.021,0.952],["barrier_dir_sync",35,0.05357,1.623,1.863,3.516],["barrier_sb_write",35,0.027702,0.782,0.841,0.962],["worker_queue_wait",247,0.024174,0.04,0.08,0.11],["barrier_sb_fsync",35,0.021569,0.591,0.632,1.132],["begin_tx_wait",416,0.020325,0.05,0.06,0.131],["probe_pre_rans_cands",6561,0.014921,0.002,0.004,0.004],["barrier_fdatasync",35,0.008243,0.17,0.882,1.092],["probe_decisive1",6561,0.006308,0.001,0.001,0.001],["probe_dedup_hit",6561,0.006052,0.001,0.001,0.001],["barrier_commit_lock_wait",35,0.000982,0.02,0.03,0.14],["worker_tasks",494,0.0,0.0,0.0,0.0]],"random_read_cpu_s":0.07000000000000006,"random_read_mbps":213.95132746368563,"random_read_p50_us":15.0,"random_read_p95_us":47.0,"random_read_p99_us":64.0,"read_cpu_s":0.040000000000000036,"read_mbps":4367.303310306726,"read_p50_us":14.0,"read_p95_us":22.0,"read_p99_us":23.0,"work_mib":256,"write_barriers":1,"write_cpu_s":0.57,"write_fsync_barriers":32,"write_fsync_cpu_s":0.13,"write_fsync_every_mbps":459.2289967061944,"write_mbps":442.49624487056326,"write_wall_s":0.578535983}
+transport: device=/dev/shm backend=sync write=442.5 MiB/s (cpu 0.57s/0.58s) fsync=459.2 MiB/s read=4367.3 MiB/s p50=14 p95=22 p99=23 µs random=214.0 MiB/s mixed=58.8 MiB/s
+test tests::transport_real_court::transport_real_court ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 460 filtered out; finished in 1.37s
+

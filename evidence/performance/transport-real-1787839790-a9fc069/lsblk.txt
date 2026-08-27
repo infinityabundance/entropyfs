@@ -1,0 +1,15 @@
+NAME        MODEL                        SIZE ROTA TRAN
+sda         KINGSTON RBU-SC100S37256GD 238.5G    1 usb
+├─sda1                                   300M    1 
+└─sda2                                 238.2G    1 
+sdb         Portable                     3.6T    1 usb
+├─sdb1                                    16M    1 
+└─sdb2                                   3.6T    1 
+sdc         TOSHIBA MQ04UBB400           3.6T    1 usb
+└─sdc1                                   3.6T    1 
+zram0                                  125.4G    0 
+nvme1n1     KINGSTON SNV2S2000G          1.8T    0 nvme
+├─nvme1n1p1                              1.3T    0 nvme
+└─nvme1n1p3                            512.3G    0 nvme
+nvme0n1     CT2000T705SSD3               1.8T    0 nvme
+└─nvme0n1p1                              1.8T    0 nvme

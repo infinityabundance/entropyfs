@@ -1,0 +1,6 @@
+kernel: 7.2.0-1-cachyos
+cpu: AMD Ryzen 7 9800X3D 8-Core Processor
+nproc: 16
+memory_kib: 131533140
+governor: performance
+rustc: rustc 1.98.0 (88d9e12ae 2026-08-18)

@@ -17,12 +17,6 @@ categories = ["filesystem", "compression"]
 readme = "README.md"
 repository = "https://github.com/infinityabundance/entropyfs"
 
-# Phase 12E.11 WIP — the real-device transport court lands (wired into
-# src/tests/mod.rs + the driver + sealed evidence) with the 12E.11
-# release. Excluded from the 0.7.12 crate meanwhile; REMOVE THIS LINE
-# when 12E.11 is committed.
-exclude = ["src/tests/transport_real_court.rs"]
-
 [lib]
 name = "entropyfs"
 path = "src/lib.rs"

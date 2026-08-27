@@ -1,0 +1,57 @@
+== phase-12E.11 transport court: rev=a9fc069 work=256MiB ==
+entropyfs 0.7.12
+kernel: 7.2.0-1-cachyos
+cpu: AMD Ryzen 7 9800X3D 8-Core Processor
+nproc: 16
+memory_kib: 131533140
+governor: performance
+rustc: rustc 1.98.0 (88d9e12ae 2026-08-18)
+NAME        MODEL                        SIZE ROTA TRAN
+sda         KINGSTON RBU-SC100S37256GD 238.5G    1 usb
+├─sda1                                   300M    1 
+└─sda2                                 238.2G    1 
+sdb         Portable                     3.6T    1 usb
+├─sdb1                                    16M    1 
+└─sdb2                                   3.6T    1 
+sdc         TOSHIBA MQ04UBB400           3.6T    1 usb
+└─sdc1                                   3.6T    1 
+zram0                                  125.4G    0 
+nvme1n1     KINGSTON SNV2S2000G          1.8T    0 nvme
+├─nvme1n1p1                              1.3T    0 nvme
+└─nvme1n1p3                            512.3G    0 nvme
+nvme0n1     CT2000T705SSD3               1.8T    0 nvme
+└─nvme0n1p1                              1.8T    0 nvme
+== /mnt/2tb_crucial
+/dev/nvme0n1p1 ext4 rw,relatime
+  dev=66308 fs=0
+== /dev/shm
+tmpfs tmpfs rw,nosuid,nodev,inode64,huge=advise,usrquota
+  dev=26 fs=0
+== /mnt/256gb_btrfs
+/dev/sda2 btrfs rw,relatime,space_cache=v2,subvolid=5,subvol=/
+  dev=64 fs=0
+== lane: real / sync ==
+  ok (result JSON written)
+== lane: real / uring ==
+  ok (result JSON written)
+== lane: shm / sync ==
+  ok (result JSON written)
+== lane: shm / uring ==
+  ok (result JSON written)
+== lane: sata / sync ==
+  ok (result JSON written)
+== lane: sata / uring ==
+  ok (result JSON written)
+  manifest: real/sync
+  manifest: real/uring
+  manifest: shm/sync
+  manifest: shm/uring
+  manifest: sata/sync
+  manifest: sata/uring
+== decision ==
+RETAIN SYNC DEFAULT
+uring wins only 1/11 headline comparisons on the real NVMe lane; the 12E.11 gate requires a robust real-storage win before any default change
+  NVMe (real)        tally sync/uring/tie: 10/1/2
+  SATA SSD (real)    tally sync/uring/tie: 12/0/1
+  tmpfs (control)    tally sync/uring/tie: 14/0/0
+== archived: /mnt/1tb_kingston/entropyfs/evidence/performance/transport-real-1787839790-a9fc069 ==
