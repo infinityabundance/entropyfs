@@ -1,5 +1,55 @@
 # EntropyFS changelog
 
+## v0.7.10 (2026-08-27)
+
+**12C-0 — the DSFB structural-semiotics oracle: the semantic prior really
+reorders the search (winner rank 4.41 → 1.02), but the standalone CPU
+gain is ~3% — the gate says RECORD, and the adaptive foreground budget is
+the identified mechanism that turns the ordering advantage into skipped
+work.**
+
+- **The semantic machinery** (`src/dsfb/semantics.rs`): a quantized
+  [`SemanticContext`] (extension / parent / basename-shape classes from
+  the name; magic / printable-ratio / entropy classes from a bounded
+  4 KiB byte sketch; lifecycle) and a learned per-class channel prior
+  (`P(channel | semantic class)` — the class's normalized winner
+  distribution, incremented at every observe). The DSFB plan scores each
+  channel `historical_trust + 0.3 × prior(class, channel)`. Strictly
+  advisory: ordering and budget only, never bytes (ADR-0004); the
+  winning representation remains the minimum over byte-validated
+  candidates (ADR-0010). Mode-gated (`None`/`Extension`/`ByteSketch`/
+  `History`/`Combined`; the production default is `None` until the
+  oracle's gate is met). The write path threads the context via
+  `epoch_write_semantic` and `GuidedContext::semantic`; the oracle
+  diagnostics (winning-channel plan rank + RAW-winner count) are
+  accumulated in `encode_guided`.
+- **The oracle** (`src/tests/dsfb_semantics_probe.rs`, sealed
+  `evidence/performance/dsfb-semantics-probe-*/`): a heterogeneous
+  corpus (source `.rs`, config `.toml`, incompressible `.bin`, zeros,
+  extensionless) PLUS the brief's semantic-deception exhibits (noise
+  named `.rs`, zeros named `.bin`), written twice per mode (pass 1
+  learns the prior, pass 2 measures the guided search). Rows per mode:
+  search CPU, candidates/chunk, winning rank, RAW fallback, density,
+  byte-exactness.
+- **Sealed (release):** winner rank 4.41 (S0) → 1.02 (S1 extension),
+  1.52 (S3 history), 2.88 (S2/S4) — the class evidence genuinely moves
+  the likely winner first. Search CPU 36.7 → 35.7 ms (S4, −2.7%): the
+  plan's budget is a channel COUNT, so reordering alone does not skip
+  candidate work in the current architecture. Density (1.81), RAW
+  fallback (37.5%), candidates/chunk (2.89), and byte-exactness are
+  IDENTICAL across every mode — including the deception exhibits, so the
+  prior never overrides the byte gate.
+- **The decision: RECORD, do not wire as the production default.** The
+  brief's gate requires search CPU to fall SUBSTANTIALLY with density
+  unchanged; the measured ~3% is not substantial, and the reason is
+  structural (the budget counts channels, not costs). The prior's class
+  confidence is the prerequisite for the adaptive foreground budget
+  (search effort = f(system pressure, queue depth, class confidence)) —
+  the identified 12C continuation — which converts the ordering
+  advantage into skipped expensive-family work. The machinery stays
+  wired, mode-gated, zero-risk (byte-exact, density-identical). 435 lib
+  tests green.
+
 ## v0.7.9 (2026-08-27)
 
 **12B — durability generations + group commit: concurrent fsyncs
@@ -1088,5 +1138,11 @@ instrumentation stays as the measurement surface). 12B (durability
 generations / group commit, v0.7.9) amortizes concurrent fsyncs onto one
 physical barrier per generation: amplification 1.00 → 0.23 at 32
 writers, fsync p99 −48%, commit-lock wait −96%, crash court green at
-every barrier stage. Next: 12C DSFB structural semiotics, then 12D
-grammar-addressed entropy (offline oracle first).
+every barrier stage. 12C-0 (DSFB structural semiotics, v0.7.10): the
+semantic prior really reorders the search (winner rank 4.41 → 1.02) with
+byte-exact, density-identical correctness across the deception exhibits,
+but the standalone CPU gain is ~3% (the plan's budget is a channel
+count) — RECORDED, not wired as the default; the adaptive foreground
+budget (search effort = f(pressure, queue depth, class confidence)) is
+the identified continuation. Next: 12D grammar-addressed entropy
+(offline oracle first).

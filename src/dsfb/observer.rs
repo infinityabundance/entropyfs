@@ -356,6 +356,12 @@ pub struct ShardedStorageObserver {
     /// fallback; the store's targeted policy uses
     /// [`ShardedStorageObserver::evict_one_from`] instead).
     evict_cursor: AtomicUsize,
+    /// Phase-12C: the learned per-class channel prior (structural
+    /// semiotics; advisory). One store-level mutex — the table is small,
+    /// the updates are one per observe, and the 11F oracle measured this
+    /// contention class at ~1 µs per call (12C-1 may shard the prior
+    /// like the observer if the adopted-mode measurements justify it).
+    prior: Mutex<crate::dsfb::semantics::SemanticPrior>,
 }
 
 /// Aggregate observer statistics (reported in `status`).
@@ -408,6 +414,7 @@ impl ShardedStorageObserver {
             slew_events: AtomicU64::new(0),
             narrowed_searches: AtomicU64::new(0),
             evict_cursor: AtomicUsize::new(0),
+            prior: Mutex::new(crate::dsfb::semantics::SemanticPrior::default()),
         }
     }
 
@@ -452,6 +459,10 @@ impl ShardedStorageObserver {
     /// measurement for base/rANS/RAW-driven wins); the regime tracker
     /// consumes it so structural wins never look like a regime break.
     ///
+    /// Phase-12C: `semantic` + `mode` feed the per-class prior (the
+    /// observer learns "this class of chunk wins with channel C"); the
+    /// prior is advisory (module doc).
+    ///
     /// # State machine, in order
     ///
     /// 1. Insert/refresh the [`ChunkObserver`] for the key — a new content
@@ -471,7 +482,7 @@ impl ShardedStorageObserver {
     ///
     /// Locks exactly the shard of `key` (and only for the duration of the
     /// update); the global counters are lock-free atomics. Unrelated keys
-    /// never block each other.
+    /// never block each other. The prior table takes its own brief lock.
     ///
     /// Returns the new regime. Performance-only: regime and internal state
     /// feed search ordering/budget, never the committed representation
@@ -482,6 +493,8 @@ impl ShardedStorageObserver {
         measurements: &[(Channel, f64)],
         winner: Channel,
         outcome_quality: f64,
+        semantic: Option<crate::dsfb::semantics::SemanticContext>,
+        mode: crate::dsfb::semantics::SemanticMode,
     ) -> Regime {
         self.steps.fetch_add(1, Ordering::Relaxed);
         let mut m = [0.0f64; Channel::ALL.len()];
@@ -551,6 +564,14 @@ impl ShardedStorageObserver {
         // `tracked` is maintained incrementally; nothing to refresh here
         // (the pre-11F `stats.tracked_chunks = map.len()` refresh moved
         // into the atomic increment/decrement points).
+        // Phase-12C: learn the per-class winner (advisory prior; the
+        // mode gates which class groups feed the key).
+        if let Some(pkey) = semantic.and_then(|s| s.key_for(mode)) {
+            self.prior
+                .lock()
+                .expect("dsfb prior poisoned")
+                .observe(pkey, winner);
+        }
         regime
     }
 
@@ -581,12 +602,23 @@ impl ShardedStorageObserver {
     /// and bounds the candidate evaluation; the winner is still exact cost
     /// (ADR-0010).
     ///
+    /// Phase-12C: when `semantic` + `mode` enable the prior, the ordering
+    /// score is `historical_trust + SEMANTIC_WEIGHT * prior(class, chan)`
+    /// — a class that historically wins with channel C moves C earlier in
+    /// the plan (and, under the budget, into it). The prior never changes
+    /// the budget semantics, only the order.
+    ///
     /// # Concurrency
     ///
     /// Locks exactly the shard of `key` (the `ChunkObserver` reads plus
     /// the 9-element sort all happen under it — the sort is stack-local,
-    /// so the critical section is ~1 µs).
-    pub fn plan(&self, key: &ChunkKey) -> SearchPlan {
+    /// so the critical section is ~1 µs) plus the brief prior lock.
+    pub fn plan(
+        &self,
+        key: &ChunkKey,
+        semantic: Option<crate::dsfb::semantics::SemanticContext>,
+        mode: crate::dsfb::semantics::SemanticMode,
+    ) -> SearchPlan {
         let shard = self.shard_of(key);
         let (regime, trust) = {
             let map = self.shards[shard].lock().expect("dsfb shard poisoned");
@@ -595,6 +627,14 @@ impl ShardedStorageObserver {
                 .iter()
                 .map(|&c| (c, self.trust_locked(&map, key, c)))
                 .collect();
+            drop(map);
+            // Phase-12C: the semantic prior adjusts the ordering score.
+            if let Some(pkey) = semantic.and_then(|s| s.key_for(mode)) {
+                let prior = self.prior.lock().expect("dsfb prior poisoned");
+                for (c, t) in trust.iter_mut() {
+                    *t += crate::dsfb::semantics::SEMANTIC_WEIGHT * prior.prior(pkey, *c);
+                }
+            }
             trust.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             (regime, trust)
         };
@@ -713,25 +753,38 @@ impl std::fmt::Debug for ShardedStorageObserver {
 mod tests {
     use super::*;
     use crate::core::extent::ChunkId;
+    use crate::dsfb::semantics::{SemanticContext, SemanticMode};
 
     fn key(ino: u64, index: u64) -> ChunkKey {
         ChunkKey::new(ino, index, ChunkId::of(&[ino as u8, index as u8]))
+    }
+
+    fn no_sem() -> (Option<SemanticContext>, SemanticMode) {
+        (None, SemanticMode::None)
     }
 
     #[test]
     fn stable_evidence_keeps_trust_high() {
         let obs = ShardedStorageObserver::default();
         let k = key(1, 0);
+        let (sem, mode) = no_sem();
         let mut regime = Regime::Unknown;
         for _ in 0..50 {
             // channel P0 predicts perfectly every time
-            regime = obs.observe(k, &[(Channel::PrevVersion, 1.0)], Channel::PrevVersion, 1.0);
+            regime = obs.observe(
+                k,
+                &[(Channel::PrevVersion, 1.0)],
+                Channel::PrevVersion,
+                1.0,
+                sem,
+                mode,
+            );
         }
         assert_eq!(regime, Regime::Stable);
         // P0 must dominate trust (relative ordering is what matters).
         let p0 = obs.trust(&k, Channel::PrevVersion);
         assert!(p0 > 0.5, "p0 trust {p0}");
-        let plan = obs.plan(&k);
+        let plan = obs.plan(&k, sem, mode);
         assert_eq!(plan.ordered_channels[0], Channel::PrevVersion);
         assert_eq!(plan.strategy, SearchStrategy::Narrow);
         assert_eq!(obs.len(), 1);
@@ -742,23 +795,45 @@ mod tests {
     fn slew_broadens_search() {
         let obs = ShardedStorageObserver::default();
         let k = key(2, 0);
+        let (sem, mode) = no_sem();
         // stable for a while, then a violent regime break
         for _ in 0..10 {
-            obs.observe(k, &[(Channel::PrevVersion, 1.0)], Channel::PrevVersion, 1.0);
+            obs.observe(
+                k,
+                &[(Channel::PrevVersion, 1.0)],
+                Channel::PrevVersion,
+                1.0,
+                sem,
+                mode,
+            );
         }
         assert_eq!(
-            obs.observe(k, &[(Channel::PrevVersion, 0.0)], Channel::Raw, 0.0),
+            obs.observe(
+                k,
+                &[(Channel::PrevVersion, 0.0)],
+                Channel::Raw,
+                0.0,
+                sem,
+                mode
+            ),
             Regime::Slew
         );
         // The plan during the slew window is Broad.
-        let plan = obs.plan(&k);
+        let plan = obs.plan(&k, sem, mode);
         assert_eq!(plan.strategy, SearchStrategy::Broad);
         // After the window expires the tracker re-baselines; search must
         // not snap back to Narrow while the new baseline is unstable.
         for _ in 0..20 {
-            obs.observe(k, &[(Channel::PrevVersion, 0.0)], Channel::Raw, 0.5);
+            obs.observe(
+                k,
+                &[(Channel::PrevVersion, 0.0)],
+                Channel::Raw,
+                0.5,
+                sem,
+                mode,
+            );
         }
-        let final_plan = obs.plan(&k);
+        let final_plan = obs.plan(&k, sem, mode);
         assert_ne!(final_plan.strategy, SearchStrategy::Narrow);
         assert!(obs.stats().slew_events > 0);
     }
@@ -767,10 +842,18 @@ mod tests {
     fn drift_keeps_narrow() {
         let obs = ShardedStorageObserver::default();
         let k = key(3, 0);
+        let (sem, mode) = no_sem();
         // slow degradation: measurement drifts down gently
         let mut v = 1.0f64;
         for _ in 0..40 {
-            obs.observe(k, &[(Channel::PrevVersion, v)], Channel::PrevVersion, v);
+            obs.observe(
+                k,
+                &[(Channel::PrevVersion, v)],
+                Channel::PrevVersion,
+                v,
+                sem,
+                mode,
+            );
             v = (v - 0.01).max(0.8);
         }
         assert!(obs.stats().drift_events > 0);
@@ -785,13 +868,14 @@ mod tests {
         // back to cap — the total never exceeds cap + 1 and settles at cap.
         let obs = ShardedStorageObserver::default();
         let cap = 90usize;
+        let (sem, mode) = no_sem();
         for i in 0..cap {
-            obs.observe(key(i as u64, 0), &[], Channel::Raw, 0.5);
+            obs.observe(key(i as u64, 0), &[], Channel::Raw, 0.5, sem, mode);
         }
         assert_eq!(obs.len(), cap);
         for i in cap..500 {
             let k = key(i as u64, 0);
-            obs.observe(k, &[], Channel::Raw, 0.5);
+            obs.observe(k, &[], Channel::Raw, 0.5, sem, mode);
             if obs.len() > cap {
                 obs.evict_one_from(obs.shard_of(&k));
             }
@@ -814,8 +898,9 @@ mod tests {
         // visits = 16 per shard >= the worst-case 16 keys in one shard, so
         // draining is guaranteed (and deterministic — FNV shard spread).
         let obs = ShardedStorageObserver::default();
+        let (sem, mode) = no_sem();
         for i in 0..16 {
-            obs.observe(key(i as u64, 0), &[], Channel::Raw, 0.5);
+            obs.observe(key(i as u64, 0), &[], Channel::Raw, 0.5, sem, mode);
         }
         assert_eq!(obs.len(), 16);
         let mut guard = 0;
@@ -855,8 +940,9 @@ mod tests {
     #[test]
     fn forget_and_targeted_eviction_keep_count_exact() {
         let obs = ShardedStorageObserver::default();
+        let (sem, mode) = no_sem();
         for i in 0..64 {
-            obs.observe(key(i, 0), &[], Channel::Raw, 0.5);
+            obs.observe(key(i as u64, 0), &[], Channel::Raw, 0.5, sem, mode);
         }
         assert_eq!(obs.len(), 64);
         // Forgetting a present key decrements; forgetting an absent key
@@ -871,7 +957,7 @@ mod tests {
         obs.evict_one_from(shard);
         assert_eq!(obs.len(), 62);
         // Observe re-inserts: count goes back up exactly once.
-        obs.observe(key(0, 0), &[], Channel::Raw, 0.5);
+        obs.observe(key(0, 0), &[], Channel::Raw, 0.5, sem, mode);
         assert_eq!(obs.len(), 63);
     }
 
@@ -883,16 +969,17 @@ mod tests {
         // 4096 inserts; every key observed exactly once, so the count must
         // be exactly 4096 when the dust settles.
         let obs = ShardedStorageObserver::default();
+        let (sem, mode) = no_sem();
         std::thread::scope(|s| {
             for t in 0..16usize {
                 let obs = &obs;
                 s.spawn(move || {
                     for i in 0..256usize {
                         let ino = (t * 256 + i) as u64;
-                        obs.observe(key(ino, 0), &[], Channel::Raw, 0.5);
+                        obs.observe(key(ino, 0), &[], Channel::Raw, 0.5, sem, mode);
                         // Interleave reads (plans/trust) with writes, like
                         // the search path does.
-                        let _ = obs.plan(&key(ino, 0));
+                        let _ = obs.plan(&key(ino, 0), sem, mode);
                         let _ = obs.trust(&key(ino, 0), Channel::Raw);
                     }
                 });
@@ -903,7 +990,7 @@ mod tests {
         // And the per-key state is intact: observing again on the same key
         // increments the SAME entry (samples), not a new one.
         let k = key(0, 0);
-        obs.observe(k, &[], Channel::Raw, 0.5);
+        obs.observe(k, &[], Channel::Raw, 0.5, sem, mode);
         assert_eq!(obs.len(), 4096);
         assert_eq!(obs.stats().steps, 4097);
     }

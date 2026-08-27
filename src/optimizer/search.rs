@@ -197,6 +197,10 @@ pub struct GuidedContext<'a> {
     /// own entries (they are not yet in the committed chunk index).
     /// `None` for single-write and background paths.
     pub pending: Option<&'a PendingBatch>,
+    /// Phase-12C: the advisory semantic context of this chunk (name- and
+    /// byte-derived classes feeding the DSFB prior; `None` disables the
+    /// semantic adjustment — the sealed baseline).
+    pub semantic: Option<crate::dsfb::semantics::SemanticContext>,
     /// Search mode.
     pub mode: SearchMode,
 }
@@ -730,7 +734,7 @@ pub fn encode_guided(
     // order matters.
     // -------------------------------------------------------------------
     let plan = if options.allow_dsfb_ranking {
-        store.dsfb_plan(&key)
+        store.dsfb_plan(&key, ctx.semantic)
     } else {
         SearchPlan {
             ordered_channels: Channel::ALL.to_vec(),
@@ -940,7 +944,28 @@ pub fn encode_guided(
     }
     measurements.push((Channel::Raw, 0.5));
     let outcome_quality = outcome_quality(winner_channel, &winner.representation, &measurements);
-    let regime = store.dsfb_observe(key, &measurements, winner_channel, outcome_quality);
+    let regime = store.dsfb_observe(
+        key,
+        &measurements,
+        winner_channel,
+        outcome_quality,
+        ctx.semantic,
+    );
+
+    // Phase-12C oracle diagnostics (never behaviors): the winning
+    // channel's rank in the plan order (lower = found earlier) and the
+    // RAW-winner count (the false-prior / RAW-fallback witness).
+    {
+        let rank = plan
+            .ordered_channels
+            .iter()
+            .position(|&c| c == winner_channel)
+            .unwrap_or(0) as u64;
+        store.record_semantic_rank(rank);
+        if winner_channel == Channel::Raw {
+            store.record_semantic_raw_win();
+        }
+    }
 
     Ok(SearchOutcome {
         update,
@@ -1341,6 +1366,7 @@ mod tests {
             dictionary: None,
             shared: None,
             pending: None,
+            semantic: None,
             mode: SearchMode::Foreground,
         };
         encode_guided(
@@ -1495,6 +1521,7 @@ mod tests {
             dictionary: None,
             shared: None,
             pending: None,
+            semantic: None,
             mode: SearchMode::Foreground,
         };
         let out = encode_guided(

@@ -328,6 +328,16 @@ pub struct Store {
     /// Phase-12B: the coordinator's condition variable (waiters park
     /// until their requirement is covered or their generation fails).
     durability_cv: std::sync::Condvar,
+    /// Phase-12C: the semantic-prior mode flag (0 None .. 4 Combined;
+    /// advisory — the 12C oracle toggles it per run, production default
+    /// decided by the evidence).
+    semantic_mode_flag: std::sync::atomic::AtomicU8,
+    /// Phase-12C oracle diagnostics (never behaviors): the winning
+    /// channel's position in the plan order (first-winning rank) and the
+    /// RAW-winner count — the false-prior-rate / RAW-fallback witnesses.
+    semantic_rank_sum: std::sync::atomic::AtomicU64,
+    semantic_rank_count: std::sync::atomic::AtomicU64,
+    semantic_raw_wins: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for Store {
@@ -441,6 +451,10 @@ impl Store {
                 crate::store::durability::DurabilityGroup::default(),
             ),
             durability_cv: std::sync::Condvar::new(),
+            semantic_mode_flag: std::sync::atomic::AtomicU8::new(0),
+            semantic_rank_sum: std::sync::atomic::AtomicU64::new(0),
+            semantic_rank_count: std::sync::atomic::AtomicU64::new(0),
+            semantic_raw_wins: std::sync::atomic::AtomicU64::new(0),
         };
         store.open_segment(0)?;
         // Create the root directory inode (ino 1) and commit the initial
@@ -532,6 +546,10 @@ impl Store {
                 crate::store::durability::DurabilityGroup::default(),
             ),
             durability_cv: std::sync::Condvar::new(),
+            semantic_mode_flag: std::sync::atomic::AtomicU8::new(0),
+            semantic_rank_sum: std::sync::atomic::AtomicU64::new(0),
+            semantic_rank_count: std::sync::atomic::AtomicU64::new(0),
+            semantic_raw_wins: std::sync::atomic::AtomicU64::new(0),
         };
         // Phase-10D: replay any un-checkpointed mutation log tail left by
         // a process crash (the last checkpoint root is authoritative; the
@@ -682,6 +700,8 @@ impl Store {
     }
 
     /// The DSFB search plan for a chunk (trust-ordered, budget-bounded).
+    /// Phase-12C: `semantic` feeds the advisory per-class prior (the
+    /// store's `semantic_mode` gates which class groups contribute).
     ///
     /// Timed under the global `dsfb_plan` row (NOT the request envelope —
     /// `perf::time` records globally only) so the 11F oracle can compare
@@ -692,8 +712,11 @@ impl Store {
     pub fn dsfb_plan(
         &self,
         key: &crate::dsfb::features::ChunkKey,
+        semantic: Option<crate::dsfb::semantics::SemanticContext>,
     ) -> crate::dsfb::selection::SearchPlan {
-        self.perf.time("dsfb_plan", || self.dsfb.plan(key))
+        let mode = self.semantic_mode();
+        self.perf
+            .time("dsfb_plan", || self.dsfb.plan(key, semantic, mode))
     }
 
     /// DSFB trust for one channel of a chunk. Timed under the global
@@ -710,6 +733,7 @@ impl Store {
     /// Feed the DSFB observer (performance-only state). Bounded eviction
     /// keeps the observer from growing without limit. Timed under the
     /// global `dsfb_observe` row (same rationale as [`Store::dsfb_plan`]).
+    /// Phase-12C: `semantic` feeds the prior's per-class winner learning.
     ///
     /// # The cap gate (11F targeted eviction)
     ///
@@ -725,17 +749,83 @@ impl Store {
         measurements: &[(crate::dsfb::features::Channel, f64)],
         winner: crate::dsfb::features::Channel,
         outcome_quality: f64,
+        semantic: Option<crate::dsfb::semantics::SemanticContext>,
     ) -> crate::dsfb::drift::Regime {
+        let mode = self.semantic_mode();
         self.perf.time("dsfb_observe", || {
-            let regime = self
-                .dsfb
-                .observe(key, measurements, winner, outcome_quality);
+            let regime =
+                self.dsfb
+                    .observe(key, measurements, winner, outcome_quality, semantic, mode);
             if self.dsfb.len() > DSFB_MAX_CHUNKS {
                 let shard = self.dsfb.shard_of(&key);
                 self.dsfb.evict_one_from(shard);
             }
             regime
         })
+    }
+
+    /// The Phase-12C semantic mode (which class groups feed the prior;
+    /// advisory). The 12C oracle toggles it per run; the production
+    /// default is decided by the oracle's evidence.
+    pub fn semantic_mode(&self) -> crate::dsfb::semantics::SemanticMode {
+        match self
+            .semantic_mode_flag
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            0 => crate::dsfb::semantics::SemanticMode::None,
+            1 => crate::dsfb::semantics::SemanticMode::Extension,
+            2 => crate::dsfb::semantics::SemanticMode::ByteSketch,
+            3 => crate::dsfb::semantics::SemanticMode::History,
+            _ => crate::dsfb::semantics::SemanticMode::Combined,
+        }
+    }
+
+    /// Set the Phase-12C semantic mode (oracle/tests only; advisory).
+    pub fn set_semantic_mode(&self, mode: crate::dsfb::semantics::SemanticMode) {
+        let flag = match mode {
+            crate::dsfb::semantics::SemanticMode::None => 0,
+            crate::dsfb::semantics::SemanticMode::Extension => 1,
+            crate::dsfb::semantics::SemanticMode::ByteSketch => 2,
+            crate::dsfb::semantics::SemanticMode::History => 3,
+            crate::dsfb::semantics::SemanticMode::Combined => 4,
+        };
+        self.semantic_mode_flag
+            .store(flag, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Phase-12C oracle diagnostics: `(winning-rank sum, count)` — the
+    /// average first-winning rank of the winner channel in the plan
+    /// order (lower = the winner was found earlier).
+    pub fn semantic_rank_stats(&self) -> (u64, u64) {
+        (
+            self.semantic_rank_sum
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.semantic_rank_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// Phase-12C oracle diagnostics: RAW-winner count (the RAW fallback
+    /// rate witness; a good prior never pushes the true winner away).
+    pub fn semantic_raw_wins(&self) -> u64 {
+        self.semantic_raw_wins
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Phase-12C oracle diagnostics: record one winning-channel rank (the
+    /// search calls this at the end of `encode_guided`; never a behavior).
+    pub(crate) fn record_semantic_rank(&self, rank: u64) {
+        self.semantic_rank_sum
+            .fetch_add(rank, std::sync::atomic::Ordering::Relaxed);
+        self.semantic_rank_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Phase-12C oracle diagnostics: record one RAW winner (never a
+    /// behavior).
+    pub(crate) fn record_semantic_raw_win(&self) {
+        self.semantic_raw_wins
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Observer statistics (for `status`).
@@ -3314,6 +3404,10 @@ pub(crate) struct Composed {
     /// the serial assembly phase. `None` when the dictionary is a
     /// committed chunk (the committed store resolves it).
     synthetic: Option<crate::optimizer::search::PendingBatch>,
+    /// Phase-12C: the write's advisory semantic context (name- and
+    /// byte-derived classes; threaded into the guided search's DSFB
+    /// calls). Same for every chunk of the write.
+    semantic: Option<crate::dsfb::semantics::SemanticContext>,
 }
 
 /// One chunk's phase-2 outcome: the rebase-flatten updates, the validated
@@ -3391,6 +3485,8 @@ fn encode_prepared_chunk(
         // (the in-batch dictionary's composed bytes); the real batch
         // pending state is applied by the serial assembly phase.
         pending: c.synthetic.as_ref(),
+        // Phase-12C: the write's advisory semantic context.
+        semantic: c.semantic,
         mode: crate::optimizer::search::SearchMode::Foreground,
     };
     let outcome = store.perf().time("search", || {
@@ -3489,7 +3585,7 @@ impl Store {
         // and `Tx::commit_deferred`.
         let _req = self.perf.request("write_region");
         let (updates, new_size) = self.perf.time_request("prepare", || {
-            self.prepare_write(ino, offset, data, None, None, options, fg, None)
+            self.prepare_write(ino, offset, data, None, None, options, fg, None, None)
         })?;
         self.commit_file_extents_deferred(ino, updates, Some(new_size), &CrashHooks::none())?;
         Ok(())
@@ -3518,6 +3614,7 @@ impl Store {
         options: crate::optimizer::policy::OptimizeOptions,
         fg: crate::optimizer::foreground::ForegroundPolicy,
         epoch_size: Option<u64>,
+        semantic: Option<crate::dsfb::semantics::SemanticContext>,
     ) -> Result<(Vec<ExtentUpdate>, u64), StoreError> {
         if data.is_empty() {
             let committed = self.get_inode(ino)?.map(|i| i.size).unwrap_or(0);
@@ -3719,6 +3816,7 @@ impl Store {
                 prev_version,
                 dictionary,
                 synthetic,
+                semantic,
             });
             chunk += 1;
         }
@@ -3968,6 +4066,7 @@ impl Store {
                     dictionary,
                     shared: None,
                     pending: pending.as_deref(),
+                    semantic: None,
                     mode: crate::optimizer::search::SearchMode::Foreground,
                 };
                 let redo = self.perf.time("search", || {
@@ -4068,6 +4167,7 @@ impl Store {
                 Some(&mut pending),
                 options,
                 fg,
+                None,
                 None,
             )?;
             updates.extend(u);
@@ -5914,6 +6014,24 @@ impl Store {
         fg: crate::optimizer::foreground::ForegroundPolicy,
         hooks: &CrashHooks,
     ) -> Result<(), StoreError> {
+        self.epoch_write_semantic(ino, offset, data, options, fg, None, hooks)
+    }
+
+    /// [`Store::epoch_write`] with the Phase-12C advisory semantic
+    /// context (the DSFB prior's input; `None` = the sealed baseline).
+    /// The context is per-WRITE (the same for every chunk of the write)
+    /// and strictly advisory — it can order the search, never change
+    /// bytes.
+    pub fn epoch_write_semantic(
+        &self,
+        ino: u64,
+        offset: u64,
+        data: &[u8],
+        options: crate::optimizer::policy::OptimizeOptions,
+        fg: crate::optimizer::foreground::ForegroundPolicy,
+        semantic: Option<crate::dsfb::semantics::SemanticContext>,
+        hooks: &CrashHooks,
+    ) -> Result<(), StoreError> {
         if data.is_empty() {
             return Ok(());
         }
@@ -5993,6 +6111,7 @@ impl Store {
                 options,
                 fg,
                 Some(old_size),
+                semantic,
             )
         })?;
 

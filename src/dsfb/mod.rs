@@ -125,5 +125,6 @@ pub mod drift;
 pub mod features;
 pub mod observer;
 pub mod selection;
+pub mod semantics;
 pub mod slew;
 pub mod trust;

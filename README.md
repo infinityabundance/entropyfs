@@ -51,24 +51,25 @@ For sealed performance and experimental evidence, see
 
 ### Current development focus
 
-- Latest completed phase: **12B — durability generations + group commit**
-  (`docs/performance/durability-generations.md`, sealed
-  `evidence/performance/fsync-group-probe-*/`): concurrent fsyncs
-  coalesce onto one physical barrier per generation (waiters park on a
-  coordinator; the first becomes the owner; the physical barrier is
-  unchanged). Amplification 1.00 → 0.23 at 32 writers, fsync p99 −48%,
-  commit-lock wait −96%; crash court green at every barrier stage. 12A-0
-  (the Hot-DAG read-cost oracle, `docs/performance/dag-read-cost.md`)
-  REJECTED the terminalization daemon on measured evidence. **Phase 11 is
-  closed** (11A hostile input → 11B reconciliation → 11C synchronization
-  removal → 11D oracle → 11E fair pool, mount default → 11F observer
-  shard); see `docs/performance/worker-pool-probe.md` and CHANGELOG
-  v0.7.4–0.7.9.
+- Latest completed phase: **12C-0 — the DSFB structural-semiotics
+  oracle** (`docs/performance/dsfb-semantics.md`, sealed
+  `evidence/performance/dsfb-semantics-probe-*/`): the semantic prior
+  (name- and byte-derived classes → learned per-class channel prior)
+  really reorders the search (winner rank 4.41 → 1.02) with byte-exact,
+  density-identical correctness across the semantic-deception exhibits;
+  the standalone CPU gain is ~3% (the plan's budget is a channel count)
+  — RECORDED, not wired as the default; the adaptive foreground budget
+  is the identified continuation. 12B (durability generations, v0.7.9)
+  sealed the group commit (amplification 0.23 at 32 writers, crash
+  courts green at every barrier stage); 12A-0 (v0.7.8) REJECTED the
+  terminalization daemon on measured evidence. **Phase 11 is closed**
+  (11A hostile input → 11B reconciliation → 11C synchronization removal
+  → 11D oracle → 11E fair pool, mount default → 11F observer shard);
+  see `docs/performance/worker-pool-probe.md` and CHANGELOG v0.7.4–0.7.10.
 - Current decision: the pool is the mount default
   (`available_parallelism()` workers; `--no-worker-pool` restores the 11C
-  semaphore as the fallback). The next research steps are 12C DSFB
-  structural semiotics and 12D grammar-addressed entropy (offline oracle
-  first).
+  semaphore as the fallback). The next research step is 12D
+  grammar-addressed entropy (offline oracle first).
 - Persistent format: explicit, versioned, incompat-feature-gated.
 - Correctness: crash courts + hostile-media court + fsck, byte-exact
   read-back under every scheduler.

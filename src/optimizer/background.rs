@@ -393,6 +393,7 @@ fn evaluate_commit_extent(
             },
             shared: None,
             pending: None,
+            semantic: None,
             mode: SearchMode::Background,
         };
         match encode_guided(
@@ -420,6 +421,7 @@ fn evaluate_commit_extent(
                 // every anchor-independent family).
                 shared: Some(anchor.clone()),
                 pending: None,
+                semantic: None,
                 mode: SearchMode::Background,
             };
             match encode_guided(

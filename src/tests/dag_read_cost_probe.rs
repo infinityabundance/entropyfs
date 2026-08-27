@@ -317,6 +317,7 @@ fn build_base_chain(
                 dictionary: None,
                 shared: None,
                 pending: None,
+                semantic: None,
                 mode: SearchMode::Foreground,
             };
             let outcome = encode_guided(store, &ctx, opts, fg).unwrap();
@@ -386,6 +387,7 @@ fn build_diamond(store: &Store, tag: u64) -> Vec<(u64, Vec<u8>, u8)> {
             dictionary: None,
             shared: None,
             pending: None,
+            semantic: None,
             mode: SearchMode::Foreground,
         };
         let outcome = encode_guided(store, &ctx, opts, fg).unwrap();
@@ -416,6 +418,7 @@ fn build_diamond(store: &Store, tag: u64) -> Vec<(u64, Vec<u8>, u8)> {
         dictionary: None,
         shared: None,
         pending: None,
+        semantic: None,
         mode: SearchMode::Foreground,
     };
     let outcome = encode_guided(store, &ctx, opts, fg).unwrap();
