@@ -314,6 +314,19 @@ impl SemanticPrior {
         }
         row[channel as usize] as f64 / total as f64
     }
+
+    /// The class's observation count (0 for an unseen class) — the
+    /// confidence DENOMINATOR of the 12C-1 focused budget. A class with
+    /// few observations has an unreliable winner distribution; the
+    /// focused rANS-deferral gate refuses to engage until the class has
+    /// earned [`crate::optimizer::foreground::ForegroundPolicy::focused_min_observations`]
+    /// observations, so a cold class always gets the full search.
+    pub fn count(&self, key: u64) -> u64 {
+        self.table
+            .get(&key)
+            .map(|row| row.iter().sum())
+            .unwrap_or(0)
+    }
 }
 
 /// A bounded deterministic hash for the class keys (FNV-1a over the

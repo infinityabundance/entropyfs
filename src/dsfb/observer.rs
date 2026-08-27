@@ -669,6 +669,54 @@ impl ShardedStorageObserver {
             .unwrap_or(0.125)
     }
 
+    /// Phase 12C-1: the semantic class's rANS-winner share and
+    /// observation count — the focused-budget confidence signal.
+    ///
+    /// The 12C-1 `Focused` foreground policy defers the rANS families to
+    /// the background optimizer when the chunk's semantic class has
+    /// enough observations AND the class's winner distribution says rANS
+    /// rarely wins (`P(Rans) < policy.focused_rans_skip_share`). This
+    /// accessor returns the evidence the policy gate needs: `Some((count,
+    /// share))`, or `None` when there is no semantic context or the
+    /// store's mode disables the prior (then the gate must NOT engage —
+    /// an unknown class always gets the full search).
+    ///
+    /// # Why the Rans channel is the gate
+    ///
+    /// The 12C-1-0 frontier measured the adoption-wedge search CPU
+    /// composition: the byte-rANS + sequence-rANS sweep is ~67% of the
+    /// `search` row (the configurational families ~13%). The prior's
+    /// `Channel::Rans` share is the empirical `P(winner is a rANS
+    /// family)` for the class — the exact quantity the deferral decision
+    /// needs. A class that historically wins with dedup/dict/bases has a
+    /// low share and its rANS sweep is pure waste; a class that wins with
+    /// rANS has a high share and the gate stays OFF (density protected).
+    ///
+    /// # Concurrency
+    ///
+    /// Locks the brief prior mutex (~1 µs; one lock per write-path
+    /// chunk in Focused mode — the same contention class the 11F oracle
+    /// measured for the prior itself).
+    ///
+    /// # Failure modes
+    ///
+    /// Infallible. A poisoned prior mutex panics (like every store
+    /// mutex). A wrong share costs foreground CPU or foreground density
+    /// (recovered by the background optimizer — the 12C-1-0 frontier
+    /// measured recovery to 0.00–0.62% regression on the wedge corpora),
+    /// never bytes.
+    pub fn class_rans_share(
+        &self,
+        semantic: Option<crate::dsfb::semantics::SemanticContext>,
+        mode: crate::dsfb::semantics::SemanticMode,
+    ) -> Option<(u64, f64)> {
+        let pkey = semantic?.key_for(mode)?;
+        let prior = self.prior.lock().expect("dsfb prior poisoned");
+        let count = prior.count(pkey);
+        let share = prior.prior(pkey, Channel::Rans);
+        Some((count, share))
+    }
+
     /// Forget state for a chunk (unlink/truncate/gc).
     ///
     /// # Concurrency / count invariant

@@ -1,5 +1,68 @@
 # EntropyFS changelog
 
+## v0.7.14 (2026-08-27)
+
+**Phase 12C-1 — the adaptive foreground search budget: the cost–density
+frontier on the sealed adoption corpora PLUS the first-class
+`ForegroundMode::Focused` adaptive gate.** The question was whether
+EntropyFS can preserve the 12E.13 10–20× storage wedge while spending
+dramatically less foreground search CPU. The court's answer is precise:
+**the wedge's search is genuine computational work — the semantic prior
+itself certifies it — and the adaptive budget preserves the wedge
+byte-for-byte while cutting search CPU wherever the search is waste.**
+
+The brutal gate's rows: settled bytes ≤5% **MET (+0.000% byte-equal on
+every workload)**; 10× wedge preserved **MET**; byte identity **MET**;
+p99 no regression **MET**; RAW controls unchanged **MET**; search CPU
+improved **MET where the class distrusts rANS (noise 10.7×, mixed
+1.7×)**; put wall ≥2× **NOT MET on the wedge by the confidence gate** —
+recorded with the boundary, see below.
+
+- **12C-1-0 — the frontier** (`src/tests/adaptive_budget_probe.rs`,
+  `tools/court-adaptive-budget.sh`, sealed
+  `evidence/performance/adaptive-budget-probe-1787856921-98832ca/`):
+  the six sealed 12E.13 corpora shared via
+  `src/tests/adoption_corpus.rs` (extracted verbatim; the refactored
+  adoption oracle reproduces the sealed bytes exactly), driven through
+  the engine's own put protocol (content-id names, fast-dedup lookup,
+  tmp-write-rename), full/cheap/raw arms. The `full` arm replays the
+  sealed court to **+0.000–0.011%**. Findings: (1) the entropy probe
+  has **zero headroom on the wedge** (wall 0.96–1.00×, density
+  +0.000%) — every wedge corpus is structured low-entropy text; (2)
+  the byte+sequence rANS sweep is **~67% of search CPU**; (3) **the
+  search is density-OPTIONAL**: raw + background optimizer converges to
+  **+0.000–0.618% settled on all six workloads**; (4) the deferral
+  ceiling is 1.25–4.29× put wall, with **build-artifacts (1.44×) and
+  source-trees (1.25×) bounded by NON-SEARCH write-path cost**
+  (`prepare` ≈ 50% of put wall in the perf decomposition) — no
+  search-budget policy can reach 2× there; (5) RAW controls unchanged
+  (noise: byte-exact, 100% RAW, cheap 4.03×).
+- **12C-1-1 — `ForegroundMode::Focused`, the adaptive budget**
+  (`src/optimizer/foreground.rs`, `src/optimizer/search.rs`, the
+  `dsfb_class_rans_share` / `SemanticPrior::count` accessors): the
+  entropy probe PLUS a semantic class-prior rANS deferral — when the
+  chunk's class has ≥16 observations and its winner distribution says
+  rANS rarely wins (`P(Rans) < 0.10`), the rANS sweep is deferred to
+  the background (frontier-proven density-safe); classes that win with
+  rANS keep it. The gate is self-calibrating and engagement-counted:
+  **0 skips on all six wedge workloads** (the prior certifies
+  `P(Rans)≈1` — the wedge's search is genuine work; first-winning rank
+  6.0 → 0.02), **44 skips on the distrustful mixed sparse class**
+  (search −42%, wall −35%, density +0.000%). Noise: **3.73× put wall,
+  10.72× search CPU, density +0.000%**. Focused is adopted as a
+  first-class policy; the FUSE/engine defaults stay `Full` pending the
+  prior-wiring court (the mounted write path does not yet feed semantic
+  contexts).
+- **The boundary (recorded honestly):** the ≥2× put-wall row is not
+  met on the wedge by any confidence gate, because the wedge's rANS is
+  the price of the wedge. The identified continuation (12C-1-2) is the
+  pressure term of the budget function — defer the wedge's rANS sweep
+  to the background under worker-pool/CPU pressure (capturing the
+  2.29–3.83× available on 4/6 workloads at settled-neutral cost) plus
+  the write-path overhead term for build-artifacts/source-trees. The
+  frontier + the adaptive gate are its design basis; the probe is its
+  measurement surface.
+
 ## v0.7.13 (2026-08-27)
 
 **Phase 12E.11–12E.24 — the completion of the adoption-engineering line:

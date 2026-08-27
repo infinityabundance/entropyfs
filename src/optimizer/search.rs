@@ -433,6 +433,47 @@ pub fn encode_guided(
         crate::optimizer::foreground::ForegroundFamilySet::unrestricted()
     };
 
+    // -------------------------------------------------------------------
+    // Phase 12C-1: the Focused adaptive refinement — the class-prior rANS
+    // deferral.
+    //
+    // The 12C-1-0 frontier measured the adoption-wedge search CPU
+    // composition: the byte-rANS + sequence-rANS sweep is ~67% of the
+    // `search` row, and — decisively — the foreground search is
+    // density-OPTIONAL on the wedge corpora (the background optimizer
+    // recovers the full footprint to 0.00–0.62% regression). The Focused
+    // policy therefore defers the rANS families to the background when
+    // the chunk's semantic class prior says they rarely win, and keeps
+    // them when the class says they win. The gate is self-calibrating:
+    // `focused_min_observations` keeps cold classes on the full search,
+    // and a class that genuinely wins with rANS accumulates a high
+    // `P(Rans)` share that disengages the gate.
+    //
+    // SAFETY: a wrong gate costs foreground CPU or foreground density
+    // (recovered by the background pass — the settled footprint is the
+    // 12C-1 gate's authority), never bytes: every candidate still
+    // encodes, costs, materializes, hashes, and validates (§32) before it
+    // can win.
+    // -------------------------------------------------------------------
+    let fg_set = if ctx.mode == SearchMode::Foreground
+        && fg.mode == crate::optimizer::foreground::ForegroundMode::Focused
+        && (fg_set.byte_rans || fg_set.sequence_rans)
+    {
+        match store.dsfb_class_rans_share(ctx.semantic) {
+            Some((count, share)) if fg.focused_skips_rans(count, share) => {
+                store.record_focused_rans_skip();
+                crate::optimizer::foreground::ForegroundFamilySet {
+                    byte_rans: false,
+                    sequence_rans: false,
+                    ..fg_set
+                }
+            }
+            _ => fg_set,
+        }
+    } else {
+        fg_set
+    };
+
     let mut candidates: Vec<(Channel, Candidate)> = Vec::new();
     let mut bases_tried: Vec<(Channel, bool)> = Vec::new();
 

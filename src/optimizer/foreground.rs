@@ -98,6 +98,17 @@
 //!     `d38f73f`); the anti-aliasing min-over-strides was found by the
 //!     periodic fixture in `entropy_classification_is_deterministic_and_sane`;
 //!     `ForegroundMode::RawOnly` is the raw-only control arm.
+//!     Phase 12C-1 introduced `ForegroundMode::Focused` — the adaptive
+//!     foreground budget (evidence `evidence/performance/adaptive-budget-probe-*/`,
+//!     CHANGELOG v0.7.14). The 12C-1-0 frontier measured the adoption-wedge
+//!     search CPU composition (rANS sweep ~67% of the `search` row) and
+//!     proved the foreground search is density-OPTIONAL on the wedge
+//!     corpora (the background optimizer recovers the full footprint to
+//!     0.00–0.62% regression). Focused therefore defers the rANS families
+//!     to the background when the semantic class prior says they rarely
+//!     win, and keeps them when the class says they win (self-calibrating:
+//!     the gate engages only for classes with enough observations whose
+//!     winner distribution distrusts rANS).
 
 #![forbid(unsafe_code)]
 
@@ -113,6 +124,21 @@ pub enum ForegroundMode {
     /// go dedup + ZERO/FILL + RAW; structured/uncertain chunks get the
     /// full foreground search.
     Cheap,
+    /// Phase 12C-1: the adaptive foreground budget — the entropy probe
+    /// PLUS the semantic class prior. High-entropy chunks skip the
+    /// LZ/entropy families (the Cheap rule); additionally, when the
+    /// chunk's semantic class has enough observations and its winner
+    /// distribution says the rANS families rarely win
+    /// (`P(Rans) < focused_rans_skip_share`), the rANS sweep is deferred
+    /// to the background optimizer — the 12C-1-0 frontier proved the
+    /// background recovers the full footprint (0.00–0.62% regression on
+    /// the adoption corpora), so the deferral is density-safe in the
+    /// settled state. A class that wins with rANS keeps the full sweep
+    /// (the gate is self-calibrating: it never starves a family that
+    /// genuinely wins). The gate engages only after
+    /// `focused_min_observations` observations, so cold classes always
+    /// get the full search.
+    Focused,
     /// Hash → CAS → ZERO/FILL → RAW only (the raw-only control; the
     /// background optimizer still densifies later).
     RawOnly,
@@ -124,23 +150,35 @@ pub enum ForegroundMode {
 /// with `OptimizeOptions` (the family authority): the policy says whether
 /// the full search may run, the options say which families exist.
 ///
-/// Invariants: `mode` is one of three sealed modes (the 10B comparison
-/// arms); `high_entropy_bits` is Shannon entropy in bits per byte
-/// (8.0 = uniform byte alphabet; compressed data sits near it;
+/// Invariants: `mode` is one of the sealed modes (the 10B / 12C-1
+/// comparison arms); `high_entropy_bits` is Shannon entropy in bits per
+/// byte (8.0 = uniform byte alphabet; compressed data sits near it;
 /// source/text is typically 4–6); `probe_bytes` is the probe sample size
-/// in bytes. A `Copy` value with no interior state, safe to share across
-/// threads.
+/// in bytes. The two `focused_*` fields are the 12C-1 adaptive gate's
+/// parameters (dormant in the other modes). A `Copy` value with no
+/// interior state, safe to share across threads.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ForegroundPolicy {
     /// Search mode.
     pub mode: ForegroundMode,
     /// Entropy (bits per byte) at or above which a chunk is classified
-    /// high-entropy and the LZ/entropy families are skipped (Cheap mode).
-    /// Shannon entropy of a uniform byte alphabet is 8.0; compressed
-    /// data sits near it. Source/text is typically 4–6.
+    /// high-entropy and the LZ/entropy families are skipped (Cheap/Focused
+    /// modes). Shannon entropy of a uniform byte alphabet is 8.0;
+    /// compressed data sits near it. Source/text is typically 4–6.
     pub high_entropy_bits: f64,
     /// Probe sample size (bytes, deterministic stride over the chunk).
     pub probe_bytes: usize,
+    /// Phase 12C-1 (Focused only): the class's rANS-winner share below
+    /// which the rANS families are deferred to the background (0..1;
+    /// 0.10 default — a class must win with rANS fewer than 10% of the
+    /// time before its rANS sweep is judged waste). Dormant in the other
+    /// modes.
+    pub focused_rans_skip_share: f64,
+    /// Phase 12C-1 (Focused only): minimum class observations before the
+    /// rANS deferral may engage. A cold class (fewer observations) always
+    /// gets the full search — the winner distribution is unreliable until
+    /// the class has earned its confidence. 16 default.
+    pub focused_min_observations: u64,
 }
 
 impl Default for ForegroundPolicy {
@@ -149,6 +187,8 @@ impl Default for ForegroundPolicy {
             mode: ForegroundMode::Full,
             high_entropy_bits: 7.2,
             probe_bytes: 4096,
+            focused_rans_skip_share: 0.10,
+            focused_min_observations: 16,
         }
     }
 }
@@ -160,6 +200,8 @@ impl ForegroundPolicy {
             mode: ForegroundMode::Full,
             high_entropy_bits: 7.2,
             probe_bytes: 4096,
+            focused_rans_skip_share: 0.10,
+            focused_min_observations: 16,
         }
     }
 
@@ -176,6 +218,24 @@ impl ForegroundPolicy {
             mode: ForegroundMode::Cheap,
             high_entropy_bits: 7.2,
             probe_bytes: 4096,
+            focused_rans_skip_share: 0.10,
+            focused_min_observations: 16,
+        }
+    }
+
+    /// Phase 12C-1: the adaptive foreground budget — the entropy probe
+    /// plus the semantic class-prior rANS deferral (see
+    /// [`ForegroundMode::Focused`] for the full semantics and the sealed
+    /// 12C-1 evidence). The probe/oracle arms sweep the two `focused_*`
+    /// parameters by constructing this struct directly (the fields are
+    /// public policy parameters, not hidden state).
+    pub const fn focused() -> Self {
+        Self {
+            mode: ForegroundMode::Focused,
+            high_entropy_bits: 7.2,
+            probe_bytes: 4096,
+            focused_rans_skip_share: 0.10,
+            focused_min_observations: 16,
         }
     }
 
@@ -185,6 +245,8 @@ impl ForegroundPolicy {
             mode: ForegroundMode::RawOnly,
             high_entropy_bits: 7.2,
             probe_bytes: 4096,
+            focused_rans_skip_share: 0.10,
+            focused_min_observations: 16,
         }
     }
 
@@ -195,7 +257,7 @@ impl ForegroundPolicy {
         match self.mode {
             ForegroundMode::Full => true,
             ForegroundMode::RawOnly => false,
-            ForegroundMode::Cheap => !high_entropy(chunk, self),
+            ForegroundMode::Cheap | ForegroundMode::Focused => !high_entropy(chunk, self),
         }
     }
 
@@ -203,6 +265,24 @@ impl ForegroundPolicy {
     /// separate so `OptimizeOptions` remains the family-authority).
     pub fn family_evaluations_allowed(&self) -> bool {
         self.mode != ForegroundMode::RawOnly
+    }
+
+    /// Phase 12C-1: whether the `Focused` gate defers the rANS families
+    /// for a class with `observations` observations and a measured
+    /// rANS-winner share of `rans_share`.
+    ///
+    /// Engages only when ALL of: the mode is `Focused`; the class has
+    /// earned at least `focused_min_observations` observations (a cold
+    /// class gets the full search — its winner distribution is not yet
+    /// reliable); and the class wins with rANS less than
+    /// `focused_rans_skip_share` of the time (the sweep is judged waste
+    /// for this class; the background optimizer recovers any density the
+    /// deferral costs — the 12C-1-0 frontier measured recovery to
+    /// 0.00–0.62% on the adoption corpora).
+    pub fn focused_skips_rans(&self, observations: u64, rans_share: f64) -> bool {
+        self.mode == ForegroundMode::Focused
+            && observations >= self.focused_min_observations
+            && rans_share < self.focused_rans_skip_share
     }
 }
 

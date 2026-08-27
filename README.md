@@ -51,7 +51,23 @@ For sealed performance and experimental evidence, see
 
 ### Current development focus
 
-- Latest completed phase: **12E — the adoption-engineering line**
+- Latest completed phase: **12C-1 — the adaptive foreground search
+  budget** (v0.7.14): the cost–density frontier on the sealed 12E.13
+  adoption corpora (`adaptive_budget_probe`, sealed
+  `evidence/performance/adaptive-budget-probe-*/` — the `full` arm
+  replays the sealed court to +0.000–0.011%) plus the first-class
+  `ForegroundMode::Focused` adaptive gate (entropy probe + semantic
+  class-prior rANS deferral). Result: the wedge's search is genuine
+  work — the prior certifies it — so the adaptive budget preserves the
+  10–20× wedge **byte-for-byte (settled +0.000% on every workload)**
+  while cutting search CPU 10.7× on incompressible content and 1.7× on
+  distrustful classes (the engagement counter: 0 skips on the wedge, 44
+  on the mixed sparse class). The ≥2× put-wall gate is not met on the
+  wedge by a confidence gate: the frontier bounds the deferral ceiling
+  at 1.25–4.29×, with build-artifacts/source-trees bounded by
+  NON-SEARCH write-path cost — the pressure term (12C-1-2) is the
+  identified continuation.
+- Previous phase: **12E — the adoption-engineering line**
   (v0.7.12–0.7.13): the stable embeddable Engine facade + format-v1
   compatibility seal (12E.1/3), optional frontend features (12E.2),
   golden-store compatibility court (12E.4), sealed evidence manifests
@@ -76,7 +92,9 @@ For sealed performance and experimental evidence, see
   the real-device 12E.11 court. Phase 12's research oracles are all
   sealed: 12A terminalization (REJECTED), 12B durability generations
   (ADOPTED — the mount's fsyncs coalesce), 12C structural semiotics
-  (RECORDED — the adaptive foreground budget is the continuation), 12D
+  (RECORDED) + 12C-1 the adaptive foreground budget (ADOPTED as
+  `ForegroundMode::Focused`; the FUSE/engine defaults stay `Full`
+  pending the prior-wiring court — the pressure term is 12C-1-2), 12D
   grammar-addressed entropy (STOPPED at the offline oracle — the
   entropy-coded-skeleton round is the only path to the format bit).
 - Persistent format: explicit, versioned, incompat-feature-gated.

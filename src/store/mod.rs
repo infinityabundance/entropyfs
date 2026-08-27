@@ -370,6 +370,11 @@ pub struct Store {
     semantic_rank_sum: std::sync::atomic::AtomicU64,
     semantic_rank_count: std::sync::atomic::AtomicU64,
     semantic_raw_wins: std::sync::atomic::AtomicU64,
+    /// Phase 12C-1 oracle diagnostics (never a behavior): how many times
+    /// the `Focused` foreground gate deferred the rANS families — the
+    /// adaptive-budget engagement witness. Identical accounting in every
+    /// configuration, so cross-configuration deltas measure the gate.
+    focused_rans_skips: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for Store {
@@ -488,6 +493,7 @@ impl Store {
             semantic_rank_sum: std::sync::atomic::AtomicU64::new(0),
             semantic_rank_count: std::sync::atomic::AtomicU64::new(0),
             semantic_raw_wins: std::sync::atomic::AtomicU64::new(0),
+            focused_rans_skips: std::sync::atomic::AtomicU64::new(0),
         };
         store.open_segment(0)?;
         // Create the root directory inode (ino 1) and commit the initial
@@ -608,6 +614,7 @@ impl Store {
             semantic_rank_sum: std::sync::atomic::AtomicU64::new(0),
             semantic_rank_count: std::sync::atomic::AtomicU64::new(0),
             semantic_raw_wins: std::sync::atomic::AtomicU64::new(0),
+            focused_rans_skips: std::sync::atomic::AtomicU64::new(0),
         };
         // Phase-10D: replay any un-checkpointed mutation log tail left by
         // a process crash (the last checkpoint root is authoritative; the
@@ -817,6 +824,23 @@ impl Store {
             .time("dsfb_trust", || self.dsfb.trust(key, channel))
     }
 
+    /// Phase 12C-1: the semantic class's rANS-winner share + observation
+    /// count — the `Focused` foreground policy's confidence input (see
+    /// [`crate::dsfb::observer::ShardedStorageObserver::class_rans_share`]
+    /// for the semantics). `None` when the write carries no semantic
+    /// context or the store's mode disables the prior.
+    ///
+    /// Timed under the global `dsfb_prior` row (same rationale as
+    /// [`Store::dsfb_plan`]).
+    pub fn dsfb_class_rans_share(
+        &self,
+        semantic: Option<crate::dsfb::semantics::SemanticContext>,
+    ) -> Option<(u64, f64)> {
+        let mode = self.semantic_mode();
+        self.perf
+            .time("dsfb_prior", || self.dsfb.class_rans_share(semantic, mode))
+    }
+
     /// Feed the DSFB observer (performance-only state). Bounded eviction
     /// keeps the observer from growing without limit. Timed under the
     /// global `dsfb_observe` row (same rationale as [`Store::dsfb_plan`]).
@@ -897,6 +921,22 @@ impl Store {
     pub fn semantic_raw_wins(&self) -> u64 {
         self.semantic_raw_wins
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Phase 12C-1 oracle diagnostics: how many times the `Focused`
+    /// foreground gate deferred the rANS families (the adaptive-budget
+    /// engagement witness).
+    pub fn focused_rans_skips(&self) -> u64 {
+        self.focused_rans_skips
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Phase 12C-1 oracle diagnostics: record one rANS deferral (the
+    /// search calls this when the `Focused` gate engages; never a
+    /// behavior).
+    pub(crate) fn record_focused_rans_skip(&self) {
+        self.focused_rans_skips
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Phase-12C oracle diagnostics: record one winning-channel rank (the
