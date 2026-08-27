@@ -1,0 +1,146 @@
+warning: variable does not need to be mutable
+   --> src/dsfb/semantics.rs:227:13
+    |
+227 |         let mut step = (sample.len() / 2048).max(1);
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src/store/mod.rs:6467:29
+     |
+6467 |                         let mut cur = Store::inode_for_tx(tx, *child)?;
+     |                             ----^^^
+     |                             |
+     |                             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/store/mod.rs:6590:29
+     |
+6590 |                         let mut cur = Store::inode_for_tx(tx, *src_ino)?;
+     |                             ----^^^
+     |                             |
+     |                             help: remove this `mut`
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:113:9
+    |
+113 |     for i in 0..4u64 {
+    |         ^ help: if this is intentional, prefix it with an underscore: `_i`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:126:9
+    |
+126 |     for i in 0..2u64 {
+    |         ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:255:10
+    |
+255 |     for (i, (path, v1)) in names.iter().enumerate() {
+    |          ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `start`
+   --> src/tests/grammar_oracle.rs:251:29
+    |
+251 |                         let start = pos.min(r.len());
+    |                             ^^^^^ help: if this is intentional, prefix it with an underscore: `_start`
+
+warning: unused variable: `struct_share`
+   --> src/tests/pack_oracle.rs:328:9
+    |
+328 |     let struct_share = structural as f64 / phys as f64;
+    |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_struct_share`
+
+warning: unused variable: `by_total_a`
+   --> src/tests/pack_oracle.rs:445:10
+    |
+445 |     let (by_total_a, _, _, _, _, _) = decompose(&store);
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_by_total_a`
+
+warning: unused variable: `prepared`
+   --> src/tests/perf_reconciled.rs:311:13
+    |
+311 |         let prepared = store
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_prepared`
+
+warning: type `Composed` is more private than the item `workers::WorkerTask::EncodeChunk::composed`
+    --> src/store/workers.rs:384:9
+     |
+ 384 |         composed: super::Composed,
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^ field `workers::WorkerTask::EncodeChunk::composed` is reachable at visibility `pub`
+     |
+note: but type `Composed` is only usable at visibility `pub(crate)`
+    --> src/store/mod.rs:3488:1
+     |
+3488 | pub(crate) struct Composed {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: function `percentile` is never used
+   --> src/tests/dsfb_semantics_probe.rs:190:4
+    |
+190 | fn percentile(sorted: &[f64], q: f64) -> f64 {
+    |    ^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `candidates`, `chunks`, and `raw_wins` are never read
+   --> src/tests/dsfb_semantics_probe.rs:200:5
+    |
+197 | struct ModeResult {
+    |        ---------- fields in this struct
+...
+200 |     candidates: u64,
+    |     ^^^^^^^^^^
+201 |     chunks: u64,
+    |     ^^^^^^
+...
+204 |     raw_wins: u64,
+    |     ^^^^^^^^
+
+warning: constant `MAX_MEMBERS` is never used
+  --> src/tests/grammar_oracle.rs:79:7
+   |
+79 | const MAX_MEMBERS: usize = 512;
+   |       ^^^^^^^^^^^
+
+warning: function `contains` is never used
+   --> src/tests/grammar_oracle.rs:214:4
+    |
+214 | fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    |    ^^^^^^^^
+
+warning: struct `NoProvider` is never constructed
+   --> src/tests/io_backend_parity.rs:171:24
+    |
+171 |                 struct NoProvider;
+    |                        ^^^^^^^^^^
+
+warning: missing documentation for a module
+    --> src/store/workers.rs:1036:1
+     |
+1036 | pub mod tests {
+     | ^^^^^^^^^^^^^
+     |
+note: the lint level is defined here
+    --> src/lib.rs:19:9
+     |
+  19 | #![warn(missing_docs)]
+     |         ^^^^^^^^^^^^
+
+warning: `entropyfs` (lib test) generated 17 warnings (run `cargo fix --lib -p entropyfs --tests` to apply 10 suggestions)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (target/release/deps/entropyfs-1656b57820206eef)
+
+running 1 test
+PACK_ORACLE {"after":{"dead_after_bytes":0,"physical_used_bytes":222254,"unexplained_bytes":0},"before":{"dead_before_bytes":902295,"format_bytes":4,"live_by_tag_stored":{"BtreeNode":29783,"Data":144738,"Inode":14790,"Model":12625,"Root":188},"live_by_tag_total":{"BtreeNode":36105,"Data":150248,"Inode":20706,"Model":14945,"Root":246},"live_record_count":347,"live_total_bytes":222250,"packable_live_stored_bytes":157363,"packable_live_total_bytes":165193,"packable_record_count":135,"padding_bytes":0,"physical_used_bytes":1124549,"record_envelope_bytes":20126,"unexplained_bytes":0},"corpus":{"dirs":6,"file_size_bytes":{"max":63223,"min":273,"p25":743,"p50":2569,"p75":6315},"files":95,"logical_payload_bytes":726849},"decision":{"rationale":"packable envelope share 4.7% < 20% (or structural+envelope 29.2% < 30% of physical); envelope fragmentation is not a major term on this realistic tree","verdict":"REJECT-PACKS"},"ratios":{"packable_envelope_share":0.04739910286755492,"physical_over_logical_after":0.305777403559749,"physical_over_logical_before":1.5471562869316735,"reachable_over_logical":0.3057719003534434,"record_envelope_share_of_live":0.09055568053993251},"schema":"pack-oracle-v1"}
+pack-oracle: 95 files, 6 dirs, logical 726849 B, physical 1098.2 KiB -> 217.0 KiB after compact, live 217.0 KiB, envelopes 20126 B (347 recs), packable 161.3 KiB in 135 objects, dead 881.1 KiB -> 0.0 KiB
+test tests::pack_oracle::pack_oracle ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 461 filtered out; finished in 0.03s
+

@@ -34,6 +34,7 @@ pub mod model_oracle;
 pub mod namespace_ops;
 pub mod namespace_repro;
 pub mod optimizer;
+pub mod pack_oracle;
 pub mod partial_window_read;
 pub mod perf_diag;
 pub mod perf_reconciled;
