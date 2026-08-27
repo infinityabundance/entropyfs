@@ -12,7 +12,9 @@
 #![deny(unsafe_code)]
 
 /// One io_uring ring with a safe submit-and-collect API (Phase 10F). The
-/// crate's only `unsafe` file; see the ledger.
+/// crate's only `unsafe` file; see the ledger. Phase 12E.2: compiled only
+/// with the `uring` feature.
+#[cfg(feature = "uring")]
 pub mod io_uring;
 
 pub mod linux;

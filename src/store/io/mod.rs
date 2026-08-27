@@ -148,6 +148,7 @@ use crate::store::StoreError;
 use crate::store::segment::SegmentError;
 
 pub mod sync;
+#[cfg(feature = "uring")]
 pub mod uring;
 
 /// Which transport the store uses.
@@ -156,19 +157,31 @@ pub enum IoBackendKind {
     /// The reference synchronous engine (`SyncIo`; the crash-consistency
     /// oracle). Default.
     Sync,
-    /// The io_uring performance path (`UringIo`).
+    /// The io_uring performance path (`UringIo`); compiled only with the
+    /// `uring` feature (Phase 12E.2).
+    #[cfg(feature = "uring")]
     Uring,
 }
 
 impl IoBackendKind {
-    /// Every backend kind (drives the crash-court parity matrix).
+    /// Every backend kind (drives the crash-court parity matrix). With
+    /// the `uring` feature off, the parity matrix is Sync-only (Phase
+    /// 12E.2).
+    #[cfg(feature = "uring")]
     pub const ALL: [IoBackendKind; 2] = [IoBackendKind::Sync, IoBackendKind::Uring];
+    #[cfg(not(feature = "uring"))]
+    pub const ALL: [IoBackendKind; 1] = [IoBackendKind::Sync];
 
     /// Parse a CLI value (`sync` | `uring`).
     pub fn parse(s: &str) -> Result<Self, String> {
         match s {
             "sync" => Ok(IoBackendKind::Sync),
+            #[cfg(feature = "uring")]
             "uring" => Ok(IoBackendKind::Uring),
+            #[cfg(not(feature = "uring"))]
+            "uring" => Err("this build has no io_uring support (compiled without the \
+                 `uring` feature); use --io-backend sync"
+                .into()),
             other => Err(format!(
                 "unknown --io-backend {other:?} (expected sync | uring)"
             )),
@@ -179,6 +192,7 @@ impl IoBackendKind {
     pub fn name(self) -> &'static str {
         match self {
             IoBackendKind::Sync => "sync",
+            #[cfg(feature = "uring")]
             IoBackendKind::Uring => "uring",
         }
     }
@@ -270,6 +284,7 @@ pub fn build_backend(
 ) -> Result<Arc<dyn IoBackend>, StoreError> {
     match kind {
         IoBackendKind::Sync => Ok(Arc::new(sync::SyncIo::new(dir))),
+        #[cfg(feature = "uring")]
         IoBackendKind::Uring => Ok(Arc::new(uring::UringIo::new(dir, uring_entries)?)),
     }
 }

@@ -64,12 +64,18 @@ pub fn run() -> Result<(), String> {
             "disabled (informational)"
         }
     );
-    // Phase 10F: probe the io_uring transport (the UringIo backend).
-    match crate::platform::io_uring::Uring::new(8) {
-        Ok(_) => println!("io_uring transport: available"),
-        Err(e) => println!("io_uring transport: UNAVAILABLE ({e})"),
+    // Phase 10F: probe the io_uring transport (the UringIo backend),
+    // when this build has it (Phase 12E.2: feature `uring`).
+    #[cfg(feature = "uring")]
+    {
+        match crate::platform::io_uring::Uring::new(8) {
+            Ok(_) => println!("io_uring transport: available"),
+            Err(e) => println!("io_uring transport: UNAVAILABLE ({e})"),
+        }
+        println!("io_uring ops: READ/WRITE (kernel 5.6+), FSYNC (5.1+), UNLINKAT (5.11+)");
     }
-    println!("io_uring ops: READ/WRITE (kernel 5.6+), FSYNC (5.1+), UNLINKAT (5.11+)");
+    #[cfg(not(feature = "uring"))]
+    println!("io_uring transport: not compiled (feature `uring` off; sync only)");
     if !avail.ready() {
         for d in avail.diagnose() {
             println!("  note: {d}");

@@ -11,10 +11,16 @@ mod cli;
 
 // The binary re-exports the library modules the CLI addresses as
 // `crate::…` (bin + lib share the crate name `entropyfs`).
+#[cfg(feature = "fuse")]
+#[allow(unused_imports)]
+use entropyfs::fuse;
+#[cfg(feature = "ublk")]
+#[allow(unused_imports)]
+use entropyfs::ublk;
 #[allow(unused_imports)]
 use entropyfs::{
-    cache, core, dsfb, entropy, evidence, format, fsck, fuse, integrity, optimizer, platform, rans,
-    store, ublk,
+    cache, core, dsfb, engine, entropy, evidence, format, fsck, integrity, optimizer, platform,
+    rans, store,
 };
 
 /// The entropy-native Linux filesystem.
@@ -35,8 +41,10 @@ enum Command {
     /// Create a new filesystem store.
     Mkfs(cli::mkfs::MkfsArgs),
     /// Mount a store (FUSE daemon; runs in the foreground).
+    #[cfg(feature = "fuse")]
     Mount(cli::mount::MountArgs),
     /// Unmount a mountpoint.
+    #[cfg(feature = "fuse")]
     Unmount(cli::unmount::UnmountArgs),
     /// Store status and accounting.
     Status(cli::status::StatusArgs),
@@ -64,12 +72,14 @@ enum Command {
     /// Compiled-in capabilities and environment.
     Capabilities,
     /// Experimental ublk block-device frontend (Phase 7).
+    #[cfg(feature = "ublk")]
     Ublk {
         #[command(subcommand)]
         action: UblkAction,
     },
 }
 
+#[cfg(feature = "ublk")]
 #[derive(Subcommand)]
 enum UblkAction {
     /// Register a ublk device backed by the entropy store (root required).
@@ -92,7 +102,9 @@ fn main() {
     let cli = Cli::parse();
     let result = match &cli.command {
         Command::Mkfs(a) => cli::mkfs::run(a),
+        #[cfg(feature = "fuse")]
         Command::Mount(a) => cli::mount::run(a),
+        #[cfg(feature = "fuse")]
         Command::Unmount(a) => cli::unmount::run(a),
         Command::Status(a) => cli::status::run(a),
         Command::Inspect(a) => cli::inspect::run(a),
@@ -109,6 +121,7 @@ fn main() {
         Command::Optimize(a) => cli::optimize::run(a),
         Command::Benchmark(a) => cli::benchmark::run(a),
         Command::Capabilities => cli::capabilities::run(),
+        #[cfg(feature = "ublk")]
         Command::Ublk { action } => match action {
             UblkAction::Run(a) => cli::ublk::run(a),
             UblkAction::Bench(a) => cli::ublk::bench(a),

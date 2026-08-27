@@ -43,7 +43,9 @@ pub mod format;
 // Crash-consistent persistent immutable object store.
 pub mod store;
 
-// Linux POSIX/VFS adapter (FUSE). No entropy algorithms here.
+// Linux POSIX/VFS adapter (FUSE). No entropy algorithms here. Phase
+// 12E.2: compiled only with the `fuse` feature.
+#[cfg(feature = "fuse")]
 pub mod fuse;
 
 // Representation search and migration.
@@ -70,6 +72,8 @@ pub mod perf;
 
 // Experimental ublk block-device frontend (Phase 7; requires root +
 // CONFIG_BLK_DEV_UBLK to run; the BlockStore adapter is kernel-free).
+// Phase 12E.2: compiled only with the `ublk` feature.
+#[cfg(feature = "ublk")]
 pub mod ublk;
 
 #[cfg(test)]

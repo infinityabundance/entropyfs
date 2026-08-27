@@ -523,6 +523,7 @@ fn crash_run(
     }
 }
 
+#[cfg(feature = "uring")]
 #[test]
 fn commit_crash_points_are_byte_identical_between_backends() {
     for point in commit_crash_points() {
@@ -554,6 +555,7 @@ fn commit_crash_points_are_byte_identical_between_backends() {
     }
 }
 
+#[cfg(feature = "uring")]
 #[test]
 fn gc_crash_points_are_byte_identical_between_backends() {
     for point in gc_crash_points() {

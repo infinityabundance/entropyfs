@@ -22,6 +22,7 @@ pub mod epoch_self_alias;
 pub mod epoch_seq_monotonic;
 pub mod fsck;
 pub mod fsync_group_probe;
+#[cfg(feature = "fuse")]
 pub mod fuse_epoch;
 pub mod grammar_oracle;
 pub mod helpers;
@@ -48,6 +49,7 @@ pub mod sparse_block64;
 pub mod split_write;
 pub mod srctree_diag;
 pub mod unsafe_ledger;
+#[cfg(feature = "uring")]
 pub mod uring_bench;
 pub mod worker_oracle;
 pub mod worker_pool_probe;

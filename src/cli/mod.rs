@@ -11,9 +11,12 @@ pub mod fsck;
 pub mod gc;
 pub mod inspect;
 pub mod mkfs;
+#[cfg(feature = "fuse")]
 pub mod mount;
 pub mod optimize;
 pub mod snapshot;
 pub mod status;
+#[cfg(feature = "ublk")]
 pub mod ublk;
+#[cfg(feature = "fuse")]
 pub mod unmount;

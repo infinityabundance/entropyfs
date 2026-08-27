@@ -25,6 +25,28 @@ path = "src/lib.rs"
 name = "entropyfs"
 path = "src/main.rs"
 
+# Phase 12E.2: optional frontend/transport features. The BASE library (no
+# default features) is the embeddable storage engine: the store, the
+# representation machinery, the Engine facade, fsck, GC — with NO FUSE,
+# NO ublk, and the reference SyncIo transport only. The default build
+# keeps every frontend (the full daemon). No feature combination may
+# silently change on-disk semantics: features gate CODE (frontends and
+# transports), never the persistent format.
+[features]
+default = ["fuse", "ublk", "uring"]
+
+# The FUSE/VFS frontend (`src/fuse`, `entropyfs mount/unmount`).
+fuse = ["dep:fuser", "dep:ctrlc"]
+
+# The experimental ublk block-device frontend (`src/ublk`, `entropyfs
+# ublk`; requires root + CONFIG_BLK_DEV_UBLK to RUN — the BlockStore
+# adapter itself is kernel-free).
+ublk = ["dep:libublk", "dep:smol", "dep:ctrlc"]
+
+# The io_uring storage transport (`UringIo`; `SyncIo` remains the
+# crash-consistency oracle and the default regardless).
+uring = ["dep:io-uring"]
+
 [dependencies]
 # --- Entropy / representation backends (external dependencies, not EntropyFS subsystems) ---
 # ryg-rans-rs: public facade over the ryg_rans reconstruction (byte/64-bit/word rANS,
@@ -39,13 +61,13 @@ blake3 = "=1.8.7"   # logical content hashing (256-bit content IDs)
 crc32c = "=0.6.8"   # physical record integrity (SSE4.2 crc32c w/ software fallback)
 
 # --- Linux / FUSE frontend ---
-fuser = "=0.18.0"   # stable synchronous FUSE binding (pure Rust; no libfuse required)
+fuser = { version = "=0.18.0", optional = true } # stable synchronous FUSE binding (pure Rust; no libfuse required)
 rustix = { version = "1", features = ["fs", "param", "std", "time"] } # safe syscall wrappers (fs: flock/statvfs; io::pread/pwrite for the segment fd cache; param: page_size; time: the 11D oracle's thread-CPU clock)
 # io_uring storage transport (Phase 10F, ADR-0021): the UringIo backend.
 # Already a transitive dependency of libublk, so this adds no new crate to
 # the tree. Safe API surface; the only unsafe in the crate is confined to
-# store/io/uring.rs (SQE submission).
-io-uring = "=0.7.14"
+# store/io/uring.rs (SQE submission). Phase 12E.2: optional (feature `uring`).
+io-uring = { version = "=0.7.14", optional = true }
 
 # --- CLI / diagnostics ---
 clap = { version = "4", features = ["derive"] }
@@ -55,14 +77,14 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Ctrl-C handling for the mount daemon (small, standard; no tokio).
-ctrlc = "3"
+ctrlc = { version = "3", optional = true }
 # Isolated scratch stores for benchmarks and tests (never the host filesystem).
 tempfile = "3"
 # Experimental ublk block-device frontend control plane (Phase 7, ADR-0020).
 # Requires root + CONFIG_BLK_DEV_UBLK to run; the BlockStore adapter itself
-# needs no kernel support.
-libublk = "=0.4.7"
-smol = "1"
+# needs no kernel support. Phase 12E.2: optional (feature `ublk`).
+libublk = { version = "=0.4.7", optional = true }
+smol = { version = "1", optional = true }
 log = "0.4"
 
 [dev-dependencies]
