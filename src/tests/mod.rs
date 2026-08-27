@@ -24,6 +24,7 @@ pub mod fsck;
 pub mod fsync_group_probe;
 #[cfg(feature = "fuse")]
 pub mod fuse_epoch;
+pub mod golden_store;
 pub mod grammar_oracle;
 pub mod helpers;
 pub mod hostile_media;

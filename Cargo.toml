@@ -89,6 +89,11 @@ log = "0.4"
 
 [dev-dependencies]
 proptest = "1"  # property tests: rank/unrank round trips, materialization, store invariants
+# Phase 12E.4: sha2 (test-only) reproduces the golden-store driver's
+# `sha256sum` store-dir hash computation (tools/make-golden-fixtures.sh
+# runs in the shell, where blake3sum is not guaranteed to exist). The
+# golden court verifies fixture immutability against that shell hash.
+sha2 = "0.10"
 
 [profile.release]
 lto = "thin"

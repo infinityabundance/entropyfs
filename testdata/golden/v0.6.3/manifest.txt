@@ -1,0 +1,13 @@
+# entropyfs golden-store fixture manifest (Phase 12E.4)
+era = v0.6.3
+creator_version = 0.6.3
+format_major = 1
+format_minor = 0
+incompat = 0x0000000000004000
+ro_compat = 0x0000000000000000
+compat = 0x0000000000000000
+file = hello.txt 760 2debaf153a917ad5fef34e9aff4cb8485aa0a087222766bc65ac46bd80934708
+file = structured.dat 264000 602046375fec70ef5708bd498b567d384cc32dbce11d3a7a51b53f0e3861815c
+file = random.bin 65537 9bfb32c58dccc15eb273afa5532bc0aee9b67d916c49d35c0c2d01d3798b9769
+creator_revision = a4e8a7a0f5c93180e92aba5c90886b3bcc0f9e4d
+store_dir_hash = 4ca43d14b70f2e03cddfb4d571844e8c4701f20176b18c70df55c242a1b3647b
