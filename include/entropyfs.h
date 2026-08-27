@@ -52,8 +52,9 @@ extern "C" {
 #define EFS_ABI_VERSION 1u
 
 /* Open modes for entropyfs_engine_open. */
-#define EFS_ENGINE_OPEN 0   /* open an existing store */
-#define EFS_ENGINE_CREATE 1 /* create a fresh store */
+#define EFS_ENGINE_OPEN 0    /* open an existing store */
+#define EFS_ENGINE_CREATE 1  /* create a fresh store */
+#define EFS_ENGINE_OPEN_RO 2 /* open an existing store read-only (writes -> EFS_UNSUPPORTED) */
 
 /* Stable error classes (the machine-readable contract). Programs switch
  * on these; never parse entropyfs_last_error strings. */

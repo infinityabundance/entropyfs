@@ -1,0 +1,849 @@
+ Downloading crates ...
+  Downloaded bit-set v0.8.0
+  Downloaded block-buffer v0.10.4
+  Downloaded cpufeatures v0.2.17
+  Downloaded crypto-common v0.1.7
+  Downloaded bit-vec v0.8.0
+  Downloaded version_check v0.9.5
+  Downloaded generic-array v0.14.7
+  Downloaded unarray v0.1.4
+  Downloaded quick-error v1.2.3
+  Downloaded digest v0.10.7
+  Downloaded wait-timeout v0.2.1
+  Downloaded sha2 v0.10.9
+  Downloaded getrandom v0.3.4
+  Downloaded rand_xorshift v0.4.0
+  Downloaded rand_chacha v0.9.0
+  Downloaded rusty-fork v0.3.1
+  Downloaded rand_core v0.9.5
+  Downloaded rand v0.9.5
+  Downloaded typenum v1.20.1
+  Downloaded proptest v1.11.0
+   Compiling cfg-if v1.0.4
+   Compiling pin-project-lite v0.2.17
+   Compiling parking v2.2.1
+   Compiling bitflags v2.13.1
+   Compiling fastrand v2.5.0
+   Compiling futures-core v0.3.34
+   Compiling futures-io v0.3.34
+   Compiling linux-raw-sys v0.12.1
+   Compiling libc v0.2.189
+   Compiling slab v0.4.12
+   Compiling crossbeam-utils v0.8.22
+   Compiling async-task v4.7.1
+   Compiling atomic-waker v1.1.2
+   Compiling memchr v2.8.3
+   Compiling zerocopy v0.8.56
+   Compiling version_check v0.9.5
+   Compiling log v0.4.34
+   Compiling getrandom v0.3.4
+   Compiling event-listener v5.4.2
+   Compiling event-listener v2.5.3
+   Compiling fastrand v1.9.0
+   Compiling waker-fn v1.2.0
+   Compiling futures-lite v2.6.1
+   Compiling piper v0.2.5
+   Compiling num-traits v0.2.19
+   Compiling once_cell v1.21.4
+   Compiling generic-array v0.14.7
+   Compiling linux-raw-sys v0.3.8
+   Compiling async-lock v2.8.0
+   Compiling concurrent-queue v2.5.0
+   Compiling event-listener-strategy v0.5.4
+   Compiling bitflags v1.3.2
+   Compiling typenum v1.20.1
+   Compiling serde_core v1.0.229
+   Compiling libm v0.2.16
+   Compiling utf8parse v0.2.2
+   Compiling async-lock v3.4.2
+   Compiling memoffset v0.9.1
+   Compiling colorchoice v1.0.5
+   Compiling anstyle v1.0.14
+   Compiling async-channel v2.5.0
+   Compiling anstyle-parse v1.0.0
+   Compiling linux-raw-sys v0.4.15
+   Compiling scopeguard v1.2.0
+   Compiling anstyle-query v1.1.5
+   Compiling futures-lite v1.13.0
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling smallvec v1.15.2
+   Compiling anstream v1.0.0
+   Compiling lock_api v0.4.14
+   Compiling event-listener v3.1.0
+   Compiling rustix v0.38.44
+   Compiling zmij v1.0.23
+   Compiling quick-error v1.2.3
+   Compiling clap_lex v1.1.0
+   Compiling itoa v1.0.18
+   Compiling bit-vec v0.8.0
+   Compiling fnv v1.0.7
+   Compiling strsim v0.11.1
+   Compiling ref-cast v1.0.27
+   Compiling thiserror v1.0.69
+   Compiling num_enum v0.7.6
+   Compiling async-channel v1.9.0
+   Compiling clap_builder v4.6.6
+   Compiling bit-set v0.8.0
+   Compiling tracing-core v0.1.36
+   Compiling arrayvec v0.7.8
+   Compiling futures-timer v3.0.4
+   Compiling unarray v0.1.4
+   Compiling ryg-rans-rs-core v0.5.1
+   Compiling cpufeatures v0.2.17
+   Compiling bitmaps v3.2.1
+   Compiling regex-syntax v0.8.11
+   Compiling blocking v1.7.0
+   Compiling async-executor v1.14.0
+   Compiling constant_time_eq v0.4.2
+   Compiling cpufeatures v0.3.0
+   Compiling ryg-rans-rs v0.5.1
+   Compiling async-fs v2.2.0
+   Compiling async-fs v1.6.0
+   Compiling blake3 v1.8.7
+   Compiling tracing v0.1.44
+   Compiling crc32c v0.6.8
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling digest v0.10.7
+   Compiling sha2 v0.10.9
+   Compiling rustix v1.1.4
+   Compiling errno v0.3.14
+   Compiling getrandom v0.2.17
+   Compiling io-lifetimes v1.0.11
+   Compiling polling v2.8.0
+   Compiling socket2 v0.4.10
+   Compiling getrandom v0.4.3
+   Compiling wait-timeout v0.2.1
+   Compiling serde v1.0.229
+   Compiling signal-hook-registry v1.4.8
+   Compiling rustix v0.37.28
+   Compiling rand_core v0.6.4
+   Compiling rand_core v0.9.5
+   Compiling parking_lot_core v0.9.12
+   Compiling nix v0.31.3
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand v0.9.5
+   Compiling rand_xorshift v0.4.0
+   Compiling serde_json v1.0.151
+   Compiling parking_lot v0.12.5
+   Compiling page_size v0.6.0
+   Compiling io-uring v0.7.14
+   Compiling clap v4.6.6
+   Compiling rand_chacha v0.3.1
+   Compiling rand_chacha v0.9.0
+   Compiling libublk-rs-sys v0.1.1
+   Compiling rand v0.8.7
+   Compiling rand_distr v0.4.3
+   Compiling dsfb v0.1.2
+   Compiling async-io v1.13.0
+   Compiling async-net v1.8.0
+   Compiling fuser v0.18.0
+   Compiling ctrlc v3.5.2
+   Compiling polling v3.11.0
+   Compiling tempfile v3.27.0
+   Compiling async-io v2.6.0
+   Compiling rusty-fork v0.3.1
+   Compiling proptest v1.11.0
+   Compiling async-signal v0.2.14
+   Compiling async-net v2.0.0
+   Compiling async-process v2.5.0
+   Compiling async-process v1.8.1
+   Compiling smol v1.3.0
+   Compiling smol v2.0.2
+   Compiling libublk v0.4.7
+   Compiling entropyfs v0.7.12 (/out/work)
+warning: variable does not need to be mutable
+   --> src/dsfb/semantics.rs:227:13
+    |
+227 |         let mut step = (sample.len() / 2048).max(1);
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src/store/mod.rs:6467:29
+     |
+6467 |                         let mut cur = Store::inode_for_tx(tx, *child)?;
+     |                             ----^^^
+     |                             |
+     |                             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/store/mod.rs:6590:29
+     |
+6590 |                         let mut cur = Store::inode_for_tx(tx, *src_ino)?;
+     |                             ----^^^
+     |                             |
+     |                             help: remove this `mut`
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:113:9
+    |
+113 |     for i in 0..4u64 {
+    |         ^ help: if this is intentional, prefix it with an underscore: `_i`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:126:9
+    |
+126 |     for i in 0..2u64 {
+    |         ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:255:10
+    |
+255 |     for (i, (path, v1)) in names.iter().enumerate() {
+    |          ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `start`
+   --> src/tests/grammar_oracle.rs:251:29
+    |
+251 |                         let start = pos.min(r.len());
+    |                             ^^^^^ help: if this is intentional, prefix it with an underscore: `_start`
+
+warning: unused variable: `prepared`
+   --> src/tests/perf_reconciled.rs:311:13
+    |
+311 |         let prepared = store
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_prepared`
+
+warning: type `Composed` is more private than the item `workers::WorkerTask::EncodeChunk::composed`
+    --> src/store/workers.rs:384:9
+     |
+ 384 |         composed: super::Composed,
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^ field `workers::WorkerTask::EncodeChunk::composed` is reachable at visibility `pub`
+     |
+note: but type `Composed` is only usable at visibility `pub(crate)`
+    --> src/store/mod.rs:3488:1
+     |
+3488 | pub(crate) struct Composed {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: function `percentile` is never used
+   --> src/tests/dsfb_semantics_probe.rs:190:4
+    |
+190 | fn percentile(sorted: &[f64], q: f64) -> f64 {
+    |    ^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `candidates`, `chunks`, and `raw_wins` are never read
+   --> src/tests/dsfb_semantics_probe.rs:200:5
+    |
+197 | struct ModeResult {
+    |        ---------- fields in this struct
+...
+200 |     candidates: u64,
+    |     ^^^^^^^^^^
+201 |     chunks: u64,
+    |     ^^^^^^
+...
+204 |     raw_wins: u64,
+    |     ^^^^^^^^
+
+warning: constant `MAX_MEMBERS` is never used
+  --> src/tests/grammar_oracle.rs:79:7
+   |
+79 | const MAX_MEMBERS: usize = 512;
+   |       ^^^^^^^^^^^
+
+warning: function `contains` is never used
+   --> src/tests/grammar_oracle.rs:214:4
+    |
+214 | fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    |    ^^^^^^^^
+
+warning: struct `NoProvider` is never constructed
+   --> src/tests/io_backend_parity.rs:171:24
+    |
+171 |                 struct NoProvider;
+    |                        ^^^^^^^^^^
+
+warning: missing documentation for a module
+    --> src/store/workers.rs:1036:1
+     |
+1036 | pub mod tests {
+     | ^^^^^^^^^^^^^
+     |
+note: the lint level is defined here
+    --> src/lib.rs:19:9
+     |
+  19 | #![warn(missing_docs)]
+     |         ^^^^^^^^^^^^
+
+warning: `entropyfs` (lib test) generated 15 warnings (run `cargo fix --lib -p entropyfs --tests` to apply 8 suggestions)
+    Finished `release` profile [optimized + debuginfo] target(s) in 1m 06s
+     Running unittests src/lib.rs (/out/target/release/deps/entropyfs-e1de5a4be9320971)
+
+running 12 tests
+test engine::metrics::tests::registry_is_nonempty_and_keyed ... ok
+test engine::metrics::tests::dto_json_roundtrip ... ok
+test engine::tests::blob_identity_semantics ... ok
+test engine::tests::empty_blob ... ok
+test engine::tests::missing_blob_is_not_found ... ok
+test engine::tests::close_drains_and_rejects ... ok
+test engine::tests::open_legacy_store_creates_namespace_lazily ... ok
+test engine::tests::put_get_roundtrip_and_dedup ... ok
+test engine::tests::persistence_across_reopen ... ok
+test engine::tests::concurrent_puts_and_gets ... ok
+test engine::tests::large_blob_and_range_reads ... ok
+test engine::tests::compact_reclaims_and_preserves ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 456 filtered out; finished in 0.12s
+
+warning: variable does not need to be mutable
+   --> src/dsfb/semantics.rs:227:13
+    |
+227 |         let mut step = (sample.len() / 2048).max(1);
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src/store/mod.rs:6467:29
+     |
+6467 |                         let mut cur = Store::inode_for_tx(tx, *child)?;
+     |                             ----^^^
+     |                             |
+     |                             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/store/mod.rs:6590:29
+     |
+6590 |                         let mut cur = Store::inode_for_tx(tx, *src_ino)?;
+     |                             ----^^^
+     |                             |
+     |                             help: remove this `mut`
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:113:9
+    |
+113 |     for i in 0..4u64 {
+    |         ^ help: if this is intentional, prefix it with an underscore: `_i`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:126:9
+    |
+126 |     for i in 0..2u64 {
+    |         ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:255:10
+    |
+255 |     for (i, (path, v1)) in names.iter().enumerate() {
+    |          ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `start`
+   --> src/tests/grammar_oracle.rs:251:29
+    |
+251 |                         let start = pos.min(r.len());
+    |                             ^^^^^ help: if this is intentional, prefix it with an underscore: `_start`
+
+warning: unused variable: `prepared`
+   --> src/tests/perf_reconciled.rs:311:13
+    |
+311 |         let prepared = store
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_prepared`
+
+warning: type `Composed` is more private than the item `workers::WorkerTask::EncodeChunk::composed`
+    --> src/store/workers.rs:384:9
+     |
+ 384 |         composed: super::Composed,
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^ field `workers::WorkerTask::EncodeChunk::composed` is reachable at visibility `pub`
+     |
+note: but type `Composed` is only usable at visibility `pub(crate)`
+    --> src/store/mod.rs:3488:1
+     |
+3488 | pub(crate) struct Composed {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: function `percentile` is never used
+   --> src/tests/dsfb_semantics_probe.rs:190:4
+    |
+190 | fn percentile(sorted: &[f64], q: f64) -> f64 {
+    |    ^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `candidates`, `chunks`, and `raw_wins` are never read
+   --> src/tests/dsfb_semantics_probe.rs:200:5
+    |
+197 | struct ModeResult {
+    |        ---------- fields in this struct
+...
+200 |     candidates: u64,
+    |     ^^^^^^^^^^
+201 |     chunks: u64,
+    |     ^^^^^^
+...
+204 |     raw_wins: u64,
+    |     ^^^^^^^^
+
+warning: constant `MAX_MEMBERS` is never used
+  --> src/tests/grammar_oracle.rs:79:7
+   |
+79 | const MAX_MEMBERS: usize = 512;
+   |       ^^^^^^^^^^^
+
+warning: function `contains` is never used
+   --> src/tests/grammar_oracle.rs:214:4
+    |
+214 | fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    |    ^^^^^^^^
+
+warning: struct `NoProvider` is never constructed
+   --> src/tests/io_backend_parity.rs:171:24
+    |
+171 |                 struct NoProvider;
+    |                        ^^^^^^^^^^
+
+warning: missing documentation for a module
+    --> src/store/workers.rs:1036:1
+     |
+1036 | pub mod tests {
+     | ^^^^^^^^^^^^^
+     |
+note: the lint level is defined here
+    --> src/lib.rs:19:9
+     |
+  19 | #![warn(missing_docs)]
+     |         ^^^^^^^^^^^^
+
+warning: `entropyfs` (lib test) generated 15 warnings (run `cargo fix --lib -p entropyfs --tests` to apply 8 suggestions)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.06s
+     Running unittests src/lib.rs (/out/target/release/deps/entropyfs-e1de5a4be9320971)
+
+running 10 tests
+test tests::persistent_store::sparse_file_holes_read_as_zeros ... ok
+test tests::persistent_store::create_commit_remount_roundtrip ... ok
+test tests::persistent_store::truncate_and_rewrite ... ok
+test tests::persistent_store::uuid_and_features_persist ... ok
+test tests::persistent_store::partial_tail_chunk_never_exceeds_eof ... ok
+test tests::persistent_store::shrinking_write_drops_extents_past_eof ... ok
+test tests::persistent_store::rans_extent_survives_remount ... ok
+test tests::persistent_store::gc_reclaims_and_preserves_live_data ... ok
+test tests::persistent_store::crash_matrix_at_every_durability_boundary ... ok
+test tests::persistent_store::gc_rebuilds_derived_chunk_index_without_history_growth ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 458 filtered out; finished in 0.08s
+
+warning: variable does not need to be mutable
+   --> src/dsfb/semantics.rs:227:13
+    |
+227 |         let mut step = (sample.len() / 2048).max(1);
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src/store/mod.rs:6467:29
+     |
+6467 |                         let mut cur = Store::inode_for_tx(tx, *child)?;
+     |                             ----^^^
+     |                             |
+     |                             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/store/mod.rs:6590:29
+     |
+6590 |                         let mut cur = Store::inode_for_tx(tx, *src_ino)?;
+     |                             ----^^^
+     |                             |
+     |                             help: remove this `mut`
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:113:9
+    |
+113 |     for i in 0..4u64 {
+    |         ^ help: if this is intentional, prefix it with an underscore: `_i`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:126:9
+    |
+126 |     for i in 0..2u64 {
+    |         ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:255:10
+    |
+255 |     for (i, (path, v1)) in names.iter().enumerate() {
+    |          ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `start`
+   --> src/tests/grammar_oracle.rs:251:29
+    |
+251 |                         let start = pos.min(r.len());
+    |                             ^^^^^ help: if this is intentional, prefix it with an underscore: `_start`
+
+warning: unused variable: `prepared`
+   --> src/tests/perf_reconciled.rs:311:13
+    |
+311 |         let prepared = store
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_prepared`
+
+warning: type `Composed` is more private than the item `workers::WorkerTask::EncodeChunk::composed`
+    --> src/store/workers.rs:384:9
+     |
+ 384 |         composed: super::Composed,
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^ field `workers::WorkerTask::EncodeChunk::composed` is reachable at visibility `pub`
+     |
+note: but type `Composed` is only usable at visibility `pub(crate)`
+    --> src/store/mod.rs:3488:1
+     |
+3488 | pub(crate) struct Composed {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: function `percentile` is never used
+   --> src/tests/dsfb_semantics_probe.rs:190:4
+    |
+190 | fn percentile(sorted: &[f64], q: f64) -> f64 {
+    |    ^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `candidates`, `chunks`, and `raw_wins` are never read
+   --> src/tests/dsfb_semantics_probe.rs:200:5
+    |
+197 | struct ModeResult {
+    |        ---------- fields in this struct
+...
+200 |     candidates: u64,
+    |     ^^^^^^^^^^
+201 |     chunks: u64,
+    |     ^^^^^^
+...
+204 |     raw_wins: u64,
+    |     ^^^^^^^^
+
+warning: constant `MAX_MEMBERS` is never used
+  --> src/tests/grammar_oracle.rs:79:7
+   |
+79 | const MAX_MEMBERS: usize = 512;
+   |       ^^^^^^^^^^^
+
+warning: function `contains` is never used
+   --> src/tests/grammar_oracle.rs:214:4
+    |
+214 | fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    |    ^^^^^^^^
+
+warning: struct `NoProvider` is never constructed
+   --> src/tests/io_backend_parity.rs:171:24
+    |
+171 |                 struct NoProvider;
+    |                        ^^^^^^^^^^
+
+warning: missing documentation for a module
+    --> src/store/workers.rs:1036:1
+     |
+1036 | pub mod tests {
+     | ^^^^^^^^^^^^^
+     |
+note: the lint level is defined here
+    --> src/lib.rs:19:9
+     |
+  19 | #![warn(missing_docs)]
+     |         ^^^^^^^^^^^^
+
+warning: `entropyfs` (lib test) generated 15 warnings (run `cargo fix --lib -p entropyfs --tests` to apply 8 suggestions)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (/out/target/release/deps/entropyfs-e1de5a4be9320971)
+
+running 7 tests
+test tests::compat_seal::engine_read_only_open_requires_namespace ... ok
+test tests::compat_seal::unknown_incompat_refuses_every_open_with_typed_error ... ok
+test tests::compat_seal::feature_bits_accessor_reports_superblock ... ok
+test tests::compat_seal::ro_compat_store_fsck_reports_warning_not_error ... ok
+test tests::compat_seal::unknown_ro_compat_refuses_rw_and_permits_ro ... ok
+test tests::compat_seal::engine_inherits_the_gates ... ok
+test tests::compat_seal::read_only_open_observes_committed_state_only ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 461 filtered out; finished in 0.00s
+
+warning: variable does not need to be mutable
+   --> src/dsfb/semantics.rs:227:13
+    |
+227 |         let mut step = (sample.len() / 2048).max(1);
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src/store/mod.rs:6467:29
+     |
+6467 |                         let mut cur = Store::inode_for_tx(tx, *child)?;
+     |                             ----^^^
+     |                             |
+     |                             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/store/mod.rs:6590:29
+     |
+6590 |                         let mut cur = Store::inode_for_tx(tx, *src_ino)?;
+     |                             ----^^^
+     |                             |
+     |                             help: remove this `mut`
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:113:9
+    |
+113 |     for i in 0..4u64 {
+    |         ^ help: if this is intentional, prefix it with an underscore: `_i`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:126:9
+    |
+126 |     for i in 0..2u64 {
+    |         ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:255:10
+    |
+255 |     for (i, (path, v1)) in names.iter().enumerate() {
+    |          ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `start`
+   --> src/tests/grammar_oracle.rs:251:29
+    |
+251 |                         let start = pos.min(r.len());
+    |                             ^^^^^ help: if this is intentional, prefix it with an underscore: `_start`
+
+warning: unused variable: `prepared`
+   --> src/tests/perf_reconciled.rs:311:13
+    |
+311 |         let prepared = store
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_prepared`
+
+warning: type `Composed` is more private than the item `workers::WorkerTask::EncodeChunk::composed`
+    --> src/store/workers.rs:384:9
+     |
+ 384 |         composed: super::Composed,
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^ field `workers::WorkerTask::EncodeChunk::composed` is reachable at visibility `pub`
+     |
+note: but type `Composed` is only usable at visibility `pub(crate)`
+    --> src/store/mod.rs:3488:1
+     |
+3488 | pub(crate) struct Composed {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: function `percentile` is never used
+   --> src/tests/dsfb_semantics_probe.rs:190:4
+    |
+190 | fn percentile(sorted: &[f64], q: f64) -> f64 {
+    |    ^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `candidates`, `chunks`, and `raw_wins` are never read
+   --> src/tests/dsfb_semantics_probe.rs:200:5
+    |
+197 | struct ModeResult {
+    |        ---------- fields in this struct
+...
+200 |     candidates: u64,
+    |     ^^^^^^^^^^
+201 |     chunks: u64,
+    |     ^^^^^^
+...
+204 |     raw_wins: u64,
+    |     ^^^^^^^^
+
+warning: constant `MAX_MEMBERS` is never used
+  --> src/tests/grammar_oracle.rs:79:7
+   |
+79 | const MAX_MEMBERS: usize = 512;
+   |       ^^^^^^^^^^^
+
+warning: function `contains` is never used
+   --> src/tests/grammar_oracle.rs:214:4
+    |
+214 | fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    |    ^^^^^^^^
+
+warning: struct `NoProvider` is never constructed
+   --> src/tests/io_backend_parity.rs:171:24
+    |
+171 |                 struct NoProvider;
+    |                        ^^^^^^^^^^
+
+warning: missing documentation for a module
+    --> src/store/workers.rs:1036:1
+     |
+1036 | pub mod tests {
+     | ^^^^^^^^^^^^^
+     |
+note: the lint level is defined here
+    --> src/lib.rs:19:9
+     |
+  19 | #![warn(missing_docs)]
+     |         ^^^^^^^^^^^^
+
+warning: `entropyfs` (lib test) generated 15 warnings (run `cargo fix --lib -p entropyfs --tests` to apply 8 suggestions)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (/out/target/release/deps/entropyfs-e1de5a4be9320971)
+
+running 1 test
+test tests::golden_store::golden_store_compatibility_court ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 467 filtered out; finished in 0.00s
+
+warning: variable does not need to be mutable
+   --> src/dsfb/semantics.rs:227:13
+    |
+227 |         let mut step = (sample.len() / 2048).max(1);
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src/store/mod.rs:6467:29
+     |
+6467 |                         let mut cur = Store::inode_for_tx(tx, *child)?;
+     |                             ----^^^
+     |                             |
+     |                             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/store/mod.rs:6590:29
+     |
+6590 |                         let mut cur = Store::inode_for_tx(tx, *src_ino)?;
+     |                             ----^^^
+     |                             |
+     |                             help: remove this `mut`
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:113:9
+    |
+113 |     for i in 0..4u64 {
+    |         ^ help: if this is intentional, prefix it with an underscore: `_i`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:126:9
+    |
+126 |     for i in 0..2u64 {
+    |         ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `i`
+   --> src/tests/dsfb_semantics_probe.rs:255:10
+    |
+255 |     for (i, (path, v1)) in names.iter().enumerate() {
+    |          ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `start`
+   --> src/tests/grammar_oracle.rs:251:29
+    |
+251 |                         let start = pos.min(r.len());
+    |                             ^^^^^ help: if this is intentional, prefix it with an underscore: `_start`
+
+warning: unused variable: `prepared`
+   --> src/tests/perf_reconciled.rs:311:13
+    |
+311 |         let prepared = store
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_prepared`
+
+warning: type `Composed` is more private than the item `workers::WorkerTask::EncodeChunk::composed`
+    --> src/store/workers.rs:384:9
+     |
+ 384 |         composed: super::Composed,
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^ field `workers::WorkerTask::EncodeChunk::composed` is reachable at visibility `pub`
+     |
+note: but type `Composed` is only usable at visibility `pub(crate)`
+    --> src/store/mod.rs:3488:1
+     |
+3488 | pub(crate) struct Composed {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: function `percentile` is never used
+   --> src/tests/dsfb_semantics_probe.rs:190:4
+    |
+190 | fn percentile(sorted: &[f64], q: f64) -> f64 {
+    |    ^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `candidates`, `chunks`, and `raw_wins` are never read
+   --> src/tests/dsfb_semantics_probe.rs:200:5
+    |
+197 | struct ModeResult {
+    |        ---------- fields in this struct
+...
+200 |     candidates: u64,
+    |     ^^^^^^^^^^
+201 |     chunks: u64,
+    |     ^^^^^^
+...
+204 |     raw_wins: u64,
+    |     ^^^^^^^^
+
+warning: constant `MAX_MEMBERS` is never used
+  --> src/tests/grammar_oracle.rs:79:7
+   |
+79 | const MAX_MEMBERS: usize = 512;
+   |       ^^^^^^^^^^^
+
+warning: function `contains` is never used
+   --> src/tests/grammar_oracle.rs:214:4
+    |
+214 | fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    |    ^^^^^^^^
+
+warning: struct `NoProvider` is never constructed
+   --> src/tests/io_backend_parity.rs:171:24
+    |
+171 |                 struct NoProvider;
+    |                        ^^^^^^^^^^
+
+warning: missing documentation for a module
+    --> src/store/workers.rs:1036:1
+     |
+1036 | pub mod tests {
+     | ^^^^^^^^^^^^^
+     |
+note: the lint level is defined here
+    --> src/lib.rs:19:9
+     |
+  19 | #![warn(missing_docs)]
+     |         ^^^^^^^^^^^^
+
+warning: `entropyfs` (lib test) generated 15 warnings (run `cargo fix --lib -p entropyfs --tests` to apply 8 suggestions)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (/out/target/release/deps/entropyfs-e1de5a4be9320971)
+
+running 9 tests
+test tests::fsck::fsck_refuses_mounted_store ... ok
+test tests::fsck::mid_file_corruption_is_an_error ... ok
+test tests::fsck::deleted_root_object_is_detected ... ok
+test tests::fsck::clean_store_passes_fsck ... ok
+test tests::fsck::verify_materialized_full_chain ... ok
+test tests::fsck::corrupt_superblock_slot_is_ignored_with_warning ... ok
+test tests::fsck::torn_tail_is_warning_and_repairable ... ok
+test tests::fsck::overwritten_data_is_reported_as_unreachable ... ok
+test tests::fsck::verify_materialized_with_dedup_aliases ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 459 filtered out; finished in 0.00s
+
+

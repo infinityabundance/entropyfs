@@ -104,6 +104,9 @@ pub const EFS_ENGINE_OPEN: c_int = 0;
 /// Open mode: create a fresh store (errors if the path is already a
 /// store).
 pub const EFS_ENGINE_CREATE: c_int = 1;
+/// Open mode: open an existing store READ-ONLY (unknown `ro_compat`
+/// bits permitted; every write fails with `EFS_UNSUPPORTED`).
+pub const EFS_ENGINE_OPEN_RO: c_int = 2;
 
 /// Stable error classes (the C-ABI contract; the header's
 /// `enum entropyfs_error`). Programs switch on these; never parse the
@@ -258,10 +261,17 @@ fn open_impl(
     let engine = match mode {
         EFS_ENGINE_OPEN => Engine::open(std::path::Path::new(&path), &opts)?,
         EFS_ENGINE_CREATE => Engine::create(std::path::Path::new(&path), &opts)?,
+        EFS_ENGINE_OPEN_RO => {
+            let ro = EngineOpenOptions {
+                read_only: true,
+                ..opts
+            };
+            Engine::open(std::path::Path::new(&path), &ro)?
+        }
         other => {
             return Err(EngineError::new(
                 ErrorCode::InvalidArgument,
-                format!("unknown engine open mode {other} (0=open, 1=create)"),
+                format!("unknown engine open mode {other} (0=open, 1=create, 2=open read-only)"),
             ));
         }
     };

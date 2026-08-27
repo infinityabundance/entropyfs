@@ -1,0 +1,21 @@
+crates compiled: 167
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 459 filtered out; finished in 0.00s
+
+
+entropyfs 0.7.12
+metrics: blob_count=1 format=1.0 backend=sync
+engine smoke: OK
+uring smoke: OK
+fuse mount: OK (pid 5240)
+POSIX smoke: OK
+unmount: ok (or already detached)
+fsck status: clean | findings: 1
+reopen + verify: OK
+  torn                           0 B (  0.0%)
+  zero padding                   0 B (  0.0%)
+  format overhead                4 B (  0.1%)
+  unexplained                    0 B  [must be 0]
+post-gc fsck status: clean
+ok  	github.com/infinityabundance/entropyfs/go/entropyfs	1.150s
+ok  	github.com/infinityabundance/entropyfs/go/examples/content-store	1.007s
+go binding (race gate): OK

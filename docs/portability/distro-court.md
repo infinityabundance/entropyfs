@@ -28,13 +28,13 @@ rootfs, Ubuntu live-server `ubuntu-server-minimal.squashfs`, AlmaLinux
 boot.iso installer env) remain available as the offline/vendor-artifact
 lane; the Docker Hub images are the primary lanes.
 
-## The 17 stages
+## The 18 stages
 
 ```text
  1  pristine minimal image (pulled fresh, digest recorded)
  2  only documented build/runtime prerequisites installed
  3  rustup pinned toolchain (never the distro's packaged Rust)
- 4  cargo build --release --locked
+ 4  cargo build --release --locked (rlib + cdylib)
  5  selected release courts (engine, persistent store, compat seal,
     golden stores, fsck)
  6  cargo install --path . --locked
@@ -50,6 +50,9 @@ lane; the Docker Hub images are the primary lanes.
 15  reopen + exact-hash verification
 16  compact / GC
 17  reopen + fsck again
+18  Go binding court (12E.15): pinned upstream Go 1.24.6, then
+    go vet + go test + the mandatory `go test -race` gate against the
+    cdylib (never the distro's packaged Go)
 ```
 
 ## Running

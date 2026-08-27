@@ -1,0 +1,12 @@
+26.04: Pulling from library/ubuntu
+06e9d71331fb: Pulling fs layer
+f3db1cd94078: Pulling fs layer
+f3db1cd94078: Verifying Checksum
+f3db1cd94078: Download complete
+06e9d71331fb: Verifying Checksum
+06e9d71331fb: Download complete
+06e9d71331fb: Pull complete
+f3db1cd94078: Pull complete
+Digest: sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b
+Status: Downloaded newer image for ubuntu:26.04
+docker.io/library/ubuntu:26.04

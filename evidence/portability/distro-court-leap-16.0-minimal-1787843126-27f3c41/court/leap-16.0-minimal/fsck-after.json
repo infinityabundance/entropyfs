@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "status": "clean",
+  "superblock_slots_valid": 2,
+  "segments_scanned": 1,
+  "records_scanned": 38,
+  "live_objects": 38,
+  "leaked_objects": 0,
+  "leaked_bytes": 0,
+  "inodes_verified": 13,
+  "extents_verified": 10,
+  "chunk_descriptors_verified": 10,
+  "repairs": [],
+  "findings": []
+}

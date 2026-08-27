@@ -123,6 +123,11 @@ except Exception:
     pass
 EOF
     docker image rm -f "entropyfs-court-image-$lane" > /dev/null 2>&1 || true
+    # The court's scratch (worktree + cargo target) lives on the /out
+    # mount and is NOT evidence. The inner script's trap removes it as
+    # root; this is the safety net for runs that died before the trap
+    # (best-effort — root-owned leftovers require the container lane).
+    rm -rf "$out_dir/work" "$out_dir/target" 2>/dev/null || true
     echo "lane $lane: sealed at $out_dir"
 }
 

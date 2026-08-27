@@ -1,0 +1,1 @@
+docker-hub:almalinux:10.2

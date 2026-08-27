@@ -33,6 +33,14 @@ mkdir -p "$COURT_DIR" "$WAIVERS" "$STORE" "$MNT"
 # The sealed revision (the driver knows it; the container has no git).
 echo "${COURT_REV:-unknown}" > "$COURT_DIR/revision.txt"
 
+# The court's scratch (worktree + cargo target) lives on the /out mount
+# — it is NOT evidence. A trap guarantees cleanup even on failure (the
+# files are root-owned here; only a root process can remove them).
+cleanup_scratch() {
+    rm -rf /out/work /out/target 2>/dev/null || true
+}
+trap cleanup_scratch EXIT
+
 note() { echo "[stage $1] $2"; }
 
 waive() {
@@ -79,10 +87,10 @@ else echo "unknown package manager" > "$COURT_DIR/package-list.txt"; fi
 # writable evidence mount (excluding the host's target/), then build there.
 # ---------------------------------------------------------------------------
 mkdir -p "$OUT/work"
-# Copy the exact revision (excluding the host's target/ and the evidence
-# archive — the court exercises SOURCE, and the evidence archive is not
-# part of the build).
-(cd "$REPO" && tar --exclude=./target --exclude=./evidence --exclude=./tools/docker/evidence -cf - .) \
+# Copy the exact revision (excluding the host's target/, the evidence
+# archive, the offline docker lane, and .git — the container has no git
+# and the worktree is build-only scratch).
+(cd "$REPO" && tar --exclude=./target --exclude=./evidence --exclude=./tools/docker/evidence --exclude=./.git -cf - .) \
     | (cd "$OUT/work" && tar -xf -)
 cd "$OUT/work"
 
@@ -305,6 +313,49 @@ import json
 d = json.load(open('$COURT_DIR/fsck-after.json'))
 print('post-gc fsck status:', d['status'])
 " | tee -a "$COURT_DIR/court-result.txt"
+
+# ---------------------------------------------------------------------------
+# Stage 18: the Go binding court (12E.15 enterprise gate). A PINNED
+# upstream Go toolchain (NEVER the distro's packaged Go — the 12E.9 rule),
+# then vet + test + the mandatory -race gate against the cdylib the
+# stage-4 build produced (/out/target/release/libentropyfs.so). The Go
+# layer is a thin cgo adapter over the stable C ABI, so this stage is the
+# binding's portability proof on the mandatory matrix.
+# ---------------------------------------------------------------------------
+note 18 "Go binding"
+GO_VERSION="go1.24.6"
+GO_ROOT="/opt/go"
+if ! command -v go >/dev/null 2>&1 || ! go version 2>/dev/null | grep -q "$GO_VERSION"; then
+    note 18 "installing pinned upstream $GO_VERSION (linux-amd64)"
+    curl -fsSL "https://go.dev/dl/${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz \
+        || { echo "go toolchain download failed — NETWORK failure, not EntropyFS"; exit 1; }
+    mkdir -p /opt
+    tar -C /opt -xzf /tmp/go.tgz
+    rm -f /tmp/go.tgz
+fi
+export PATH="/opt/go/bin:$PATH"
+go version > "$COURT_DIR/go.txt" 2>&1
+export CGO_LDFLAGS="-L/out/target/release -lentropyfs"
+export LD_LIBRARY_PATH="/out/target/release"
+cd /out/work/go
+(go vet ./... > "$COURT_DIR/go-vet.log" 2>&1) || {
+    echo "go vet failed — Go binding failure"
+    tail -20 "$COURT_DIR/go-vet.log"
+    exit 1
+}
+(go test -count=1 ./... > "$COURT_DIR/go-test.log" 2>&1) || {
+    echo "go test failed — Go binding failure"
+    tail -20 "$COURT_DIR/go-test.log"
+    exit 1
+}
+(go test -race -count=1 ./... > "$COURT_DIR/go-race.log" 2>&1) || {
+    echo "go test -race failed — Go binding failure"
+    tail -20 "$COURT_DIR/go-race.log"
+    exit 1
+}
+tail -2 "$COURT_DIR/go-race.log" | tee -a "$COURT_DIR/court-result.txt"
+echo "go binding (race gate): OK" | tee -a "$COURT_DIR/court-result.txt"
+cd /out/work
 
 # ---------------------------------------------------------------------------
 # Seal: the evidence manifest (written by the container's own binary).
