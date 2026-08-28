@@ -394,6 +394,66 @@ pub struct Store {
     deferred_extents: std::sync::atomic::AtomicU64,
     deferred_logical_bytes: std::sync::atomic::AtomicU64,
     deferred_since_ns: std::sync::atomic::AtomicU64,
+    /// Phase 12C-1-3: the debt generation/cut — the snapshot of the
+    /// pending debt the CURRENTLY RUNNING background pass is settling.
+    /// At pass start [`Store::begin_debt_generation`] snapshots the debt;
+    /// at completion [`Store::complete_debt_generation`] subtracts ONLY
+    /// that snapshot, so debt created DURING the pass (after the pass's
+    /// effective scan frontier) remains visible — the operator is never
+    /// told the store is settled when new deferrals raced the pass.
+    /// `debt_generation_started_ns` is the pass-start wall timestamp
+    /// (the conservative age floor of any surviving during-pass debt).
+    debt_cut_extents: std::sync::atomic::AtomicU64,
+    debt_cut_bytes: std::sync::atomic::AtomicU64,
+    debt_generation_started_ns: std::sync::atomic::AtomicU64,
+    /// Phase 12C-1-3 pressure-state-machine witnesses (never behaviors;
+    /// the mounted court's causal evidence — "the state machine fired").
+    /// `pressure_samples` counts every sampled pressure scalar in Focused
+    /// mode; `pressure_enter_events`/`pressure_leave_events` count the
+    /// hysteresis transitions; `pressure_time_ns` accumulates the
+    /// write-path-observed pressured duration (sampled at each call);
+    /// `deferred_peak_bytes` is the high-water of the pending debt;
+    /// `debt_cap_engagements` counts the starvation-cap refusals.
+    pressure_samples: std::sync::atomic::AtomicU64,
+    pressure_enter_events: std::sync::atomic::AtomicU64,
+    pressure_leave_events: std::sync::atomic::AtomicU64,
+    pressure_time_ns: std::sync::atomic::AtomicU64,
+    pressure_last_sample_ns: std::sync::atomic::AtomicU64,
+    deferred_peak_bytes: std::sync::atomic::AtomicU64,
+    debt_cap_engagements: std::sync::atomic::AtomicU64,
+}
+
+/// Phase 12C-1-3: the pressure state-machine snapshot (the mounted
+/// court's causal evidence — "the state machine fired" — and the
+/// operator's debt witness). Every field is advisory (never a behavior).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PressureTrace {
+    /// Whether the hysteresis state is currently pressured.
+    pub pressured: bool,
+    /// Sampled pressure scalars in Focused mode (cumulative).
+    pub samples: u64,
+    /// Idle → pressured transitions (cumulative).
+    pub enter_events: u64,
+    /// Pressured → idle transitions (cumulative).
+    pub leave_events: u64,
+    /// Write-path-observed pressured duration (cumulative ns; charged at
+    /// each sample while the state was pressured).
+    pub pressured_time_ns: u64,
+    /// Total rANS/configurational deferrals by the gate (cumulative;
+    /// class + pressure skips).
+    pub rans_skips: u64,
+    /// Pending pressure-deferred extents (snapshot).
+    pub deferred_extents: u64,
+    /// Pending pressure-deferred logical bytes (snapshot).
+    pub deferred_bytes: u64,
+    /// Age of the oldest pending deferral (ns since the generation start
+    /// or the first deferral; snapshot).
+    pub deferred_age_ns: u64,
+    /// High-water of the pending debt (cumulative peak, bytes).
+    pub peak_deferred_bytes: u64,
+    /// Starvation-cap refusals (cumulative: the gate wanted to defer but
+    /// the cap said no).
+    pub debt_cap_engagements: u64,
 }
 
 impl std::fmt::Debug for Store {
@@ -518,6 +578,16 @@ impl Store {
             deferred_extents: std::sync::atomic::AtomicU64::new(0),
             deferred_logical_bytes: std::sync::atomic::AtomicU64::new(0),
             deferred_since_ns: std::sync::atomic::AtomicU64::new(0),
+            debt_cut_extents: std::sync::atomic::AtomicU64::new(0),
+            debt_cut_bytes: std::sync::atomic::AtomicU64::new(0),
+            debt_generation_started_ns: std::sync::atomic::AtomicU64::new(0),
+            pressure_samples: std::sync::atomic::AtomicU64::new(0),
+            pressure_enter_events: std::sync::atomic::AtomicU64::new(0),
+            pressure_leave_events: std::sync::atomic::AtomicU64::new(0),
+            pressure_time_ns: std::sync::atomic::AtomicU64::new(0),
+            pressure_last_sample_ns: std::sync::atomic::AtomicU64::new(0),
+            deferred_peak_bytes: std::sync::atomic::AtomicU64::new(0),
+            debt_cap_engagements: std::sync::atomic::AtomicU64::new(0),
         };
         store.open_segment(0)?;
         // Create the root directory inode (ino 1) and commit the initial
@@ -644,6 +714,16 @@ impl Store {
             deferred_extents: std::sync::atomic::AtomicU64::new(0),
             deferred_logical_bytes: std::sync::atomic::AtomicU64::new(0),
             deferred_since_ns: std::sync::atomic::AtomicU64::new(0),
+            debt_cut_extents: std::sync::atomic::AtomicU64::new(0),
+            debt_cut_bytes: std::sync::atomic::AtomicU64::new(0),
+            debt_generation_started_ns: std::sync::atomic::AtomicU64::new(0),
+            pressure_samples: std::sync::atomic::AtomicU64::new(0),
+            pressure_enter_events: std::sync::atomic::AtomicU64::new(0),
+            pressure_leave_events: std::sync::atomic::AtomicU64::new(0),
+            pressure_time_ns: std::sync::atomic::AtomicU64::new(0),
+            pressure_last_sample_ns: std::sync::atomic::AtomicU64::new(0),
+            deferred_peak_bytes: std::sync::atomic::AtomicU64::new(0),
+            debt_cap_engagements: std::sync::atomic::AtomicU64::new(0),
         };
         // Phase-10D: replay any un-checkpointed mutation log tail left by
         // a process crash (the last checkpoint root is authoritative; the
@@ -1028,6 +1108,36 @@ impl Store {
             if engaged { 1 } else { 0 },
             std::sync::atomic::Ordering::Relaxed,
         );
+        // Phase 12C-1-3 state-machine witnesses (the mounted court's
+        // causal evidence): count the samples and the hysteresis
+        // transitions, and accumulate the write-path-observed pressured
+        // duration (the interval since the previous sample, charged only
+        // while the state WAS pressured — the sample cadence is per
+        // search-path chunk, so the accumulator is an operational
+        // witness, not a precise wall clock).
+        self.pressure_samples
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if engaged && !was {
+            self.pressure_enter_events
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else if !engaged && was {
+            self.pressure_leave_events
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let now = crate::perf::wall_ns();
+        if was {
+            let last = self
+                .pressure_last_sample_ns
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if last != 0 {
+                self.pressure_time_ns.fetch_add(
+                    now.saturating_sub(last),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+        }
+        self.pressure_last_sample_ns
+            .store(now, std::sync::atomic::Ordering::Relaxed);
         engaged
     }
 
@@ -1046,10 +1156,16 @@ impl Store {
     pub(crate) fn record_deferred_extent(&self, logical: u64) {
         self.deferred_extents
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.deferred_logical_bytes
-            .fetch_add(logical, std::sync::atomic::Ordering::Relaxed);
+        let bytes = self
+            .deferred_logical_bytes
+            .fetch_add(logical, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(logical);
+        // The peak-debt witness (the court's "peak optimization debt").
+        self.deferred_peak_bytes
+            .fetch_max(bytes, std::sync::atomic::Ordering::Relaxed);
         // The debt-age clock starts at the first PENDING deferral; a
-        // completed background pass resets it via `reset_deferred_debt`.
+        // completed background generation resets it (see
+        // `complete_debt_generation`).
         let _ = self.deferred_since_ns.compare_exchange(
             0,
             crate::perf::wall_ns(),
@@ -1087,6 +1203,143 @@ impl Store {
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.deferred_since_ns
             .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Phase 12C-1-3: begin a debt generation — snapshot the pending debt
+    /// as the generation a background pass is about to settle. Called by
+    /// `optimize_pass` once it has flushed the epoch and is about to
+    /// scan; the snapshot is the CUT: at completion, ONLY this generation
+    /// is subtracted, so debt created DURING the pass (after its
+    /// effective scan frontier) remains visible.
+    pub fn begin_debt_generation(&self) {
+        let (e, b, _) = self.deferred_debt();
+        self.debt_cut_extents
+            .store(e, std::sync::atomic::Ordering::Relaxed);
+        self.debt_cut_bytes
+            .store(b, std::sync::atomic::Ordering::Relaxed);
+        self.debt_generation_started_ns
+            .store(crate::perf::wall_ns(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Phase 12C-1-3: complete a debt generation — subtract the cut
+    /// snapshot taken at [`Store::begin_debt_generation`] (saturating),
+    /// so during-pass deferrals survive. If debt remains, the age clock
+    /// restarts at the generation start (the surviving deferrals all
+    /// happened at or after it — the conservative upper-bound age). If
+    /// nothing remains, the age clock resets. The operator is never told
+    /// the store is settled when new deferrals raced the pass.
+    pub fn complete_debt_generation(&self) {
+        let ce = self
+            .debt_cut_extents
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let cb = self
+            .debt_cut_bytes
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let started = self
+            .debt_generation_started_ns
+            .load(std::sync::atomic::Ordering::Relaxed);
+        // The closure always returns `Some`, so the `Err` variant is
+        // unreachable; the saturating subtraction is itself the arbiter
+        // when the debt raced a concurrent `fetch_add` (never negative).
+        let _ = self.deferred_extents.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |v| Some(v.saturating_sub(ce)),
+        );
+        let _ = self.deferred_logical_bytes.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |v| Some(v.saturating_sub(cb)),
+        );
+        if self
+            .deferred_extents
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == 0
+        {
+            self.deferred_since_ns
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        } else if started != 0 {
+            // The surviving debt was created during the pass: its oldest
+            // member is at least as recent as the generation start.
+            let since = self
+                .deferred_since_ns
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if since < started {
+                self.deferred_since_ns
+                    .store(started, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        self.debt_cut_extents
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.debt_cut_bytes
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.debt_generation_started_ns
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Phase 12C-1-3: record one starvation-cap refusal (the search calls
+    /// this when the pressure gate would defer but the debt cap says no —
+    /// the "continuous pressure cannot defer optimization forever"
+    /// engagement witness).
+    pub(crate) fn record_debt_cap_engagement(&self) {
+        self.debt_cap_engagements
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Phase 12C-1-3: the pressure state-machine snapshot (the mounted
+    /// court's causal evidence + the operator surface). See the
+    /// [`PressureTrace`] fields for the units.
+    pub fn pressure_trace(&self) -> PressureTrace {
+        let (de, db, ds) = self.deferred_debt();
+        let now = crate::perf::wall_ns();
+        PressureTrace {
+            pressured: self.pressure_state(),
+            samples: self
+                .pressure_samples
+                .load(std::sync::atomic::Ordering::Relaxed),
+            enter_events: self
+                .pressure_enter_events
+                .load(std::sync::atomic::Ordering::Relaxed),
+            leave_events: self
+                .pressure_leave_events
+                .load(std::sync::atomic::Ordering::Relaxed),
+            pressured_time_ns: self
+                .pressure_time_ns
+                .load(std::sync::atomic::Ordering::Relaxed),
+            rans_skips: self
+                .focused_rans_skips
+                .load(std::sync::atomic::Ordering::Relaxed),
+            deferred_extents: de,
+            deferred_bytes: db,
+            deferred_age_ns: if ds == 0 { 0 } else { now.saturating_sub(ds) },
+            peak_deferred_bytes: self
+                .deferred_peak_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+            debt_cap_engagements: self
+                .debt_cap_engagements
+                .load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// Phase 12C-1-3: the pressure trace block for the daemon's
+    /// `--stats-file` dump (the mounted court reads it for the causal
+    /// chain: enter/leave events, time pressured, deferrals, peak debt).
+    pub fn pressure_trace_render(&self) -> String {
+        let t = self.pressure_trace();
+        format!(
+            "pressure state machine:\n  pressured: {}\n  samples: {}\n  enter events: {}\n  leave events: {}\n  time pressured: {} ms\n  rans skips: {}\n  deferred extents: {}\n  deferred bytes: {}\n  peak deferred bytes: {}\n  oldest deferred age: {} ms\n  debt-cap engagements: {}\n",
+            if t.pressured { "yes" } else { "no" },
+            t.samples,
+            t.enter_events,
+            t.leave_events,
+            t.pressured_time_ns / 1_000_000,
+            t.rans_skips,
+            t.deferred_extents,
+            t.deferred_bytes,
+            t.peak_deferred_bytes,
+            t.deferred_age_ns / 1_000_000,
+            t.debt_cap_engagements,
+        )
     }
 
     /// Phase-12C oracle diagnostics: record one winning-channel rank (the
@@ -1177,7 +1430,28 @@ impl Store {
         if len == 0 {
             return Ok(None);
         }
-        let bytes = self.read_file(ino, offset, len as u64)?;
+        // Phase-12C-1-3 (mounted-court-found): the base channels read
+        // COMMITTED state. A freshly-created inode that exists only in the
+        // epoch overlay has NO committed extents — the correct answer is
+        // "no base yet", NOT an error. The search path calls this for
+        // overlay-only inodes during the same-epoch write whenever the
+        // DSFB trust admits the Adjacent/PrevInFile/FamilyBase channels;
+        // the pre-fix committed-only `read_file` raised
+        // `Invariant("inode N missing")` and failed the whole write (the
+        // FUSE probes missed it because their content's base-channel
+        // trust stayed below the skip threshold; the 12C-1-3 corpus's
+        // did not).
+        let Ok(Some(_)) = self.get_inode(ino) else {
+            return Ok(None);
+        };
+        let bytes = match self.read_file(ino, offset, len as u64) {
+            Ok(b) => b,
+            // The base chunk is unreadable (e.g. an over-depth chain the
+            // pre-pass rebase has not flattened yet, or a torn record):
+            // there is NO base, never a crash. The base channels are
+            // advisory — an unavailable base merely drops the channel.
+            Err(_) => return Ok(None),
+        };
         if bytes.is_empty() {
             return Ok(None);
         }
@@ -1246,6 +1520,15 @@ impl Store {
     /// `max_reference_depth` is unreadable (`DepthExceeded`). Rebase those
     /// extents to a depth-0 encoding. Returns the number of extents
     /// rebased; a no-op when the cap is respected (the steady state).
+    ///
+    /// Phase-12C-1-3 (mounted-court-found): the over-depth DETECTION uses
+    /// `chain_depth_uncapped` — the pre-fix `chain_depth` prunes its walk
+    /// at `max_reference_depth`, so it can never return more than the cap
+    /// and the detection (`<= max`) skipped every over-depth extent: the
+    /// 12C-1-3 mounted settle left live unreadable extents behind (the
+    /// optimize crashed on a later `base_chunk_at` read of a depth-5
+    /// chain; the readback had passed before the settle's own rewrites
+    /// deepened the chains).
     pub fn rebase_overdepth_extents(
         &self,
         hooks: &crate::store::transaction::CrashHooks,
@@ -1281,7 +1564,8 @@ impl Store {
                     Ok(d) => d,
                     Err(_) => continue,
                 };
-                if crate::optimizer::rebase::chain_depth(self, &desc) <= limits.max_reference_depth
+                if crate::optimizer::rebase::chain_depth_uncapped(self, &desc, &Default::default())
+                    <= limits.max_reference_depth
                 {
                     continue;
                 }

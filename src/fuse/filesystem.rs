@@ -585,6 +585,21 @@ impl Drop for EntropyFs {
             out.push_str(&self.store.perf().render());
             out.push('\n');
             out.push_str(&self.store.perf().render_reconciled());
+            // Phase 12C-1-3: the pressure state-machine trace (the mounted
+            // court's causal evidence: enter/leave events, time pressured,
+            // deferrals, peak debt — "the state machine fired").
+            out.push('\n');
+            out.push_str(&self.store.pressure_trace_render());
+            // Phase 12C-1-3: the pool's live diagnostics (the engagement
+            // court's worker-pool witness: peak in-flight vs capacity —
+            // whether the pool actually saturated).
+            out.push('\n');
+            out.push_str("worker pool:\n");
+            let pd = crate::store::workers::POOL.diagnostics();
+            out.push_str(&format!(
+                "  peak in-flight: {}\n  capacity: {}\n  workers: {}\n",
+                pd.peak_in_flight, pd.capacity, pd.workers
+            ));
             let _ = std::fs::write(path, out);
         }
     }

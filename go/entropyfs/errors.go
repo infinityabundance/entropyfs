@@ -99,6 +99,19 @@ func parseMetrics(raw []byte) (Metrics, error) {
 			DataRecordCount       uint64 `json:"data_record_count"`
 			BlobCount             uint64 `json:"blob_count"`
 		} `json:"accounting"`
+		Pressure struct {
+			Pressured            bool   `json:"pressured"`
+			Samples              uint64 `json:"samples"`
+			EnterEvents          uint64 `json:"enter_events"`
+			LeaveEvents          uint64 `json:"leave_events"`
+			PressuredTimeMs      uint64 `json:"pressured_time_ms"`
+			RansSkips            uint64 `json:"rans_skips"`
+			DeferredExtents      uint64 `json:"deferred_extents"`
+			DeferredLogicalBytes uint64 `json:"deferred_logical_bytes"`
+			DeferredAgeMs        uint64 `json:"deferred_age_ms"`
+			PeakDeferredBytes    uint64 `json:"peak_deferred_bytes"`
+			DebtCapEngagements   uint64 `json:"debt_cap_engagements"`
+		} `json:"pressure"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return Metrics{}, fmt.Errorf("%w: metrics JSON: %v", ErrInternal, err)
@@ -114,6 +127,19 @@ func parseMetrics(raw []byte) (Metrics, error) {
 			ObjectCount:           doc.Accounting.ObjectCount,
 			DataRecordCount:       doc.Accounting.DataRecordCount,
 			BlobCount:             doc.Accounting.BlobCount,
+		},
+		Pressure: PressureMetrics{
+			Pressured:            doc.Pressure.Pressured,
+			Samples:              doc.Pressure.Samples,
+			EnterEvents:          doc.Pressure.EnterEvents,
+			LeaveEvents:          doc.Pressure.LeaveEvents,
+			PressuredTimeMs:      doc.Pressure.PressuredTimeMs,
+			RansSkips:            doc.Pressure.RansSkips,
+			DeferredExtents:      doc.Pressure.DeferredExtents,
+			DeferredLogicalBytes: doc.Pressure.DeferredLogicalBytes,
+			DeferredAgeMs:        doc.Pressure.DeferredAgeMs,
+			PeakDeferredBytes:    doc.Pressure.PeakDeferredBytes,
+			DebtCapEngagements:   doc.Pressure.DebtCapEngagements,
 		},
 		Raw: raw,
 	}, nil

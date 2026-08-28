@@ -141,14 +141,19 @@ func TestContainsSyncCompactMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Metrics: %v", err)
 	}
-	if m.SchemaVersion != 1 {
-		t.Fatalf("metrics schema version = %d, want 1", m.SchemaVersion)
+	if m.SchemaVersion != 2 {
+		t.Fatalf("metrics schema version = %d, want 2 (the 12C-1-3 pressure block)", m.SchemaVersion)
 	}
 	if m.Accounting.PhysicalUsedBytes == 0 {
 		t.Fatal("metrics must report physical used bytes")
 	}
 	if len(m.Raw) == 0 {
 		t.Fatal("metrics Raw must carry the native DTO")
+	}
+	// The 12C-1-3 pressure witness is parsed (cumulative fields may be
+	// zero on a fresh engine; the block must exist and be coherent).
+	if m.Pressure.Samples != 0 || m.Pressure.EnterEvents != 0 {
+		t.Fatalf("fresh engine must report zero pressure witnesses, got %+v", m.Pressure)
 	}
 }
 

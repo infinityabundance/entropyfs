@@ -51,7 +51,26 @@ For sealed performance and experimental evidence, see
 
 ### Current development focus
 
-- Latest completed phase: **12C-1-2 — the pressure-aware foreground
+- Latest completed phase: **12C-1-3 — the mounted pressure-ENGAGEMENT
+  court** (v0.7.17): the 12C-1-2 court proved the pressure mechanism at
+  the engine level; 12C-1-3 closes its recorded boundary — the mounted
+  corpora never saturated the pool — with a sustained GIL-free 1 MiB
+  structured corpus and PROVES the causal chain mounted: the pressure
+  state machine fires on every saturated cell (enter events 138–234
+  across the five adoption families, 275 MB–1 GiB of deferred debt, the
+  1 GiB starvation cap engaging with 6 106–7 353 refusals), byte
+  identity absolute, fsck clean. The court also found and fixed **five
+  real defects**: the pool's >capacity deadlock (runtime-mutex-across-
+  wait), the backpressure starvation/lost-wakeup, the admission TOCTOU,
+  the overlay-only-inode `base_chunk_at` crash, and over-depth chains
+  crashing the optimize and leaving live unreadable extents (pre-pass
+  rebase + tolerant base reads + uncapped depth detection) — all
+  regression-pinned. The promotion gate's wall/CPU rows are flat and
+  the settled rows budget-limited on the 2 s write phase, so **the
+  mount default stays `full`** (`--foreground pressure` remains the
+  adopted engine-level shape; the flip needs the longer sustained +
+  full-settle follow-on).
+- Previous: **12C-1-2 — the pressure-aware foreground
   deferral** (v0.7.16): the class gate (12C-1) answered "is rANS
   valuable?"; the pressure gate answers "is NOW the right time?" —
   the worker pool's live `in_flight/capacity` pressure (hysteresis

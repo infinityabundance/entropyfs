@@ -162,8 +162,11 @@ fn create_put_get_range_sync_compact_metrics() {
     assert_eq!(rc, EFS_OK, "metrics failed: {}", last_error());
     let json: serde_json::Value =
         serde_json::from_slice(&crate::ffi::take_output(jbuf, jlen)).expect("metrics JSON parses");
-    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["schema_version"], 2);
     assert!(json["accounting"]["physical_used_bytes"].as_u64().unwrap() > 0);
+    // The 12C-1-3 pressure block is present and coherent.
+    assert!(json["pressure"]["samples"].is_u64());
+    assert!(json["pressure"]["enter_events"].is_u64());
 
     close(h);
 }

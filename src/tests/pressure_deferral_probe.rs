@@ -850,3 +850,118 @@ fn starvation_cap_bounds_debt() {
     );
     assert!(de <= 1024 * 1024 / 16384 + 2, "extents bounded too");
 }
+
+/// Phase 12C-1-3 regression pin (the user-named race): debt created
+/// DURING a background optimizer pass must survive the pass's completion.
+///
+/// # The race being pinned
+///
+/// A naive "reset the debt counters when a pass completes" would clear
+/// debt that was deferred AFTER the pass's effective scan frontier — the
+/// operator would be told the store is settled when it is not. The
+/// generation/cut model (`Store::begin_debt_generation` snapshots the
+/// pending debt as the CUT; `Store::complete_debt_generation` subtracts
+/// ONLY that snapshot, saturating) keeps during-pass deferrals visible
+/// and restarts the age clock at the generation start — the conservative
+/// upper bound on the survivors' age (every surviving deferral happened
+/// at or after the pass began).
+#[test]
+fn debt_created_during_optimizer_pass_survives_completion() {
+    let dir = TempDir::new().unwrap();
+    let store = create_store(&dir);
+    let hooks = &CrashHooks::none();
+    store.set_semantic_mode(crate::dsfb::semantics::SemanticMode::Combined);
+    store.set_pressure_override(Some(0.9));
+    // A large cap: every deferral is admitted (the cap's refusal path is
+    // the starvation test's job, not this race pin's).
+    let fg = pressure_policy(0.25, 0.25, 64 * 1024 * 1024);
+    let opts = OptimizeOptions::default();
+    let root = store.current_root().root_dir_ino;
+    let dir_ino = store
+        .epoch_create(root, b"gen", NewEntry::dir(0o755, 1000, 1000), hooks)
+        .unwrap();
+
+    // One 16 KiB DISTINCT structured chunk (rANS-valuable text: the
+    // pressure gate must want to defer it). The LCG state makes every
+    // chunk's bytes distinct, so no fast-dedup lookup masks the gate.
+    let mut state: u64 = 7;
+    let mut write_chunk = |store: &Arc<Store>, name: &[u8]| {
+        let mut b = Vec::with_capacity(16384);
+        while b.len() < 16384 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            b.push(
+                b"abcdefghijklmnopqrstuvwxyz0123456789{}();,= \n"[((state >> 33) as usize) % 45],
+            );
+        }
+        let ino = store
+            .epoch_create(dir_ino, name, NewEntry::file(0o644, 1000, 1000), hooks)
+            .unwrap();
+        let mut sem = crate::dsfb::semantics::SemanticContext::from_name(name, 1);
+        let sketch = crate::dsfb::semantics::SemanticContext::from_bytes(&b);
+        sem.magic_class = sketch.magic_class;
+        sem.printable_ratio = sketch.printable_ratio;
+        sem.entropy_class = sketch.entropy_class;
+        store
+            .epoch_write_semantic(ino, 0, &b, opts, fg, Some(sem), hooks)
+            .unwrap();
+    };
+
+    // Phase A: 40 chunks deferred BEFORE the pass begins — the debt the
+    // pass's snapshot will take as its generation cut.
+    for i in 0..40u64 {
+        write_chunk(&store, format!("a{i}").as_bytes());
+    }
+    let (de0, db0, _) = store.deferred_debt();
+    assert!(
+        de0 > 0 && db0 > 0,
+        "the gate must defer pre-pass debt (de0={de0}, db0={db0})"
+    );
+
+    // Phase B: the pass begins — the snapshot IS the cut.
+    let gen_start = crate::perf::wall_ns();
+    store.begin_debt_generation();
+
+    // Phase C: 20 chunks deferred DURING the pass (racing its frontier).
+    for i in 0..20u64 {
+        write_chunk(&store, format!("b{i}").as_bytes());
+    }
+    let (de1, db1, _) = store.deferred_debt();
+    assert!(
+        db1 > db0,
+        "during-pass debt must grow the total (db0={db0}, db1={db1})"
+    );
+
+    store.complete_debt_generation();
+
+    // Phase D: ONLY the cut is paid. The during-pass debt survives
+    // (single-threaded here, so the surviving debt is exactly the
+    // during-pass delta).
+    let (de2, db2, ds2) = store.deferred_debt();
+    assert_eq!(
+        (de2, db2),
+        (de1 - de0, db1 - db0),
+        "the pass must pay exactly its generation cut, never the debt that raced it"
+    );
+    assert!(de2 > 0, "during-pass extents must remain visible");
+    assert!(db2 > 0, "during-pass bytes must remain visible");
+    // The age clock restarts at the generation start (the survivors' age
+    // floor — they all happened at or after the pass began).
+    assert!(ds2 != 0, "surviving debt keeps the age clock running");
+    assert!(
+        ds2 >= gen_start,
+        "survivors' age floor must be the generation start (ds2={ds2}, gen_start={gen_start})"
+    );
+
+    // Phase E: a second generation with NO during-pass deferrals — the
+    // completion must settle the debt entirely and reset the age clock.
+    store.begin_debt_generation();
+    store.complete_debt_generation();
+    let (de3, db3, ds3) = store.deferred_debt();
+    assert_eq!(
+        (de3, db3, ds3),
+        (0, 0, 0),
+        "a pass with no racing deferrals settles fully (got {de3}/{db3}/{ds3})"
+    );
+}

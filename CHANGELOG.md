@@ -1,5 +1,92 @@
 # EntropyFS changelog
 
+## v0.7.17 (2026-08-28)
+
+**Phase 12C-1-3 — the mounted pressure-ENGAGEMENT court + the court-found
+scheduler/integrity fixes.** The 12C-1-2 mounted court's recorded boundary
+was that its corpora never saturated the pool with valuable search, so the
+pressure gate's mounted differentiation never engaged. 12C-1-3 closes that
+boundary with a sustained GIL-free 1 MiB per-(writer,round) structured
+corpus (the phase probe measured the engagement floor: 1.0–1.5 s does NOT
+engage, 2.0 s+ does) and PROVES the causal chain mounted — and the court
+found FIVE real defects in the pool and the write/optimize paths.
+
+- **The mounted engagement court** (sealed
+  `pressure-mount-engagement-1787952773-e936b6d/`; driver
+  `tools/court-pressure-mount-engagement.sh`): Full/Focused/Pressure ×
+  FUSE writers 1/4/8/16/32 at pool-16 on build-artifacts, pool-8 at 16
+  writers, and ci-cache/container-layers/generated-assets/
+  scientific-outputs at 16 writers. The pressure state machine FIRES on
+  every saturated cell — enter events: build-artifacts t16 152 / t32 196
+  / p8 234, ci-cache 143, container-layers 155, generated-assets 151,
+  scientific-outputs 138; 4 398–16 384 rANS skips and 275 MB–1 GiB of
+  deferred debt per cell; the t32/p8 cells hit the **1 GiB starvation
+  cap with 6 106 / 7 353 cap-engagements** (the bounded-debt invariant
+  working mounted). Engagement starts at 16 writers (t1/t4/t8 enter=0 —
+  the 12C-1-2 boundary reproduced at the low end). Byte identity is
+  absolute (the deterministic corpus is regenerated and compared) and
+  fsck is clean in every cell (4 cells' first-pass fsck raced the
+  daemon teardown and failed transiently; clean on re-run, recorded).
+- **The court-found pool defects** (`src/store/workers.rs`):
+  1. **runtime-mutex-across-wait deadlock** — `SearchPool::submit` held
+     the pool's `runtime` lock across the backpressure wait while the
+     worker tasks' own `pressure_engaged` → `POOL.pressure()` calls take
+     the same lock; under >capacity concurrency (16 writers × 16 chunks
+     vs capacity 128) the workers blocked on the held guard, tasks never
+     completed, and the mount deadlocked (16 FUSE requests pending, ring
+     empty). The submit now clones the shared state under a short lock.
+  2. **backpressure starvation + lost wakeup** — the notify fired only
+     at the full drain and without the wait lock; fast re-submitters
+     re-took capacity before the pool reached zero and a notify could
+     land between a submitter's check and its sleep. The dedicated
+     `backpressure_cv` notifies on EVERY decrement under the wait lock.
+  3. **admission TOCTOU** — the check-then-act allowed peak in-flight to
+     overshoot capacity (160 > 128); admission is now atomic with the
+     check under the wait lock.
+  Regression pins: `pool_admits_all_waiters_under_capacity_saturation`,
+  `pool_write_path_saturation_stays_live`, and the 11E probe's
+  backpressure assertion.
+- **The court-found integrity defects**:
+  4. **overlay-only-inode crash** — the search's base channels called
+     `base_chunk_at` → `read_file` on freshly-created
+     (epoch-overlay-only) inodes and crashed with
+     `Invariant("inode N missing")`; no committed data now means "no
+     base" (`Ok(None)`).
+  5. **over-depth chains crashed the optimize and left unreadable live
+     extents** — a background rewrite can deepen a chain past the decode
+     cap; the search's base read of an over-depth chunk aborted the
+     whole pass (`DepthExceeded`) BEFORE the end-of-pass repair sweep
+     could run, and a post-mortem scan found FOUR LIVE extents (a file
+     region at ~68.5 MB) whose depth-5 chains made them unreadable
+     (user-visible EIO on `read_file`). Fixes: `base_chunk_at` treats an
+     unreadable base as "no base"; the repair sweep runs BEFORE the
+     per-extent search (the pre-pass rebase); the detection uses
+     `chain_depth_uncapped`. Pinned by `src/tests/overdepth_rebase.rs`
+     (fixture-staged depth-5 chains: detection, repair, idempotence,
+     optimize survival, overlay-only writes on pool and semaphore
+     paths).
+- **The debt generation/cut** (the user-named race): `optimize_pass`
+  snapshots the pending debt at pass start and subtracts ONLY that
+  snapshot at completion — debt created DURING the pass survives (the
+  operator is never told the store is settled when new deferrals raced
+  the pass). Pinned by
+  `debt_created_during_optimizer_pass_survives_completion`.
+- **Pressure state-machine witnesses** (the mounted court's causal
+  evidence): samples/enter/leave events, time pressured, peak debt, and
+  debt-cap engagements — in the daemon's `--stats-file` dump and the
+  engine metrics DTO (`schema_version` 2; the Go binding and the C-ABI
+  test updated).
+- **The promotion decision**: the gate rows are evaluated in
+  `docs/performance/adaptive-budget.md` §12C-1-3. Byte identity, fsck,
+  engagement, bounded debt, idle≈Full and low-concurrency rows are MET;
+  the foreground wall/CPU are flat and p99 mixed on the 2 s write
+  phase, and the settled rows are budget-limited (150 s/cell; the
+  deterministic convergence authority is the 12C-1-2 direct-engine
+  court, +0.00–0.08%) — so **the mount default stays `full`** and
+  `--foreground pressure` remains the adopted engine-level shape. The
+  recorded follow-on for the flip: a longer sustained mounted court
+  with a full settle budget.
+
 ## v0.7.16 (2026-08-27)
 
 **Phase 12C-1-2 — the pressure-aware foreground deferral, ADOPTED.** The

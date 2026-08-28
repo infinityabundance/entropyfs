@@ -137,7 +137,7 @@ pub struct DsfbMetrics {
     pub candidates_evaluated: u64,
 }
 
-/// Phase 12C-1-2 pressure-deferral accounting (the operator's
+/// Phase 12C-1-2/12C-1-3 pressure-deferral accounting (the operator's
 /// optimization-debt witness — advisory; the background optimizer pays
 /// the debt).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,19 +146,35 @@ pub struct PressureMetrics {
     /// Whether the foreground pressure gate is currently engaged
     /// (hysteresis-transitioned; snapshot).
     pub pressured: bool,
+    /// Sampled pressure scalars in Focused mode (cumulative since open).
+    pub samples: u64,
+    /// Idle → pressured transitions (cumulative; the "the state machine
+    /// fired" witness).
+    pub enter_events: u64,
+    /// Pressured → idle transitions (cumulative).
+    pub leave_events: u64,
+    /// Write-path-observed pressured duration (cumulative; unit:
+    /// milliseconds).
+    pub pressured_time_ms: u64,
     /// Cumulative rANS/configurational deferrals by the `Focused` gate
     /// (cumulative since open; class-gate + pressure-gate skips).
     pub rans_skips: u64,
     /// Pending pressure-deferred extents since the last completed
-    /// background pass (snapshot; the debt).
+    /// background-pass generation (snapshot; the debt).
     pub deferred_extents: u64,
     /// Pending pressure-deferred logical bytes since the last completed
-    /// background pass (snapshot; the debt — the operator's "accepted
-    /// writes quickly and has N bytes of optimization debt" number).
+    /// background-pass generation (snapshot; the debt — the operator's
+    /// "accepted writes quickly and has N bytes of optimization debt"
+    /// number).
     pub deferred_logical_bytes: u64,
     /// Age of the oldest pending deferral (unit: milliseconds since the
-    /// first deferral after the last background pass; snapshot).
+    /// generation start or the first deferral; snapshot).
     pub deferred_age_ms: u64,
+    /// High-water of the pending debt (cumulative peak; unit: bytes).
+    pub peak_deferred_bytes: u64,
+    /// Starvation-cap refusals (cumulative: the gate wanted to defer but
+    /// the debt cap said no).
+    pub debt_cap_engagements: u64,
 }
 
 /// Performance-cache accounting.
@@ -192,7 +208,8 @@ pub struct PhaseMetrics {
 /// version bump, never rewrite.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EngineMetrics {
-    /// DTO schema version (currently 1).
+    /// DTO schema version (currently 2; the 12C-1-3 pressure
+    /// state-machine fields extended the v1 pressure block).
     pub schema_version: u32,
     /// Format identity.
     pub format: FormatInfo,
@@ -514,6 +531,54 @@ pub const METRIC_REGISTRY: &[MetricDef] = &[
         authority: "Store::deferred_debt",
     },
     MetricDef {
+        key: "pressure.samples",
+        unit: "samples",
+        kind: "cumulative",
+        scope: "store",
+        reset: "at open",
+        authority: "Store::pressure_trace",
+    },
+    MetricDef {
+        key: "pressure.enter_events",
+        unit: "events",
+        kind: "cumulative",
+        scope: "store",
+        reset: "at open",
+        authority: "Store::pressure_trace",
+    },
+    MetricDef {
+        key: "pressure.leave_events",
+        unit: "events",
+        kind: "cumulative",
+        scope: "store",
+        reset: "at open",
+        authority: "Store::pressure_trace",
+    },
+    MetricDef {
+        key: "pressure.pressured_time_ms",
+        unit: "milliseconds",
+        kind: "cumulative",
+        scope: "store",
+        reset: "at open",
+        authority: "Store::pressure_trace",
+    },
+    MetricDef {
+        key: "pressure.peak_deferred_bytes",
+        unit: "bytes",
+        kind: "cumulative",
+        scope: "store",
+        reset: "at open",
+        authority: "Store::pressure_trace",
+    },
+    MetricDef {
+        key: "pressure.debt_cap_engagements",
+        unit: "events",
+        kind: "cumulative",
+        scope: "store",
+        reset: "at open",
+        authority: "Store::pressure_trace",
+    },
+    MetricDef {
         key: "cache.model_cache_hits",
         unit: "objects",
         kind: "cumulative",
@@ -546,7 +611,7 @@ mod tests {
     #[test]
     fn dto_json_roundtrip() {
         let m = EngineMetrics {
-            schema_version: 1,
+            schema_version: 2,
             format: FormatInfo {
                 format_major: 1,
                 format_minor: 0,
@@ -588,10 +653,16 @@ mod tests {
             },
             pressure: PressureMetrics {
                 pressured: false,
+                samples: 0,
+                enter_events: 0,
+                leave_events: 0,
+                pressured_time_ms: 0,
                 rans_skips: 0,
                 deferred_extents: 0,
                 deferred_logical_bytes: 0,
                 deferred_age_ms: 0,
+                peak_deferred_bytes: 0,
+                debt_cap_engagements: 0,
             },
             cache: CacheMetrics {
                 model_cache_hits: 0,

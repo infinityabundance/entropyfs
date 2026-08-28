@@ -229,15 +229,34 @@ pub fn optimize_pass(
     // the epoch first.
     // ---------------------------------------------------------------------
     store.ensure_epoch_flushed(&crate::store::transaction::CrashHooks::none())?;
+    // Phase 12C-1-3: BEGIN the debt generation — snapshot the pending
+    // optimization debt as the generation this pass will settle. At
+    // completion ONLY this snapshot is subtracted, so debt created DURING
+    // the pass (deferrals racing the scan frontier) remains visible: the
+    // operator is never told the store is settled when new deferrals
+    // raced the pass.
+    store.begin_debt_generation();
     // ---------------------------------------------------------------------
-    // Stage 2: Position the cursor over the inode list snapshot.
-    //
-    // `inos` is the snapshot of committed inodes this pass walks; a
-    // resumable pass starts at `(start_idx, resume_offset)` and advances
-    // as it goes. `truncated` records whether `max_extents` stopped the
-    // pass before the end.
-    // ---------------------------------------------------------------------
+    // Stage 1b: Phase-12C-1-3 (mounted-court-found) — the pre-pass rebase
+    // sweep. The per-extent search reads the PREVIOUS chunk as its
+    // dictionary/base (`base_chunk_at`); an over-depth chain left by a
+    // prior crashed pass or by the foreground's own chain-deepening makes
+    // that read fail (`DepthExceeded`), and the pre-fix code let the
+    // failure abort the WHOLE pass — the 12C-1-3 mounted settle crashed
+    // exactly there, leaving live unreadable extents behind. Flatten any
+    // over-depth chains BEFORE the scan (the recovery path), and keep the
+    // Stage-5 end sweep for the deepenings this pass itself introduces.
+    let pre_rebased =
+        store.rebase_overdepth_extents(&crate::store::transaction::CrashHooks::none())?;
+    if pre_rebased > 0 {
+        crate::perf::trace::span!(
+            "optimizer.optimize_pass",
+            op = "pre_rebase",
+            rebased = pre_rebased
+        );
+    }
     let mut stats = BackgroundStats::default();
+    stats.rewritten = stats.rewritten.saturating_add(pre_rebased);
     let inos = store.all_inodes()?;
     let start_idx = cursor.as_ref().map(|c| c.ino_index).unwrap_or(0);
     let mut resume_offset = cursor.as_ref().map(|c| c.offset).unwrap_or(0);
@@ -313,14 +332,14 @@ pub fn optimize_pass(
         if let Some(c) = cursor {
             *c = PassCursor::default();
         }
-        // Phase 12C-1-2: a COMPLETED pass re-searched every extent, so
-        // every pressure-deferred candidate has been re-examined: the
-        // pending optimization debt is paid. This is the "background
-        // pays the deferred density debt" step — the operator's debt
-        // witness returns to zero here (explicitly non-persistent; a
-        // process restart merely means the next pass rediscovers
-        // candidates, per the 12C-1-2 brief's decision).
-        store.reset_deferred_debt();
+        // Phase 12C-1-2/12C-1-3: a COMPLETED pass re-searched every
+        // extent that existed at its scan frontier, so the debt generation
+        // snapshot at pass start is paid. Debt created DURING the pass
+        // survives (the cut model — `complete_debt_generation` subtracts
+        // only the snapshot; never an unconditional reset). Explicitly
+        // non-persistent; a process restart merely means the next pass
+        // rediscovers candidates, per the 12C-1-2 brief's decision.
+        store.complete_debt_generation();
     }
     // ---------------------------------------------------------------------
     // Stage 5: Phase-10E convergence sweep.

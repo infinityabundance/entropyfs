@@ -199,7 +199,7 @@ impl WorkerBudget {
         self.cv.notify_all();
     }
 
-    /// Phase-11D oracle: the budget's cumulative counters.
+    /// Phase-11D oracle: the pool's cumulative counters.
     pub fn snapshot(&self) -> WorkerOracleSnapshot {
         let st = self.state.lock().expect("worker budget poisoned");
         WorkerOracleSnapshot {
@@ -692,10 +692,22 @@ struct PoolShared {
     capacity: usize,
     /// Worker exit flag (drain-then-exit when the active ring empties).
     shutdown: std::sync::atomic::AtomicBool,
-    /// Wakes parked workers (new task) and backpressure waiters (space).
+    /// Wakes PARKED WORKERS (a new task arrived). Backpressure waiters
+    /// use `backpressure_cv`, NOT this condvar — sharing one condvar
+    /// across two different wait mutexes (`queues` for workers,
+    /// `backpressure` for submitters) was the Phase-12C-1-3 mounted
+    /// court's deadlock root (see the submit/backpressure comments).
     wake: Condvar,
-    /// The backpressure condvar's associated mutex (the wait lock).
+    /// The backpressure wait lock: the submitter holds it from its
+    /// in-flight condition check through its condvar wait, and the
+    /// worker completion path notifies UNDER it — the classic condvar
+    /// discipline that makes a lost wakeup impossible (a notify cannot
+    /// slip between a submitter's check and its sleep while the notifier
+    /// needs the same lock).
     backpressure: Mutex<()>,
+    /// The backpressure waiters' condvar (paired with `backpressure`;
+    /// notified on EVERY in-flight decrement — see the completion path).
+    backpressure_cv: Condvar,
     /// Fairness witness: max consecutive picks of one request by one worker.
     max_consecutive: AtomicUsize,
     /// Monotonic request id source.
@@ -713,6 +725,7 @@ impl PoolShared {
             shutdown: std::sync::atomic::AtomicBool::new(false),
             wake: Condvar::new(),
             backpressure: Mutex::new(()),
+            backpressure_cv: Condvar::new(),
             max_consecutive: AtomicUsize::new(0),
             next_request_id: AtomicU64::new(1),
         }
@@ -734,6 +747,20 @@ impl PoolShared {
     fn submit(&self, request_id: u64, tasks: Vec<WorkerTask>) -> PoolSubmit {
         let total = tasks.len();
         assert!(total > 0, "pool submit with no tasks");
+        // Phase-12C-1-3 (mounted-court-found): the backpressure wait uses
+        // its OWN condvar (`backpressure_cv`) under its OWN wait lock
+        // (`backpressure`). The pre-fix code waited on the shared `wake`
+        // condvar: (a) the worker-park notifies and the submit notifies
+        // were the only wakes, and the worker completion notified ONLY at
+        // the full drain (`fetch_sub == 1`), so under >capacity
+        // concurrency (16 FUSE writers x 16 chunks vs capacity 128) fast
+        // re-submitters re-took the capacity before the pool ever reached
+        // zero and the blocked waiters starved forever; and (b) the
+        // notify fired without holding the wait lock, so a notify landing
+        // between a submitter's condition check and its sleep was lost
+        // (that submitter then slept through the empty pool forever). The
+        // completion path now notifies `backpressure_cv` on EVERY
+        // decrement, holding the wait lock, so no waiter is ever skipped.
         let mut b = self
             .backpressure
             .lock()
@@ -741,14 +768,35 @@ impl PoolShared {
         while self.in_flight.load(Ordering::Acquire) != 0
             && self.in_flight.load(Ordering::Acquire).saturating_add(total) > self.capacity
         {
-            b = self.wake.wait(b).expect("pool backpressure poisoned");
+            b = self
+                .backpressure_cv
+                .wait(b)
+                .expect("pool backpressure poisoned");
         }
+        // ADMISSION IS ATOMIC WITH THE CHECK: the in-flight accounting
+        // happens under the SAME wait lock as the condition, so the bound
+        // can never be overshot by concurrent submitters. The pre-fix code
+        // dropped the lock before `fetch_add`, leaving a check-then-act
+        // window — the pool's `runtime` mutex (held across the whole old
+        // submit) happened to serialize admissions and mask the race; once
+        // the runtime lock stopped guarding the wait (the deadlock fix
+        // above), the probe measured peak in_flight 160 > capacity 128.
+        // Lock order stays acyclic: this lock drops BEFORE the `queues`
+        // lock below, and the worker completion takes `queues` and drops
+        // it BEFORE taking this lock — never nested, never inverted.
+        self.in_flight.fetch_add(total, Ordering::AcqRel);
+        self.peak_in_flight
+            .fetch_max(self.in_flight.load(Ordering::Relaxed), Ordering::Relaxed);
         drop(b);
         let state = Arc::new(RequestState::new(request_id, total));
         let entry = RequestEntry {
             pending: tasks.into(),
             state: Arc::clone(&state),
         };
+        // The request is in_flight-counted but not yet pickable: accurate
+        // (it IS submitted-but-unfinished) and safe (tasks cannot complete
+        // before they are in the ring, so `done == total` can never race
+        // the map insert).
         let mut q = self.queues.lock().expect("pool queues poisoned");
         assert!(
             !q.requests.contains_key(&request_id),
@@ -756,9 +804,6 @@ impl PoolShared {
         );
         q.requests.insert(request_id, entry);
         q.active.push(request_id);
-        self.in_flight.fetch_add(total, Ordering::AcqRel);
-        self.peak_in_flight
-            .fetch_max(self.in_flight.load(Ordering::Relaxed), Ordering::Relaxed);
         drop(q);
         self.wake.notify_all();
         PoolSubmit { state }
@@ -786,6 +831,13 @@ struct PoolRuntime {
 }
 
 impl PoolRuntime {
+    /// The shared state (the submit path clones this Arc under a brief
+    /// runtime lock; the backpressure wait never holds the runtime
+    /// mutex — see `SearchPool::submit`).
+    fn shared(&self) -> &Arc<PoolShared> {
+        &self.shared
+    }
+
     /// Set the shutdown flag, wake everyone, and join the workers. The
     /// workers drain pending tasks before exiting (the probe always calls
     /// disable after its requests joined, so the drain is empty).
@@ -879,9 +931,35 @@ impl SearchPool {
     /// The pool's `submit` is store-internal (the task types are
     /// `pub(crate)`); external callers use the store API.
     pub(crate) fn submit(&self, request_id: u64, tasks: Vec<WorkerTask>) -> PoolSubmit {
-        let rt = self.runtime.lock().expect("pool runtime poisoned");
-        let rt = rt.as_ref().expect("pool must be enabled before submit");
-        rt.shared.submit(request_id, tasks)
+        // Phase-12C-1-3 (mounted-court-found): clone the shared state
+        // under a SHORT runtime lock and submit against the Arc. The
+        // pre-fix code held the runtime guard across the whole submit —
+        // including the backpressure wait — while the worker tasks' own
+        // `store.pressure_engaged()` calls go through `POOL.pressure()`,
+        // which takes the SAME runtime lock. Once a submitter blocked in
+        // the wait (more concurrent submitters than capacity admits),
+        // every worker's pressure call blocked on the held guard, tasks
+        // never completed, `in_flight` never dropped, and the waiters
+        // never woke: the 12C-1-3 engagement probe's deadlock (16 FUSE
+        // writers x 16 chunks vs capacity 128). The runtime lock now
+        // guards only the state swap, never a blocking wait.
+        //
+        // BOUNDARY: a submit that cloned the shared state just before
+        // `disable`/`enable` swaps it completes against the OLD instance
+        // (its workers drain the old ring before exiting, so the submit
+        // still joins). The daemon never reconfigures the pool mid-
+        // request (enable/disable are mount-time; the probe serializes
+        // them under POOL_LOCK), so a submit arriving AFTER the old
+        // workers drained is unreachable in the current codebase.
+        let shared = {
+            let rt = self.runtime.lock().expect("pool runtime poisoned");
+            Arc::clone(
+                rt.as_ref()
+                    .expect("pool must be enabled before submit")
+                    .shared(),
+            )
+        };
+        shared.submit(request_id, tasks)
     }
 
     /// The probe's fairness diagnostics.
@@ -984,11 +1062,24 @@ fn pool_worker_main(shared: Arc<PoolShared>, worker_index: usize) {
             q.requests.remove(&state.id);
             drop(q);
         }
-        // Backpressure accounting: one task left the in-flight set. If this
-        // freed the last slot, wake a blocked submitter.
-        if shared.in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
-            shared.wake.notify_all();
-        }
+        // Backpressure accounting: one task left the in-flight set. Wake
+        // every blocked submitter on EVERY decrement, holding the wait
+        // lock (the lost-wakeup-proof discipline: a submitter holds
+        // `backpressure` from its check through its wait, so this notify
+        // cannot slip between them). Notify-per-decrement (not only at
+        // the full drain) is the starvation fix: with capacity re-taken
+        // by fast re-submitters the pool may never reach zero, and the
+        // pre-fix notify-at-zero let blocked waiters sleep forever — the
+        // 12C-1-3 mounted court's deadlock (16 writers x 16 chunks vs
+        // capacity 128). Uncontended (no waiters) this is a cheap atomic;
+        // contended it is the congestion path, where the syscall is the
+        // price of admission fairness.
+        shared.in_flight.fetch_sub(1, Ordering::AcqRel);
+        let _g = shared
+            .backpressure
+            .lock()
+            .expect("pool backpressure poisoned");
+        shared.backpressure_cv.notify_all();
     }
 }
 
@@ -1173,6 +1264,91 @@ pub mod tests {
     }
 
     #[test]
+    fn pool_admits_all_waiters_under_capacity_saturation() {
+        // Phase-12C-1-3 regression pin (mounted-court-found): with more
+        // concurrent submitters than the backpressure capacity admits, a
+        // blocked submitter must never starve. The pre-fix design notified
+        // backpressure waiters only at the FULL drain (fetch_sub == 1) and
+        // without holding the wait lock, so under saturation fast
+        // re-submitters re-took the freed capacity before the pool ever
+        // reached zero (waiters starved forever) and a notify landing
+        // between a submitter's check and its sleep was lost (that
+        // submitter slept through an empty pool forever). The 12C-1-3
+        // engagement probe reproduced it live: 16 FUSE writers x 16 chunks
+        // (1 MiB writes) vs pool-16 capacity 128 — the mount hung with all
+        // session threads blocked and the pool ring empty. This test
+        // saturates the pool (8 submitters x 8 tasks vs capacity 32, then
+        // repeated rounds) and asserts every submitter completes within a
+        // deadline: a regression fails loudly instead of hanging the suite.
+        let _guard = POOL_LOCK.lock().expect("pool test lock poisoned");
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(
+            crate::store::Store::create(dir.path(), &Default::default(), [0x33; 16]).unwrap(),
+        );
+        POOL.enable(4, 8); // capacity 32
+        POOL.bind(&store);
+        let objects = Arc::new(HashMap::new());
+        let descriptors = Arc::new(HashMap::new());
+        let limits = *store.limits();
+
+        let n_submitters = 8usize;
+        let tasks_per = 8usize;
+        let rounds = 4usize;
+        let done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _s in 0..n_submitters {
+            let store = Arc::clone(&store);
+            let objects = Arc::clone(&objects);
+            let descriptors = Arc::clone(&descriptors);
+            let done = Arc::clone(&done);
+            handles.push(std::thread::spawn(move || {
+                for _r in 0..rounds {
+                    let rid = POOL.alloc_request_id();
+                    let tasks = (0..tasks_per)
+                        .map(|i| WorkerTask::DecodeExtent {
+                            ordinal: i,
+                            store: Arc::clone(&store),
+                            start: 0,
+                            desc: crate::core::representation::Representation::Zero { len: 16 },
+                            objects: Arc::clone(&objects),
+                            descriptors: Arc::clone(&descriptors),
+                            limits,
+                        })
+                        .collect();
+                    let (results, _) = POOL.submit(rid, tasks).join();
+                    assert_eq!(results.len(), tasks_per);
+                    for (i, wr) in results.iter().enumerate() {
+                        assert_eq!(wr.ordinal, i, "ordinal order preserved");
+                    }
+                }
+                done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }));
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while done.load(std::sync::atomic::Ordering::Relaxed) < n_submitters {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "pool starved a submitter under capacity saturation ({} of {} done)",
+                done.load(std::sync::atomic::Ordering::Relaxed),
+                n_submitters
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let d = POOL.diagnostics();
+        assert!(
+            d.peak_in_flight <= d.capacity,
+            "backpressure bound held (peak {} <= capacity {})",
+            d.peak_in_flight,
+            d.capacity
+        );
+        POOL.disable();
+        assert!(!POOL.enabled());
+    }
+
+    #[test]
     fn pool_pressure_reflects_in_flight_work() {
         // Phase 12C-1-2: the pool's pressure scalar (in_flight/capacity)
         // is the foreground deferral gate's live signal — it must rise
@@ -1202,11 +1378,14 @@ pub mod tests {
         assert_eq!(store.foreground_pressure(), 1.0);
         store.set_pressure_override(None);
 
-        // 16 medium decodes (64 KiB RAW) against 2 workers: the drain
-        // takes long enough that in-flight work is observable. The read
-        // is a bounded spin (a slow CI machine cannot miss a >0 window
-        // entirely) — an observation, never a timing gate.
-        let payload = vec![0x5au8; 65536];
+        // 16 medium decodes (1 MiB RAW each) against 2 workers: the drain
+        // takes milliseconds (not the microseconds of the original 64 KiB
+        // payload — the 12C-1-3 pool fixes made the drain fast enough that
+        // the bounded observation spin could miss the in-flight window
+        // under full-suite CPU contention), so the pressure rise is
+        // observable. The read is a bounded spin (an observation, never a
+        // timing gate).
+        let payload = vec![0x5au8; 1024 * 1024];
         let cid = crate::core::extent::ChunkId::of(&payload);
         let mut objects = HashMap::new();
         objects.insert(cid, payload);
@@ -1221,7 +1400,7 @@ pub mod tests {
                 start: 0,
                 desc: crate::core::representation::Representation::Raw {
                     obj: cid,
-                    len: 65536,
+                    len: 1024 * 1024,
                 },
                 objects: Arc::clone(&objects),
                 descriptors: Arc::clone(&descriptors),

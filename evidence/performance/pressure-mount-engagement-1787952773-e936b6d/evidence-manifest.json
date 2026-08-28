@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "court_schema_version": "2",
+  "oracle": "phase-12c1-3-pressure-mount-engagement",
+  "entropyfs_version": "0.7.17",
+  "git_revision": "e936b6d6053982560417368120bf3fd76c5ba354",
+  "format_major": 1,
+  "format_minor": 0,
+  "compat_bits": "0x0000000000000000",
+  "ro_compat_bits": "0x0000000000000000",
+  "incompat_bits": "0x0000000000000000",
+  "entropy_universe_versions": [
+    "uniform-xof-v1"
+  ],
+  "representation_encoder_policy_version": "none",
+  "io_backend": "sync",
+  "worker_scheduler": "pool-16 (the mount default) and pool-8 (the pool lane)",
+  "kernel": "7.2.0-1-cachyos",
+  "architecture": "x86_64",
+  "distribution": "cachyos",
+  "distribution_version": "unknown",
+  "container_image_digest": "",
+  "host": "AMD Ryzen 7 9800X3D 8-Core Processor",
+  "compiler_version": "1.98.0",
+  "rustc_version": "1.98.0",
+  "timestamp_unix": 1787957927,
+  "notes": "The mounted pressure-ENGAGEMENT court: Full/Focused/Pressure x FUSE writers 1/4/8/16/32 at pool-16 on build-artifacts, pool-8 at writers 16, and the ci-cache/container-layers/generated-assets/scientific-outputs families at writers 16 pool-16. The write phase is 2 s of sustained DISTINCT 1 MiB structured writes per (writer, round) (the engagement floor verified by the phase probe: 1.0-1.5 s does not engage, 2.0 s+ does). The pressure state machine's causal witnesses (enter/leave events, time pressured, rANS skips, deferred bytes, peak debt, debt-cap engagements) come from the daemon's --stats-file dump. The settle (optimize + gc) is bounded by a 150 s per-cell budget (the background search is ~8-50 ms/extent single-threaded; the 16/32-writer cells' 17-25k extents exceed the budget, so their settled rows are PARTIAL-settlement states — the deterministic convergence authority is the 12C-1-2 direct-engine court, sealed pressure-deferral-probe-*/). Court-found defects fixed in this release: the pool runtime-mutex deadlock, the backpressure starvation/lost-wakeup, the admission TOCTOU, the overlay-only-inode base_chunk_at crash, and the over-depth chain repair ordering (see CHANGELOG v0.7.17 and docs/performance/adaptive-budget.md 12C-1-3)."
+}

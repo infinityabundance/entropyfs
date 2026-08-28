@@ -1154,7 +1154,7 @@ pub fn collect_engine_metrics(store: &Store) -> Result<EngineMetrics, EngineErro
         }
     };
     Ok(EngineMetrics {
-        schema_version: 1,
+        schema_version: 2,
         format: FormatInfo {
             format_major: root.format_major,
             format_minor: root.format_minor,
@@ -1196,17 +1196,16 @@ pub fn collect_engine_metrics(store: &Store) -> Result<EngineMetrics, EngineErro
         },
         pressure: PressureMetrics {
             pressured: store.pressure_state(),
+            samples: store.pressure_trace().samples,
+            enter_events: store.pressure_trace().enter_events,
+            leave_events: store.pressure_trace().leave_events,
+            pressured_time_ms: store.pressure_trace().pressured_time_ns / 1_000_000,
             rans_skips: store.focused_rans_skips(),
             deferred_extents: store.deferred_debt().0,
             deferred_logical_bytes: store.deferred_debt().1,
-            deferred_age_ms: {
-                let (_, _, since) = store.deferred_debt();
-                if since == 0 {
-                    0
-                } else {
-                    (crate::perf::wall_ns().saturating_sub(since)) / 1_000_000
-                }
-            },
+            deferred_age_ms: store.pressure_trace().deferred_age_ns / 1_000_000,
+            peak_deferred_bytes: store.pressure_trace().peak_deferred_bytes,
+            debt_cap_engagements: store.pressure_trace().debt_cap_engagements,
         },
         cache: CacheMetrics {
             model_cache_hits: store.model_cache_hits(),

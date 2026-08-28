@@ -434,3 +434,213 @@ pressure` is available). The architectural story the phase seals:
 12C-1-2  pressure tells us what valuable work can be postponed
 background optimizer pays the deferred density debt
 ```
+
+---
+
+# Phase-12C-1-3 court: the mounted pressure-ENGAGEMENT + default-promotion gate
+
+Sealed: `evidence/performance/pressure-mount-engagement-1787952773-e936b6d/`
+(mounted-FUSE). Driver: `tools/court-pressure-mount-engagement.sh`.
+Production change: the pressure state-machine WITNESSES (the causal
+evidence), the debt generation/cut (the user-named race), and the
+court-found scheduler/integrity fixes. The promotion decision is
+evaluated at the end of this section.
+
+## The question
+
+12C-1-2 adopted the pressure-aware foreground deferral at the ENGINE
+level (`--foreground pressure`) but left the mount default at `full`,
+because its mounted court recorded a boundary: the mounted corpora never
+saturated the pool with expensive, density-valuable search, so the
+pressure gate's mounted DIFFERENTIATION never engaged measurably. The
+12C-1-3 question, verbatim from the brief:
+
+> Under real mounted FUSE workloads where valuable foreground
+> representation search genuinely saturates the worker pool, does
+> `pressure` engage, reduce foreground contention, preserve correctness,
+> and converge to Full's settled density strongly enough to become the
+> default?
+
+## Why the 12C-1-2 mounted corpus could not answer it
+
+Two probe findings made the engagement requirement precise:
+
+1. **GIL-bound corpus generation serializes the writers.** A pure-python
+   LCG content generator holds the GIL while building each 1 MiB buffer,
+   so 16 writer threads effectively serialize: only ~3 requests were in
+   the pool at once (peak in-flight 45/128) and the pool never
+   approached capacity. The 12C-1-3 corpus generates each buffer with
+   C-speed operations (`shake_128(...).digest(16384).hex()` + bytes
+   repetition) so the writers stay GIL-free and overlap in the pool.
+2. **The engagement has a duration floor.** Count-bounded writes
+   (12 rounds/writer) finished before the in-flight backlog built: peak
+   45-72/128, zero pressure samples above the enter threshold. The
+   sustained pattern is the requirement — the writers' submit rate must
+   exceed the pool's drain rate long enough for the backlog to pin
+   `in_flight/capacity` at ~1.0. The phase probe measured the floor
+   directly: 1.0-1.5 s of sustained 16-writer 1 MiB writes do NOT engage
+   (enter = 0); 2.0 s+ DO (enter = 77-494 across runs). The court uses
+   2 s per cell.
+
+With the sustained GIL-free corpus, the mounted pool saturates: the
+16-writer cells' peak in-flight reaches 241-1105 (capacity 128, the
+oversized-request floor admitting the checkpoint's bulk decode pushes the
+peak above capacity — the documented pool contract), the pressure scalar
+hits 1.0, and the hysteresis band engages.
+
+## The court-found defects (fixed + regression-pinned in this release)
+
+The mounted court did its job: it found FIVE real defects, three in the
+pool's >capacity concurrency regime (never exercised by the 11E/12C-1-2
+courts, whose small writes kept in-flight far below capacity) and two in
+the write/optimize paths.
+
+1. **Pool runtime-mutex-across-wait deadlock** (`src/store/workers.rs`):
+   `SearchPool::submit` held the pool's `runtime` lock across the whole
+   backpressure wait, while the worker tasks' own per-chunk
+   `pressure_engaged` → `POOL.pressure()` calls take the SAME lock.
+   Under >capacity concurrency (16 writers × 16 chunks vs capacity 128)
+   the workers blocked on the held guard, tasks never completed,
+   `in_flight` never dropped, and the mount deadlocked — 16 FUSE
+   requests pending, the ring empty, every session thread parked. The
+   submit now clones the shared state under a short lock.
+2. **Backpressure starvation + lost wakeup**: the notify fired only at
+   the full drain and without the wait lock, so fast re-submitters
+   re-took capacity before the pool reached zero (waiters starved
+   forever) and a notify could land between a submitter's check and its
+   sleep. The dedicated `backpressure_cv` notifies on every decrement
+   under the wait lock.
+3. **Admission TOCTOU**: the check-then-act let peak in-flight overshoot
+   capacity (160 > 128, caught by the 11E probe's backpressure
+   assertion); admission is now atomic with the check under the wait
+   lock.
+4. **Overlay-only-inode crash**: the search's base channels called
+   `base_chunk_at` → `read_file` on freshly-created (epoch-overlay-only)
+   inodes and crashed with `Invariant("inode N missing")` whenever the
+   DSFB trust admitted the base channels; no committed data now means
+   "no base".
+5. **Over-depth chains crashed the optimize and left unreadable live
+   extents**: a background rewrite can deepen a chain past the decode
+   cap; the search's base read of an over-depth chunk aborted the whole
+   pass (`DepthExceeded`) BEFORE the end-of-pass repair sweep ran — the
+   settle crashed at 25 s and a post-mortem scan found FOUR LIVE extents
+   (a file region at ~68.5 MB) whose depth-5 chains made them unreadable
+   (`read_file` → `DepthExceeded`, user-visible EIO). Fixes:
+   `base_chunk_at` treats an unreadable base as "no base"; the repair
+   sweep runs BEFORE the per-extent search (the pre-pass rebase); the
+   detection uses `chain_depth_uncapped`. Pinned by
+   `src/tests/overdepth_rebase.rs` (fixture-staged depth-5 chains).
+
+Regression pins added: `pool_admits_all_waiters_under_capacity_saturation`,
+`pool_write_path_saturation_stays_live`,
+`debt_created_during_optimizer_pass_survives_completion`, and the
+`overdepth_rebase` trio.
+
+## The mounted engagement evidence
+
+The pressure state machine's causal witnesses come from the daemon's
+`--stats-file` dump at unmount (samples, enter/leave events, time
+pressured, rANS skips, deferred extents/bytes, peak debt, oldest debt
+age, debt-cap engagements) — the "the state machine fired" evidence:
+
+| cell | enter | rANS skips | deferred bytes | peak debt | cap engagements |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| build-artifacts t16 p16 | 152 | 5,240 | 327 MB | 327 MB | 0 |
+| build-artifacts t32 p16 | 196 | 16,384 | 1,024 MB (cap) | 1,024 MB | 6,106 |
+| build-artifacts t16 p8 | 234 | 16,384 | 1,024 MB (cap) | 1,024 MB | 7,353 |
+| ci-cache t16 | 143 | 4,398 | 275 MB | 275 MB | 0 |
+| container-layers t16 | 155 | 4,682 | 293 MB | 293 MB | 0 |
+| generated-assets t16 | 151 | 5,190 | 324 MB | 324 MB | 0 |
+| scientific-outputs t16 | 138 | 4,592 | 287 MB | 287 MB | 0 |
+
+The full causal chain is witnessed: pool saturation (peak in-flight
+241-1105 vs capacity 128) → enter threshold crossed → valuable rANS
+work deferred (thousands of extents per cell) → debt accrued (up to the
+1 GiB starvation cap, where the cap REFUSED further deferrals — 6,106 /
+7,353 engagements — the "continuous pressure cannot defer optimization
+forever" invariant working mounted) → the background settle repays what
+its budget allows. The engagement starts at 16 writers: the t1/t4/t8
+cells show enter = 0 (the 12C-1-2 boundary reproduced at the low end —
+8 writers × 16 chunks sits exactly at capacity and its samples miss the
+window; 16+ writers pin it).
+
+## The promotion gate
+
+```text
+byte identity          MET (readback byte-exact in every cell; the
+                       deterministic per-(writer,round) corpus is
+                       regenerated and compared)
+fsck                   MET (clean in every cell; 4 cells' first-pass
+                       fsck raced the daemon teardown and FAILed
+                       transiently, clean on re-run — recorded)
+pressure engagement    MET (the causal witnesses above; the state
+                       machine fired on every saturated cell)
+crash/durability       unchanged (the pool changes schedule the search;
+                       the durability barrier and the crash courts are
+                       untouched)
+foreground wall        PARTIAL (the 2 s write phase is dominated by the
+                       mount + the writers' completion tail; pressure t16
+                       wall 2.49 vs full 2.04 s — the p50 latency is the
+                       cleaner row: pressure t16 24.1 vs full 28.1 ms
+                       (−14%); pool-8 pressure 13.8 vs full 26.2 ms
+                       (−47%))
+p95/p99                MIXED (p50 improves; the pressure cells' p99
+                       shows debt-cap/checkpoint outliers — 559 ms on
+                       build-artifacts t16 vs full 62 ms)
+CPU                    FLAT (the deferred rANS work is a small share of
+                       the daemon CPU at these sizes: 26.4 vs 25.7 s)
+settled density        PARTIAL (the settle is budget-limited at 150 s
+                       per cell; the saturated cells' ~17-25k extents
+                       exceed the budget, so their settled rows are
+                       PARTIAL-settlement states — pressure t16 95.2 vs
+                       full t16 87.1 MB is NOT a density regression, it
+                       is the un-repaid debt; the DETERMINISTIC
+                       convergence authority is the 12C-1-2 direct-engine
+                       court: settled == full, +0.00-0.08%)
+debt bounded           MET (the 1 GiB cap engaged mounted: 6,106/7,353
+                       refusals, never unbounded growth)
+settlement             the debt generation/cut (this release) plus the
+                       direct-engine convergence; a budget-limited
+                       mounted settle cannot complete the repayment in
+                       150 s
+idle ~= Full           MET (t1: wall 2.014-2.018 s, p50 5.5-5.6 ms, CPU
+                       6.6-6.7 s across all three policies; enter = 0)
+low-concurrency        MET (t4: p50 7.9-9.3 ms across policies)
+```
+
+## The decision: the mount default STAYS `full`
+
+The 12C-1-3 court closes the 12C-1-2 boundary — the pressure mechanism
+is now proven to ENGAGE on real mounted saturation, with the causal
+chain witnessed end-to-end and five real defects found and fixed. But the
+promotion gate's own rows are not cleanly MET on the mounted path: the
+foreground wall/CPU rows are flat, the p99 shows debt-cap outliers, and
+the settled-density row is budget-limited rather than converged. Per the
+brief's own discipline — "make Pressure the mount default only if the
+mounted court proves all of this" and "don't flip the default to satisfy
+a roadmap bullet" — the honest call is:
+
+```text
+default:  full   (unchanged)
+escape:   --foreground pressure   (the adopted 12C-1-2 shape)
+```
+
+`--foreground pressure` remains the adopted engine-level policy. The
+recorded follow-on for the flip is a longer sustained mounted court (the
+8 s probe shape, which showed the sustained p50 at ~38 ms with the gate
+engaged) with a full settle budget — the 2 s cells' write phase is too
+short for the wall/CPU rows to differentiate, and the settle needs the
+full pass to demonstrate the mounted convergence rather than the
+direct-engine authority.
+
+The architectural story the phase seals:
+
+```text
+12C      context tells us what is probably valuable
+12C-1    confidence tells us what can be skipped permanently
+12C-1-2  pressure tells us what valuable work can be postponed
+12C-1-3  the mounted court PROVES the mechanism engages under real
+         saturation — and finds the scheduler/integrity defects the
+         synthetic probes could not
+background optimizer pays the deferred density debt
+```

@@ -482,6 +482,12 @@ pub fn encode_guided(
         let (_, debt_bytes, _) = store.deferred_debt();
         let debt_ok = debt_bytes < fg.pressure_max_deferred_bytes;
         let pressure_defer = pressured && debt_ok;
+        if !debt_ok && pressured {
+            // The starvation cap refused a deferral (the "continuous
+            // pressure cannot defer optimization forever" engagement
+            // witness — the foreground pays the search again).
+            store.record_debt_cap_engagement();
+        }
         if class_defer || pressure_defer {
             store.record_focused_rans_skip();
             if pressure_defer {

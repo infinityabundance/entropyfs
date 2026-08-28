@@ -103,12 +103,30 @@ type AccountingMetrics struct {
 	BlobCount             uint64
 }
 
+// PressureMetrics is the Phase 12C-1-2/3 pressure-deferral slice of
+// Metrics: the optimization-debt witness (advisory; the background
+// optimizer pays the debt).
+type PressureMetrics struct {
+	Pressured            bool
+	Samples              uint64
+	EnterEvents          uint64
+	LeaveEvents          uint64
+	PressuredTimeMs      uint64
+	RansSkips            uint64
+	DeferredExtents      uint64
+	DeferredLogicalBytes uint64
+	DeferredAgeMs        uint64
+	PeakDeferredBytes    uint64
+	DebtCapEngagements   uint64
+}
+
 // Metrics is the versioned operational metrics snapshot. Raw carries the
 // complete native JSON DTO (the same schema as `entropyfs metrics --json`);
 // the typed fields are the stable, documented subset.
 type Metrics struct {
 	SchemaVersion uint32
 	Accounting    AccountingMetrics
+	Pressure      PressureMetrics
 	Raw           []byte
 }
 
